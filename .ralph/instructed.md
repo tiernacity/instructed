@@ -28,8 +28,8 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 12. Implement Projections (read model builders from event streams)
 - [x] 13. Implement Application module (top-level supervisor, wiring)
 - [x] 14. Implement Middleware pipeline for command processing
-- [ ] 15. Write comprehensive tests for all core modules
-- [ ] 16. Ensure zero warnings, all checks pass
+- [x] 15. Write comprehensive tests for all core modules (39 tests passing)
+- [x] 16. Ensure zero warnings, all checks pass
 
 ### Phase 3: PostgreSQL Adapter (instructed_postgres)
 - [ ] 17. Initialize instructed_postgres project
