@@ -16,7 +16,7 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 2. Research Commanded: all modules, features, architecture, tests, docs, guides
 
 ### Phase 2: Core Library (instructed)
-- [ ] 3. Initialize instructed project with proper Gleam package structure
+- [x] 3. Initialize instructed project with proper Gleam package structure
 - [ ] 4. Define core types: Command, Event, Aggregate, Error types (strongly-typed)
 - [ ] 5. Implement Aggregate behaviour/protocol with type-safe command handling and event application
 - [ ] 6. Implement Command Router with type-safe command dispatch
