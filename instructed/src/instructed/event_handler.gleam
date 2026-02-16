@@ -28,16 +28,14 @@
 import gleam/erlang/process.{type Subject}
 import gleam/otp/actor
 import instructed/event.{type RecordedEvent}
-import instructed/event_store.{type EventStore, type Subscription, Origin}
+import instructed/event_store.{type EventStore, Origin}
 
 /// Configuration for an event handler.
 pub type EventHandlerConfig(event, handler_state) {
   EventHandlerConfig(
     /// Unique name for this event handler
     name: String,
-    /// Function to handle each event. Receives the event data,
-    /// the recorded event metadata, and the current handler state.
-    /// Returns Ok(new_state) or Error(reason).
+    /// Function to handle each event.
     handle_event: fn(event, RecordedEvent(event), handler_state) ->
       Result(handler_state, String),
     /// Initial state for the handler
@@ -83,7 +81,6 @@ type HandlerActorState(event, handler_state) {
   HandlerActorState(
     config: EventHandlerConfig(event, handler_state),
     handler_state: handler_state,
-    subscription: Subscription,
   )
 }
 
@@ -97,72 +94,38 @@ pub fn start(
   config: EventHandlerConfig(event, handler_state),
   event_store: EventStore(event),
 ) -> Result(Subject(HandlerMessage(event)), String) {
-  // Create a persistent subscription
-  let subscribe_result = case config.stream_id {
-    AllStreams ->
-      event_store.subscribe_persistent(
-        "$all",
-        config.name,
-        Origin,
-        fn(_event) { Nil },
-      )
-    SpecificStream(stream_id) ->
-      event_store.subscribe_persistent(
-        stream_id,
-        config.name,
-        Origin,
-        fn(_event) { Nil },
-      )
-  }
+  let actor_state =
+    HandlerActorState(
+      config: config,
+      handler_state: config.initial_state,
+    )
 
-  case subscribe_result {
-    Error(_) -> Error("Failed to create subscription")
-    Ok(subscription) -> {
-      let actor_state =
-        HandlerActorState(
-          config: config,
-          handler_state: config.initial_state,
-          subscription: subscription,
-        )
+  case
+    actor.new(actor_state)
+    |> actor.on_message(handle_actor_message)
+    |> actor.start
+  {
+    Ok(started) -> {
+      let subject = started.data
 
-      // Start the actor
-      case
-        actor.new(actor_state)
-        |> actor.on_message(handle_actor_message)
-        |> actor.start
-      {
-        Ok(started) -> {
-          let subject = started.data
-
-          // Now set up the real subscription handler that sends to the actor
-          let handler = fn(event: RecordedEvent(event)) {
-            process.send(subject, HandleEvent(event))
-          }
-
-          // Unsubscribe the placeholder and create real subscription
-          let _ = event_store.unsubscribe(subscription)
-          let _ = case config.stream_id {
-            AllStreams ->
-              event_store.subscribe_persistent(
-                "$all",
-                config.name <> "_active",
-                Origin,
-                handler,
-              )
-            SpecificStream(stream_id) ->
-              event_store.subscribe_persistent(
-                stream_id,
-                config.name <> "_active",
-                Origin,
-                handler,
-              )
-          }
-
-          Ok(subject)
-        }
-        Error(_) -> Error("Failed to start event handler actor")
+      let handler = fn(event: RecordedEvent(event)) {
+        process.send(subject, HandleEvent(event))
       }
+
+      let stream = case config.stream_id {
+        AllStreams -> "$all"
+        SpecificStream(s) -> s
+      }
+
+      // Delete existing subscription (for restarts)
+      let _ = event_store.delete_subscription(stream, config.name)
+
+      let _ =
+        event_store.subscribe_persistent(stream, config.name, Origin, handler)
+
+      Ok(subject)
     }
+    Error(_) -> Error("Failed to start event handler actor")
   }
 }
 
@@ -188,7 +151,6 @@ fn handle_actor_message(
           )
         }
         Error(_reason) -> {
-          // Log error and continue with existing state
           actor.continue(state)
         }
       }

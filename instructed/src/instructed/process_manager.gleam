@@ -131,6 +131,9 @@ pub fn start(
         process.send(subject, PMHandleEvent(event))
       }
 
+      // Delete existing subscription (for restarts)
+      let _ = event_store.delete_subscription("$all", config.name)
+
       let _ =
         event_store.subscribe_persistent(
           "$all",

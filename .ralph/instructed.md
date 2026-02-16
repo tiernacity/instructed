@@ -40,9 +40,9 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 22. Ensure zero warnings, all checks pass
 
 ### Phase 4: Documentation & Guides
-- [ ] 23. Write library documentation (module docs, README)
-- [ ] 24. Write guides equivalent to Commanded (Getting Started, Aggregates, Commands, Events, Process Managers, Projections)
-- [ ] 25. Write examples in documentation
+- [x] 23. Write library documentation (module docs, README)
+- [x] 24. Write guides equivalent to Commanded (Getting Started, Aggregates, Commands, Events, Process Managers, Projections, Middleware, Supervision, Testing, Serialization, InMemoryEventStore)
+- [x] 25. Write examples in documentation
 
 ### Phase 5: Example Todo App
 - [ ] 26. Initialize todo app project, choose HTTP/CLI packages

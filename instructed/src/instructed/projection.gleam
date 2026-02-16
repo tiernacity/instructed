@@ -102,6 +102,9 @@ pub fn start(
         process.send(subject, ProjectionHandleEvent(event))
       }
 
+      // Delete any existing subscription first (for restarts)
+      let _ = event_store.delete_subscription("$all", config.name)
+
       let _ =
         event_store.subscribe_persistent(
           "$all",
