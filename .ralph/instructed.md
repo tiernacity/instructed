@@ -21,7 +21,7 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 5. Implement Aggregate behaviour/protocol with type-safe command handling and event application
 - [ ] 6. Implement Command Router with type-safe command dispatch
 - [ ] 7. Implement Command Validation middleware
-- [ ] 8. Implement Event Store behaviour (trait) and InMemoryEventStore
+- [x] 8. Implement Event Store behaviour (trait) and InMemoryEventStore
 - [ ] 9. Implement Aggregate Server (OTP GenServer/process for aggregate lifecycle)
 - [ ] 10. Implement Event Handler behaviour and subscription system
 - [ ] 11. Implement Process Manager behaviour (sagas/long-running processes)
