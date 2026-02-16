@@ -55,13 +55,16 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 33. Verify CLI is fully functional end-to-end
 
 ## Verification
-- Instructed: 39 tests passing, 0 warnings
-- Instructed Postgres: 10 tests passing, 0 warnings
-- Example Todo CLI: 23 integration tests passing
-- All builds have 0 warnings, 0 errors
-- CLI fully functional: add, complete, reopen, delete, edit, all list views
-- Command validation working: can't complete completed, can't delete deleted, etc.
-- Projections working: all_todos, active_todos, completed_todos, overdue_todos, by_priority, by_due_date
+- Instructed: 39 unit tests passing, 0 warnings, 0 errors
+- Instructed Postgres: 10 integration tests passing, 0 warnings, 0 errors
+- Example Todo CLI: 23 end-to-end tests passing
+- All 3 projects build with 0 warnings, 0 errors, no deprecations
+- CLI fully functional: add, complete, reopen, delete, edit description/priority/due-date
+- 6 projections working: all_todos, active_todos, completed_todos, overdue_todos, by_priority, by_due_date
+- Command validation: can't complete completed, can't reopen active, can't delete deleted, can't complete deleted
+- PostgreSQL persistence verified end-to-end
+- 11 guides equivalent to Commanded documentation
+- README with full documentation
 
 ## Notes
 ### Gleam Ecosystem Research (Task 1)
