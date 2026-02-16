@@ -19,8 +19,8 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 3. Initialize instructed project with proper Gleam package structure
 - [x] 4. Define core types: Command, Event, Aggregate, Error types (strongly-typed)
 - [x] 5. Implement Aggregate behaviour/protocol with type-safe command handling and event application
-- [ ] 6. Implement Command Router with type-safe command dispatch
-- [ ] 7. Implement Command Validation middleware
+- [x] 6. Implement Command Router with type-safe command dispatch
+- [x] 7. Implement Command Validation middleware
 - [x] 8. Implement Event Store behaviour (trait) and InMemoryEventStore
 - [ ] 9. Implement Aggregate Server (OTP GenServer/process for aggregate lifecycle)
 - [ ] 10. Implement Event Handler behaviour and subscription system
