@@ -1,0 +1,29 @@
+services:
+  dev:
+    build: .
+    image: instructed-dev:latest
+    stdin_open: true
+    tty: true
+
+    volumes:
+      - .:/workspace
+      - ~/.pi:/home/dev/.pi
+      - pi-bin:/home/dev/.pi/agent/bin
+      - ~/.ssh/known_hosts:/home/dev/.ssh/known_hosts:ro
+      - ~/.gitconfig:/home/dev/.gitconfig:ro
+      - ~/.claude:/home/dev/.claude
+      - ~/.claude-container.json:/home/dev/.claude.json
+      - /run/host-services/ssh-auth.sock:/run/ssh-agent.sock
+
+    environment:
+      - SSH_AUTH_SOCK=/run/ssh-agent.sock
+
+    group_add:
+      - root
+    working_dir: /workspace
+
+    cap_drop:
+      - ALL
+
+volumes:
+  pi-bin:
