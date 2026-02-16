@@ -32,12 +32,12 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 16. Ensure zero warnings, all checks pass
 
 ### Phase 3: PostgreSQL Adapter (instructed_postgres)
-- [ ] 17. Initialize instructed_postgres project
-- [ ] 18. Implement PostgreSQL EventStore (schema, read/write streams)
-- [ ] 19. Implement PostgreSQL subscription support
-- [ ] 20. Implement snapshot storage in PostgreSQL
-- [ ] 21. Write tests for postgres adapter
-- [ ] 22. Ensure zero warnings, all checks pass
+- [x] 17. Initialize instructed_postgres project
+- [x] 18. Implement PostgreSQL EventStore (schema, read/write streams)
+- [x] 19. Implement PostgreSQL subscription support
+- [x] 20. Implement snapshot storage in PostgreSQL
+- [x] 21. Write tests for postgres adapter (10 tests passing)
+- [x] 22. Ensure zero warnings, all checks pass
 
 ### Phase 4: Documentation & Guides
 - [ ] 23. Write library documentation (module docs, README)
