@@ -6,7 +6,7 @@ PASS=0
 FAIL=0
 TOTAL=0
 export PATH="$HOME:$PATH"
-cd /workspace/example_todo
+cd /workspace/example-todo
 
 # Helper function
 run_test() {

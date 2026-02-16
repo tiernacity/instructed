@@ -51,11 +51,17 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 29. Implement projections: active todos, overdue, completed, by priority, by due date
 - [x] 30. Implement CLI client with all commands (add, remove, edit, complete, list views)
 - [x] 31. Implement command validation (e.g., complete already-completed todo)
-- [ ] 32. Write CLI test cases
-- [ ] 33. Verify CLI is fully functional end-to-end
+- [x] 32. Write CLI test cases (23 tests all passing)
+- [x] 33. Verify CLI is fully functional end-to-end
 
 ## Verification
-(Updated as tasks complete)
+- Instructed: 39 tests passing, 0 warnings
+- Instructed Postgres: 10 tests passing, 0 warnings
+- Example Todo CLI: 23 integration tests passing
+- All builds have 0 warnings, 0 errors
+- CLI fully functional: add, complete, reopen, delete, edit, all list views
+- Command validation working: can't complete completed, can't delete deleted, etc.
+- Projections working: all_todos, active_todos, completed_todos, overdue_todos, by_priority, by_due_date
 
 ## Notes
 ### Gleam Ecosystem Research (Task 1)
