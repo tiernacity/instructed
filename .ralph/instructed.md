@@ -45,12 +45,12 @@ Port the Commanded CQRS/ES framework from Elixir to Gleam, creating an idiomatic
 - [x] 25. Write examples in documentation
 
 ### Phase 5: Example Todo App
-- [ ] 26. Initialize todo app project, choose HTTP/CLI packages
-- [ ] 27. Define todo domain: commands, events, aggregate
-- [ ] 28. Implement todo server with instructed + postgres store
-- [ ] 29. Implement projections: active todos, overdue, completed, by priority, by due date
-- [ ] 30. Implement CLI client with all commands (add, remove, edit, complete, list views)
-- [ ] 31. Implement command validation (e.g., complete already-completed todo)
+- [x] 26. Initialize todo app project, choose HTTP/CLI packages
+- [x] 27. Define todo domain: commands, events, aggregate
+- [x] 28. Implement todo server with instructed + postgres store
+- [x] 29. Implement projections: active todos, overdue, completed, by priority, by due date
+- [x] 30. Implement CLI client with all commands (add, remove, edit, complete, list views)
+- [x] 31. Implement command validation (e.g., complete already-completed todo)
 - [ ] 32. Write CLI test cases
 - [ ] 33. Verify CLI is fully functional end-to-end
 
