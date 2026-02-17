@@ -22,3 +22,21 @@ Further documentation can be found at <https://hexdocs.pm/example_todo>.
 gleam run   # Run the project
 gleam test  # Run the tests
 ```
+
+## Building a Binary
+
+Build a self-contained `todo` executable (requires Erlang and `rebar3`):
+
+```sh
+make build
+```
+
+This produces a `todo` escript binary (~1 MB) that can be run directly:
+
+```sh
+./todo help
+./todo add "Buy groceries" high 2026-02-20
+./todo list
+```
+
+The binary is portable to any system with a compatible Erlang/OTP installation.
