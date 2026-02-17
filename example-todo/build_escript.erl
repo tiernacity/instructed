@@ -13,16 +13,20 @@ main(_) ->
         true -> ok
     end,
 
-    %% Create a wrapper shell script that delegates to the shipment entrypoint
+    %% Get absolute path to shipment
+    {ok, Cwd} = file:get_cwd(),
+    AbsShipment = filename:join(Cwd, ShipmentDir),
+
+    %% Create a wrapper shell script with the shipment path baked in
     ScriptName = "todo",
-    Script =
+    Script = io_lib:format(
         "#!/bin/sh\n"
         "set -e\n"
-        "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-        "exec \"$SCRIPT_DIR/build/erlang-shipment/entrypoint.sh\" run \"$@\"\n",
+        "exec \"~s/entrypoint.sh\" run \"$@\"\n",
+        [AbsShipment]),
 
     ok = file:write_file(ScriptName, Script),
     os:cmd("chmod +x " ++ ScriptName),
 
     io:format("Built executable wrapper: ~s~n", [ScriptName]),
-    io:format("Uses erlang-shipment at: ~s~n", [ShipmentDir]).
+    io:format("Shipment path: ~s~n", [AbsShipment]).
