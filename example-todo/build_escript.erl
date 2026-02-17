@@ -1,46 +1,39 @@
 #!/usr/bin/env escript
-%% Build script that creates a self-contained escript binary for example_todo
+%% Build script that creates a self-contained executable wrapper for example_todo
+%% Uses erlang-shipment (not escript) to support NIF libraries like esqlite.
 
 main(_) ->
     ShipmentDir = "build/erlang-shipment",
 
-    %% Collect all .beam and .app files from ebin directories
-    EbinDirs = filelib:wildcard(ShipmentDir ++ "/*/ebin"),
-    AllShipmentFiles = lists:flatmap(
-        fun(Dir) ->
-            lists:map(
-                fun(F) ->
-                    {ok, Bin} = file:read_file(F),
-                    {filename:basename(F), Bin}
-                end,
-                filelib:wildcard(Dir ++ "/*.beam") ++ filelib:wildcard(Dir ++ "/*.app")
-            )
-        end,
-        EbinDirs
-    ),
+    %% Verify shipment exists
+    case filelib:is_dir(ShipmentDir) of
+        false ->
+            io:format("Error: shipment directory not found. Run 'gleam export erlang-shipment' first.~n"),
+            halt(1);
+        true -> ok
+    end,
 
-    %% Create wrapper module that bridges escript main/1 to Gleam's run/1
-    WrapperSrc = "/tmp/escript_entry.erl",
-    ok = file:write_file(WrapperSrc,
-        "-module(escript_entry).\n"
-        "-export([main/1]).\n"
-        "main(_Args) ->\n"
-        "    'example_todo@@main':run(example_todo).\n"),
-    {ok, escript_entry, WrapperBeam} = compile:file(WrapperSrc, [binary]),
+    %% Create a wrapper shell script that runs the shipment
+    ScriptName = "todo",
+    Script =
+        "#!/bin/sh\n"
+        "set -e\n"
+        "SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
+        "SHIPMENT_DIR=\"$SCRIPT_DIR/build/erlang-shipment\"\n"
+        "\n"
+        "# Build code paths for all ebin directories\n"
+        "PA_ARGS=\"\"\n"
+        "for dir in \"$SHIPMENT_DIR\"/*/ebin; do\n"
+        "  PA_ARGS=\"$PA_ARGS -pa $dir\"\n"
+        "done\n"
+        "\n"
+        "# Build NIF paths - add priv dirs to ERL_LIBS\n"
+        "export ERL_LIBS=\"$SHIPMENT_DIR\"\n"
+        "\n"
+        "exec erl -noshell $PA_ARGS -eval \"'example_todo@@main':run(example_todo)\" -s init stop -- \"$@\"\n",
 
-    AllFiles = [{"escript_entry.beam", WrapperBeam} | AllShipmentFiles],
+    ok = file:write_file(ScriptName, Script),
+    os:cmd("chmod +x " ++ ScriptName),
 
-    %% Create the escript
-    EscriptName = "todo",
-    ok = escript:create(EscriptName, [
-        shebang,
-        {emu_args, "-escript main escript_entry"},
-        {archive, AllFiles, []}
-    ]),
-    os:cmd("chmod +x " ++ EscriptName),
-
-    io:format("Built executable: ~s~n", [EscriptName]),
-    io:format("Included ~b files (~.1f KB)~n", [
-        length(AllFiles),
-        filelib:file_size(EscriptName) / 1024.0
-    ]).
+    io:format("Built executable wrapper: ~s~n", [ScriptName]),
+    io:format("Uses erlang-shipment at: ~s~n", [ShipmentDir]).
