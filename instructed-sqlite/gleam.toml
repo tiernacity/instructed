@@ -1,6 +1,7 @@
-name = "example_todo"
+name = "instructed_sqlite"
 version = "1.0.0"
-description = "Example Todo App using Instructed CQRS/ES framework"
+description = "SQLite event store adapter for Instructed CQRS/ES framework"
+licences = ["MIT"]
 target = "erlang"
 
 [dependencies]
@@ -9,10 +10,9 @@ gleam_erlang = ">= 1.3.0 and < 2.0.0"
 gleam_otp = ">= 1.2.0 and < 2.0.0"
 gleam_json = ">= 3.1.0 and < 4.0.0"
 gleam_time = ">= 1.7.0 and < 2.0.0"
-argv = ">= 1.0.2 and < 2.0.0"
+sqlight = ">= 1.0.0 and < 2.0.0"
 youid = ">= 1.5.1 and < 2.0.0"
 instructed = { path = "../instructed" }
-instructed_sqlite = { path = "../instructed-sqlite" }
 
 [dev-dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

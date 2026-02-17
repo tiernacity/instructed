@@ -13,7 +13,7 @@ import app/projections
 import app/server
 import youid/uuid
 
-const db_url = "postgresql://postgres:postgres@db:5432/app"
+const db_path = "todo_events.db"
 
 pub fn main() -> Nil {
   let args = argv.load().arguments
@@ -49,21 +49,21 @@ pub fn main() -> Nil {
 
 fn start_server() -> Nil {
   io.println("Starting Todo Server...")
-  let assert Ok(_srv) = server.start(db_url)
+  let assert Ok(_srv) = server.start(db_path)
   io.println("Todo Server started. Press Ctrl+C to stop.")
   // Keep the server running
   process.sleep_forever()
 }
 
 fn run_command(f: fn(server.TodoServer) -> Nil) -> Nil {
-  let assert Ok(srv) = server.start(db_url)
+  let assert Ok(srv) = server.start(db_path)
   // Give projections time to catch up
   process.sleep(200)
   f(srv)
 }
 
 fn run_query(f: fn(server.TodoServer) -> Nil) -> Nil {
-  let assert Ok(srv) = server.start(db_url)
+  let assert Ok(srv) = server.start(db_path)
   // Give projections time to catch up with historical events
   process.sleep(500)
   f(srv)

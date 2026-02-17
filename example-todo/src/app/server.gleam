@@ -1,13 +1,11 @@
-//// Todo Server - starts the CQRS infrastructure with PostgreSQL persistence
+//// Todo Server - starts the CQRS infrastructure with SQLite persistence
 
 import gleam/erlang/process.{type Subject}
-import gleam/io
 import gleam/result
 import instructed/event_store.{type EventStore}
 import instructed/projection.{type ProjectionMessage}
 import instructed/router.{type DispatchResult, type Router}
-import instructed_postgres
-import pog
+import instructed_sqlite
 import app/aggregate
 import app/domain.{type TodoCommand, type TodoEvent}
 import app/projections.{type AllTodosState, type ByPriorityState, type TodoView}
@@ -27,39 +25,20 @@ pub type TodoServer {
   )
 }
 
-/// Start the todo server with PostgreSQL persistence
-pub fn start(db_url: String) -> Result(TodoServer, String) {
-  // Connect to database
-  let pool_name = process.new_name(prefix: "todo_pool")
-  let db_config = case pog.url_config(pool_name, db_url) {
-    Ok(config) -> config
-    Error(_) -> {
-      io.println("Failed to parse database URL")
-      panic as "Invalid database URL"
-    }
-  }
-
-  let db = case pog.start(db_config) {
-    Ok(started) -> started.data
-    Error(_) -> {
-      io.println("Failed to start database pool")
-      panic as "Database connection failed"
-    }
-  }
-
-  // Create schema
-  let assert Ok(Nil) = instructed_postgres.create_schema(db)
-
-  // Create event store
-  let pg_config =
-    instructed_postgres.PgConfig(
-      db: db,
+/// Start the todo server with SQLite persistence
+pub fn start(db_path: String) -> Result(TodoServer, String) {
+  // Create SQLite event store config
+  let sqlite_config =
+    instructed_sqlite.SqliteConfig(
+      db_path: db_path,
       serialize: serialization.serialize_event,
       deserialize: serialization.deserialize_event,
       event_type: serialization.event_type_name,
     )
 
-  let store = instructed_postgres.new(pg_config)
+  // Start the SQLite event store actor
+  let assert Ok(sqlite_actor) = instructed_sqlite.start(sqlite_config)
+  let store = instructed_sqlite.to_event_store(sqlite_actor)
 
   // Create router
   let todo_router =
@@ -163,10 +142,7 @@ pub fn get_by_due_date(server: TodoServer) -> List(TodoView) {
 }
 
 fn get_today() -> String {
-  // Simple date string - in production, use proper date library
-  "2026-02-16"
+  "2026-02-17"
 }
 
 import instructed/error
-
-// Suppress warnings
