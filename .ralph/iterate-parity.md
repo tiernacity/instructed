@@ -13,7 +13,7 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [x] 2. Event Types & Recorded Events
 - [x] 3. Error Types
 - [x] 4. Aggregate Core (types + state rebuilding)
-- [ ] 5. Aggregate Server (GenServer process per instance)
+- [x] 5. Aggregate Server (GenServer process per instance)
 - [ ] 6. Snapshot Types & Integration
 - [ ] 7. Command Context & Execution
 - [ ] 8. Middleware Pipeline

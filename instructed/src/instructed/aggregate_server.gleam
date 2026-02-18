@@ -441,16 +441,28 @@ fn load_state(
 }
 
 /// Take a snapshot if configured and threshold reached.
-/// Note: Snapshot type integration is completed in Module 6.
-/// The EventStore snapshot operations use the event type parameter,
-/// but aggregate snapshots store state. Module 6 adds proper
-/// serialization support to bridge this gap.
+/// Uses snapshot.coerce to bridge the type gap between aggregate state
+/// and the event store's event type parameter.
 fn maybe_take_snapshot(
   state: ServerState(state, command, event),
 ) -> ServerState(state, command, event) {
-  // TODO: Enable after Module 6 adds snapshot serialization support
-  // For now, just track the count for when snapshots are enabled
-  state
+  case snapshot.snapshot_required(state.config.snapshot_config, state.events_since_snapshot) {
+    True -> {
+      let snap =
+        snapshot.new_snapshot(
+          source_uuid: state.config.stream_id,
+          source_version: state.aggregate_version,
+          source_type: "aggregate",
+          data: state.aggregate_state,
+        )
+      // Coerce SnapshotData(state) to SnapshotData(event) for the event store
+      let coerced = snapshot.coerce(snap)
+      // Take snapshot - don't fail the command on snapshot error
+      let _ = state.config.event_store.record_snapshot(coerced)
+      ServerState(..state, events_since_snapshot: 0)
+    }
+    False -> state
+  }
 }
 
 

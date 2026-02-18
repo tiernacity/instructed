@@ -40,7 +40,7 @@ import instructed/event_store.{
   AnyVersion, Current, EventStore, ExactVersion, FromEventNumber, NoStream,
   Origin, StreamExists, Subscription,
 }
-import instructed/snapshot.{type SnapshotData}
+import instructed/snapshot
 import youid/uuid
 
 // --- Actor Message Types ---
@@ -58,7 +58,7 @@ type StoreState(event) {
     /// Persistent subscriptions keyed by "stream:name"
     persistent_subs: Dict(String, PersistentSub(event)),
     /// Snapshots by source UUID
-    snapshots: Dict(String, SnapshotData(event)),
+    snapshots: Dict(String, snapshot.SnapshotData(event)),
     /// Next global event number
     next_event_number: Int,
     /// Next subscriber ID counter
@@ -136,10 +136,10 @@ pub opaque type Message(event) {
   )
   ReadSnapshot(
     source_uuid: String,
-    reply: Subject(Result(SnapshotData(event), EventStoreError)),
+    reply: Subject(Result(snapshot.SnapshotData(event), EventStoreError)),
   )
   RecordSnapshot(
-    snapshot: SnapshotData(event),
+    snapshot: snapshot.SnapshotData(event),
     reply: Subject(Result(Nil, EventStoreError)),
   )
   DeleteSnapshot(
@@ -623,7 +623,7 @@ fn handle_delete_subscription(
 fn handle_read_snapshot(
   state: StoreState(event),
   source_uuid: String,
-  reply: Subject(Result(SnapshotData(event), EventStoreError)),
+  reply: Subject(Result(snapshot.SnapshotData(event), EventStoreError)),
 ) -> actor.Next(StoreState(event), Message(event)) {
   case dict.get(state.snapshots, source_uuid) {
     Ok(snap) -> process.send(reply, Ok(snap))
@@ -634,7 +634,7 @@ fn handle_read_snapshot(
 
 fn handle_record_snapshot(
   state: StoreState(event),
-  snap: SnapshotData(event),
+  snap: snapshot.SnapshotData(event),
   reply: Subject(Result(Nil, EventStoreError)),
 ) -> actor.Next(StoreState(event), Message(event)) {
   let new_state =

@@ -155,18 +155,13 @@ pub fn populate_from_event_store(
       #(aggregate.empty_state(), 0)
     Some(_) ->
       case event_store.read_snapshot(stream_id) {
-        Ok(snapshot_data) ->
-          // Validate snapshot version matches current config
-          case snapshot_data.source_version >= 0 {
-            True ->
-              // Use snapshot as starting point
-              // Note: snapshot.data is typed as event but actually contains state
-              // This is a limitation - we need to handle snapshot data type properly
-              // For now, start from empty and replay all
-              // TODO: proper snapshot state deserialization
-              #(aggregate.empty_state(), 0)
-            False -> #(aggregate.empty_state(), 0)
-          }
+        Ok(snapshot_data) -> {
+          // Coerce SnapshotData(event) back to SnapshotData(state)
+          let state_snapshot: snapshot.SnapshotData(state) =
+            snapshot.coerce(snapshot_data)
+          // Use snapshot as starting point, replay events from snapshot version
+          #(state_snapshot.data, state_snapshot.source_version)
+        }
         Error(_) ->
           // No snapshot, start from beginning
           #(aggregate.empty_state(), 0)

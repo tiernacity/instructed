@@ -24,7 +24,7 @@
 import gleam/option.{type Option}
 import instructed/error.{type EventStoreError}
 import instructed/event.{type EventData, type RecordedEvent}
-import instructed/snapshot.{type SnapshotData}
+import instructed/snapshot
 
 /// Expected version when appending events to a stream.
 pub type ExpectedVersion {
@@ -118,10 +118,13 @@ pub type EventStore(event) {
     delete_subscription: fn(String, String) ->
       Result(Nil, EventStoreError),
     /// Read a snapshot for a given source.
+    /// The snapshot data type matches the event store's event type.
+    /// Use `snapshot.coerce` to convert between types when storing
+    /// aggregate state (which has a different type than events).
     read_snapshot: fn(String) ->
-      Result(SnapshotData(event), EventStoreError),
+      Result(snapshot.SnapshotData(event), EventStoreError),
     /// Record a snapshot (upsert - replaces existing snapshot for same source).
-    record_snapshot: fn(SnapshotData(event)) ->
+    record_snapshot: fn(snapshot.SnapshotData(event)) ->
       Result(Nil, EventStoreError),
     /// Delete a snapshot for a given source.
     delete_snapshot: fn(String) -> Result(Nil, EventStoreError),

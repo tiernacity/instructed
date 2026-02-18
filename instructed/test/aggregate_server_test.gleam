@@ -1,8 +1,10 @@
 import gleam/list
+import gleam/option.{Some}
 import gleeunit/should
 import instructed/aggregate
 import instructed/aggregate_server
 import instructed/in_memory_event_store
+import instructed/snapshot
 
 // --- Test domain ---
 
@@ -145,4 +147,39 @@ pub fn multiple_events_per_command_test() {
   let assert Ok(result) =
     aggregate_server.execute(server, CreateTask("7", "Multi"), 5000)
   should.equal(list.length(result.events), 1)
+}
+
+pub fn snapshot_taken_after_n_events_test() {
+  let assert Ok(store_subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(store_subject)
+
+  let snap_config =
+    snapshot.SnapshotConfig(snapshot_every: Some(2), snapshot_version: 1)
+
+  let config =
+    aggregate_server.new_config(
+      aggregate: task_aggregate(),
+      event_store: store,
+      stream_id: "task-snap",
+    )
+    |> aggregate_server.with_snapshot_config(snap_config)
+
+  let assert Ok(server) = aggregate_server.start(config)
+
+  // First command (1 event) - no snapshot yet
+  let assert Ok(_) =
+    aggregate_server.execute(server, CreateTask("s", "Snap test"), 5000)
+  should.be_error(store.read_snapshot("task-snap"))
+
+  // Second command (2 events total) - snapshot should be taken
+  let assert Ok(_) =
+    aggregate_server.execute(server, RenameTask("s", "Snap test 2"), 5000)
+
+  // Snapshot should exist now
+  let assert Ok(snap) = store.read_snapshot("task-snap")
+  should.equal(snap.source_uuid, "task-snap")
+  should.equal(snap.source_version, 2)
+  // Coerce back to verify state
+  let state_snap: snapshot.SnapshotData(Task) = snapshot.coerce(snap)
+  should.equal(state_snap.data.title, "Snap test 2")
 }
