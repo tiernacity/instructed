@@ -1,5 +1,10 @@
+import gleam/dict
+import gleam/option.{None}
 import gleeunit/should
 import instructed/aggregate
+import instructed/event.{type EventData, EventData}
+import instructed/event_store.{NoStream}
+import instructed/in_memory_event_store
 
 // --- Test domain types ---
 
@@ -157,4 +162,68 @@ pub fn withdraw_exceeding_balance_test() {
     aggregate.rebuild_state(agg, [AccountOpened("ACC1", 100)])
   let result = agg.execute(state, WithdrawMoney(200))
   should.be_error(result)
+}
+
+// --- Event Store Integration Tests ---
+
+fn make_event(event: BankEvent) -> EventData(BankEvent) {
+  EventData(data: event, event_type: "", causation_id: None, correlation_id: None, metadata: dict.new())
+}
+
+pub fn populate_from_event_store_simple_test() {
+  let agg = bank_aggregate()
+  let assert Ok(subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(subject)
+
+  // Append events
+  let assert Ok(_) =
+    store.append_to_stream("account-1", NoStream, [
+      make_event(AccountOpened("ACC1", 100)),
+      make_event(MoneyDeposited(50, 150)),
+    ])
+
+  // Populate from event store
+  let assert Ok(populated) =
+    aggregate.populate_from_event_store_simple(agg, store, "account-1")
+
+  should.equal(populated.state.account_number, "ACC1")
+  should.equal(populated.state.balance, 150)
+  should.equal(populated.state.open, True)
+  should.equal(populated.version, 2)
+}
+
+pub fn populate_nonexistent_stream_returns_empty_state_test() {
+  let agg = bank_aggregate()
+  let assert Ok(subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(subject)
+
+  let assert Ok(populated) =
+    aggregate.populate_from_event_store_simple(agg, store, "nonexistent")
+
+  should.equal(populated.state.account_number, "")
+  should.equal(populated.state.balance, 0)
+  should.equal(populated.version, 0)
+}
+
+pub fn rebuild_from_version_test() {
+  let agg = bank_aggregate()
+  let assert Ok(subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(subject)
+
+  // Append initial events
+  let assert Ok(_) =
+    store.append_to_stream("account-rv", NoStream, [
+      make_event(AccountOpened("ACC1", 100)),
+      make_event(MoneyDeposited(50, 150)),
+    ])
+
+  // Build initial state at version 1
+  let state = aggregate.rebuild_state(agg, [AccountOpened("ACC1", 100)])
+
+  // Rebuild from version 1 (should only read events after version 1)
+  let assert Ok(populated) =
+    aggregate.rebuild_from_version(agg, store, "account-rv", state, 1)
+
+  should.equal(populated.state.balance, 150)
+  should.equal(populated.version, 2)
 }
