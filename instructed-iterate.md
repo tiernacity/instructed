@@ -141,7 +141,20 @@ Write the comparison into the task file notes for reference during implementatio
 
 ## Phase 2: Implement for Parity
 
-Implement changes to bring the Instructed module to parity. Key principles:
+Implement changes to bring the Instructed module to parity.
+
+### Your Standard of Quality
+
+Your work will be reviewed using the process defined in `instructed-review-instructions.md`. That review compares every feature, constraint, and guarantee against Commanded. Your goal is:
+
+- **Every feature for this module scores ✅** (present and equivalent)
+- **Zero ⚠️ or ❌ findings** for this module when reviewed
+- **No silent gaps** — if something is intentionally different (Gleam idiom), it must be clearly documented in code comments explaining why it differs and that the equivalent guarantee is preserved
+- **Tests prove correctness** — the review checks for test coverage; missing tests are a finding
+
+Think of it this way: after you finish a module, a separate agent will run the review process from `instructed-review-instructions.md`. That agent will read Commanded source, read your code, and compare them exhaustively. Anything it finds is a failure. Your job is to leave nothing for it to find.
+
+### Key principles:
 
 ### Gleam Idioms (Intentional Differences)
 
@@ -182,11 +195,19 @@ git add -A && git commit -m "Module N: <name> — implement for Commanded parity
 
 ---
 
-## Phase 3: Re-Compare
+## Phase 3: Re-Compare (Self-Review)
 
-After implementation, re-read the Commanded source for this module and compare again. Look for anything missed. This is a quick pass — if Phase 1 was thorough, this should find nothing or minor items.
+After implementation, run a self-review using the criteria from `instructed-review-instructions.md`. Specifically:
 
-If gaps remain, go back to Phase 2. Only proceed when comparison is clean.
+1. Re-read the Commanded source for this module
+2. Apply the review format: "What Commanded Provides" vs "What Instructed Provides" with ✅/⚠️/❌ markers
+3. Check every item from the 10-point comparison checklist (Phase 1)
+4. Verify tests exist for every public function, error case, and edge case
+5. Check that the 20 Key Invariants (listed at the bottom of this document) are not violated
+
+**The bar**: If a review agent running `instructed-review-instructions.md` would find ANY issue with this module — a missing feature, a silent error, a missing test, a broken invariant — you are not done. Go back to Phase 2.
+
+Only proceed to Phase 4 when you are confident this module would score ✅ across every comparison point.
 
 ---
 
