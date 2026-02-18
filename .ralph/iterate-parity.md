@@ -21,7 +21,7 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [x] 10. Event Handler (lifecycle, subscriptions, error handling, idempotency)
 - [x] 11. Projection (builds on event handler patterns)
 - [x] 12. Process Manager (routing, state persistence, error handling, command dispatch)
-- [ ] 13. Application & Supervision Tree
+- [x] 13. Application & Supervision Tree
 - [ ] 14. Causation & Correlation Chain
 - [ ] 15. Strong vs Eventual Consistency
 - [ ] 16. PostgreSQL Adapter
@@ -33,33 +33,37 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 
 ## Verification
 - Build passes: gleam build (clean, no errors)
-- Tests pass: 73 passed, no failures
+- Tests pass: 83 passed, no failures
 
 ## Notes
 
-### Module 12 Completed
-Key additions to process_manager.gleam:
-- Snapshot loading via get_or_load_instance (fixes Invariant 9)
-- event_number as source_version (enables last_seen_event restore)
-- Per-instance PMInstance(state, last_seen_event)
-- StartStrict/ContinueStrict, StartMany/ContinueMany/StopMany
-- after_command callback (AfterStop/AfterContinue)
-- on_event_error + on_command_error with full action types
-- dispatch_commands loop with error recovery
-- 14 new tests
+### Module 13 Completed
+Key changes to application.gleam:
+- Application is now a plain struct (no unnecessary actor)
+- start_event_handler, start_process_manager added
+- read_stream_from (paginated reads) added
+- event_store accessor added
+- Dispatch error when no router configured
+- 10 new tests
 
-Architecture review after Module 12: all integration points OK.
+Architecture review after Module 13: all integration points OK.
 
-### Module 13 Plan: Application & Supervision Tree
+### Module 14 Plan: Causation & Correlation Chain
 
-Next to compare:
-- `/tmp/commanded/lib/application.ex`
-- `/tmp/commanded/lib/commanded/application/*.ex`
-- Current: `/workspace/instructed/src/instructed/application.gleam`
+Causation and correlation IDs flow through the entire system. They connect:
+- Commands → Events (via aggregate execution)
+- Events → Process Manager Commands (PM sets causation_id = event_id)
+- Commands → Commands (correlation_id preserved)
 
-Key expected features:
-- Named application with isolated event store
-- Supervision tree starting event store, aggregate supervisor, event handlers, PMs, projections
-- `start_link` / `child_spec` pattern
-- Application-level dispatch function
-- Configuration: event_store adapter, pubsub, registry
+Key questions:
+1. Is causation_id correctly set on events from aggregate execution?
+2. Is correlation_id correctly preserved from command to events?
+3. Does the router's dispatch_with_context correctly pass these IDs?
+4. Does the aggregate server correctly propagate them to EventData?
+5. Does the in-memory event store correctly store and return them?
+6. Is the chain end-to-end verifiable (command → events → PM commands → more events)?
+
+Compare:
+- `/tmp/commanded/lib/commanded/commands/dispatcher.ex` 
+- `/tmp/commanded/lib/commanded/aggregates/aggregate.ex`
+- How Commanded propagates causation/correlation from command dispatch options → EventData → RecordedEvent
