@@ -208,6 +208,7 @@ fn dispatch_to_aggregate(
             list.map(events, fn(evt) {
               EventData(
                 data: evt,
+                event_type: "",
                 causation_id: pipeline.causation_id,
                 correlation_id: pipeline.correlation_id,
                 metadata: pipeline.metadata,

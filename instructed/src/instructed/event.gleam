@@ -3,6 +3,11 @@
 //// In Instructed, events are strongly typed using Gleam's type system.
 //// The `event` type parameter represents your domain event type.
 ////
+//// The `event_type` field stores a string representation of the event type,
+//// used for serialization/deserialization in persistent adapters (PostgreSQL,
+//// SQLite). For the in-memory adapter with typed events, this field is
+//// informational.
+////
 //// ## Example
 ////
 //// ```gleam
@@ -18,10 +23,15 @@ import gleam/option.{type Option}
 
 /// An event before it is persisted to the event store.
 /// The `event` type parameter is your domain event type.
+///
+/// Equivalent to Commanded's `EventData` struct.
 pub type EventData(event) {
   EventData(
     /// The domain event data
     data: event,
+    /// String representation of the event type (for serialization)
+    /// e.g., "AccountOpened", "MoneyDeposited"
+    event_type: String,
     /// An optional UUID used to identify the cause of this event
     causation_id: Option(String),
     /// An optional UUID used to correlate related events
@@ -33,16 +43,23 @@ pub type EventData(event) {
 
 /// A persisted event read from the event store.
 /// Contains the domain event data plus storage metadata.
+///
+/// Events are immutable once recorded.
+///
+/// Equivalent to Commanded's `RecordedEvent` struct.
 pub type RecordedEvent(event) {
   RecordedEvent(
     /// A globally unique identifier for this event
     event_id: String,
-    /// A globally unique, monotonically incrementing number
+    /// A globally unique, monotonically incrementing number.
+    /// Used to order events across all streams.
     event_number: Int,
     /// The stream this event belongs to
     stream_id: String,
-    /// The version of the stream at this event
+    /// The version of the stream at this event (sequential within stream)
     stream_version: Int,
+    /// String representation of the event type (for serialization)
+    event_type: String,
     /// UUID identifying the cause of this event
     causation_id: Option(String),
     /// UUID correlating related events
@@ -57,12 +74,17 @@ pub type RecordedEvent(event) {
 }
 
 /// Enriched metadata combining recorded event fields with custom metadata.
+/// This is used when passing event context to handlers.
+///
+/// Equivalent to Commanded's `enrich_metadata/2` return value, but as a
+/// typed record (idiomatic Gleam) rather than an untyped map.
 pub type EventMetadata {
   EventMetadata(
     event_id: String,
     event_number: Int,
     stream_id: String,
     stream_version: Int,
+    event_type: String,
     causation_id: Option(String),
     correlation_id: Option(String),
     created_at: Int,
@@ -77,6 +99,7 @@ pub fn enrich_metadata(event: RecordedEvent(a)) -> EventMetadata {
     event_number: event.event_number,
     stream_id: event.stream_id,
     stream_version: event.stream_version,
+    event_type: event.event_type,
     causation_id: event.causation_id,
     correlation_id: event.correlation_id,
     created_at: event.created_at,

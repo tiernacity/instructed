@@ -58,12 +58,14 @@ pub fn projection_processes_events_test() {
   let events = [
     EventData(
       data: ItemAdded("Widget", 10),
+      event_type: "",
       causation_id: None,
       correlation_id: None,
       metadata: dict.new(),
     ),
     EventData(
       data: ItemAdded("Gadget", 5),
+      event_type: "",
       causation_id: None,
       correlation_id: None,
       metadata: dict.new(),
@@ -87,6 +89,7 @@ pub fn projection_removes_items_test() {
     store.append_to_stream("items2", NoStream, [
       EventData(
         data: ItemAdded("Thing", 3),
+      event_type: "",
         causation_id: None,
         correlation_id: None,
         metadata: dict.new(),
@@ -99,6 +102,7 @@ pub fn projection_removes_items_test() {
     store.append_to_stream("items2", event_store.ExactVersion(1), [
       EventData(
         data: ItemRemoved("Thing"),
+      event_type: "",
         causation_id: None,
         correlation_id: None,
         metadata: dict.new(),
@@ -118,6 +122,7 @@ pub fn projection_multiple_streams_test() {
     store.append_to_stream("stream-x", NoStream, [
       EventData(
         data: ItemAdded("X", 1),
+      event_type: "",
         causation_id: None,
         correlation_id: None,
         metadata: dict.new(),
@@ -128,6 +133,7 @@ pub fn projection_multiple_streams_test() {
     store.append_to_stream("stream-y", NoStream, [
       EventData(
         data: ItemAdded("Y", 2),
+      event_type: "",
         causation_id: None,
         correlation_id: None,
         metadata: dict.new(),
@@ -149,6 +155,7 @@ pub fn projection_accumulates_test() {
     store.append_to_stream("acc-stream", NoStream, [
       EventData(
         data: ItemAdded("Counter", 5),
+      event_type: "",
         causation_id: None,
         correlation_id: None,
         metadata: dict.new(),
@@ -161,6 +168,7 @@ pub fn projection_accumulates_test() {
     store.append_to_stream("acc-stream", event_store.ExactVersion(1), [
       EventData(
         data: ItemAdded("Counter", 3),
+      event_type: "",
         causation_id: None,
         correlation_id: None,
         metadata: dict.new(),

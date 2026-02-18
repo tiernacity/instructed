@@ -24,7 +24,7 @@ fn start_store() {
 }
 
 fn make_event_data(event: TestEvent) -> EventData(TestEvent) {
-  EventData(data: event, causation_id: None, correlation_id: None, metadata: dict.new())
+  EventData(data: event, event_type: "", causation_id: None, correlation_id: None, metadata: dict.new())
 }
 
 // --- Basic Append & Read Tests ---
@@ -573,6 +573,7 @@ pub fn causation_correlation_preserved_test() {
   let event_data =
     EventData(
       data: UserCreated("Causal"),
+      event_type: "UserCreated",
       causation_id: Some("cmd-123"),
       correlation_id: Some("corr-456"),
       metadata: dict.from_list([#("key", "value")]),
@@ -590,6 +591,27 @@ pub fn causation_correlation_preserved_test() {
 }
 
 // --- Event ID Uniqueness Test ---
+
+pub fn event_type_preserved_test() {
+  let store = start_store()
+
+  let event_data =
+    EventData(
+      data: UserCreated("TypeTest"),
+      event_type: "UserCreated",
+      causation_id: None,
+      correlation_id: None,
+      metadata: dict.new(),
+    )
+
+  let assert Ok(_) =
+    store.append_to_stream("type-stream", NoStream, [event_data])
+
+  let assert Ok([recorded]) =
+    store.read_stream_forward("type-stream", 1, 1000)
+
+  should.equal(recorded.event_type, "UserCreated")
+}
 
 pub fn event_ids_are_unique_test() {
   let store = start_store()

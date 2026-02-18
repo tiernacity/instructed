@@ -9,7 +9,7 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - All 20 key invariants maintained
 
 ## Checklist
-- [ ] 1. Event Store Interface & In-Memory Adapter
+- [x] 1. Event Store Interface & In-Memory Adapter
 - [ ] 2. Event Types & Recorded Events
 - [ ] 3. Error Types
 - [ ] 4. Aggregate Core (types + state rebuilding)

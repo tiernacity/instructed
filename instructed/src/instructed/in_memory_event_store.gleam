@@ -700,6 +700,7 @@ fn create_recorded_events(
           event_number: num,
           stream_id: stream_id,
           stream_version: new_ver,
+          event_type: evt.event_type,
           causation_id: evt.causation_id,
           correlation_id: evt.correlation_id,
           data: evt.data,

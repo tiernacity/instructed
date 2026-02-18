@@ -167,6 +167,7 @@ fn handle_message(
             list.map(events, fn(evt) {
               EventData(
                 data: evt,
+                event_type: "",
                 causation_id: causation_id,
                 correlation_id: correlation_id,
                 metadata: metadata,
