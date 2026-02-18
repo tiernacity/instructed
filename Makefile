@@ -1,6 +1,6 @@
 .PHONY: run clean
 
-run:
+dev:
 	docker compose run --rm --build dev
 
 clean:
