@@ -143,8 +143,8 @@ pub fn new(config: PgConfig(event)) -> EventStore(event) {
     append_to_stream: fn(stream_id, expected_version, events) {
       append_to_stream(config, stream_id, expected_version, events, notifier)
     },
-    read_stream_forward: fn(stream_id, start_version) {
-      read_stream_forward(config, stream_id, start_version)
+    read_stream_forward: fn(stream_id, start_version, count) {
+      read_stream_forward(config, stream_id, start_version, count)
     },
     subscribe: fn(handler) {
       subscribe_transient(notifier, "$all", handler)
@@ -245,7 +245,7 @@ fn append_to_stream(
       case result {
         Ok(final_version) -> {
           // Notify subscribers about new events
-          let _ = case read_stream_forward(config, stream_id, current_version + 1) {
+          let _ = case read_stream_forward(config, stream_id, current_version + 1, 100_000) {
             Ok(new_events) -> {
               list.each(new_events, fn(evt) {
                 process.send(notifier, NotifyEvent(stream_id, evt))
@@ -289,39 +289,37 @@ fn read_stream_forward(
   config: PgConfig(event),
   stream_id: String,
   start_version: Int,
+  count: Int,
 ) -> Result(List(RecordedEvent(event)), EventStoreError) {
   let sql =
-    "SELECT event_id, event_number, stream_id, stream_version, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = $1 AND stream_version >= $2 ORDER BY stream_version ASC"
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = $1 AND stream_version >= $2 ORDER BY stream_version ASC LIMIT $3"
 
   let row_decoder =
     decode.then(decode.at([0], decode.string), fn(event_id) {
       decode.then(decode.at([1], decode.int), fn(event_number) {
         decode.then(decode.at([2], decode.string), fn(sid) {
           decode.then(decode.at([3], decode.int), fn(stream_version) {
-            decode.then(decode.at([4], decode.string), fn(causation_id) {
-              decode.then(decode.at([5], decode.string), fn(correlation_id) {
-                decode.then(decode.at([6], decode.string), fn(data_json) {
-                  decode.then(
-                    decode.at([7], decode.string),
-                    fn(metadata_json) {
-                      decode.then(
-                        decode.at([8], decode.int),
-                        fn(created_at) {
-                          decode.success(#(
-                            event_id,
-                            event_number,
-                            sid,
-                            stream_version,
-                            causation_id,
-                            correlation_id,
-                            data_json,
-                            metadata_json,
-                            created_at,
-                          ))
-                        },
-                      )
-                    },
-                  )
+            decode.then(decode.at([4], decode.string), fn(event_type) {
+              decode.then(decode.at([5], decode.string), fn(causation_id) {
+                decode.then(decode.at([6], decode.string), fn(correlation_id) {
+                  decode.then(decode.at([7], decode.string), fn(data_json) {
+                    decode.then(decode.at([8], decode.string), fn(metadata_json) {
+                      decode.then(decode.at([9], decode.int), fn(created_at) {
+                        decode.success(#(
+                          event_id,
+                          event_number,
+                          sid,
+                          stream_version,
+                          event_type,
+                          causation_id,
+                          correlation_id,
+                          data_json,
+                          metadata_json,
+                          created_at,
+                        ))
+                      })
+                    })
+                  })
                 })
               })
             })
@@ -334,6 +332,7 @@ fn read_stream_forward(
     pog.query(sql)
     |> pog.parameter(pog.text(stream_id))
     |> pog.parameter(pog.int(start_version))
+    |> pog.parameter(pog.int(count))
     |> pog.returning(row_decoder)
     |> pog.execute(config.db)
   {
@@ -348,35 +347,27 @@ fn read_stream_forward(
                 event_number,
                 sid,
                 stream_version,
+                event_type,
                 causation_id_str,
                 correlation_id_str,
                 data_json,
                 metadata_json,
                 created_at,
               ) = row
-
               case config.deserialize(data_json) {
-                Ok(event_data) -> {
-                  let cid = case causation_id_str {
-                    "" -> None
-                    s -> Some(s)
-                  }
-                  let cor = case correlation_id_str {
-                    "" -> None
-                    s -> Some(s)
-                  }
+                Ok(event_data) ->
                   Ok(RecordedEvent(
                     event_id: event_id,
                     event_number: event_number,
                     stream_id: sid,
                     stream_version: stream_version,
-                    causation_id: cid,
-                    correlation_id: cor,
+                    event_type: event_type,
+                    causation_id: nullable_to_option(causation_id_str),
+                    correlation_id: nullable_to_option(correlation_id_str),
                     data: event_data,
-                    metadata: deserialize_metadata(metadata_json),
+                    metadata: json_to_metadata(metadata_json),
                     created_at: created_at,
                   ))
-                }
                 Error(_) -> Error(Nil)
               }
             })
@@ -396,37 +387,34 @@ fn read_all_forward(
   start_number: Int,
 ) -> Result(List(RecordedEvent(event)), EventStoreError) {
   let sql =
-    "SELECT event_id, event_number, stream_id, stream_version, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= $1 ORDER BY event_number ASC"
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= $1 ORDER BY event_number ASC"
 
   let row_decoder =
     decode.then(decode.at([0], decode.string), fn(event_id) {
       decode.then(decode.at([1], decode.int), fn(event_number) {
         decode.then(decode.at([2], decode.string), fn(sid) {
           decode.then(decode.at([3], decode.int), fn(stream_version) {
-            decode.then(decode.at([4], decode.string), fn(causation_id) {
-              decode.then(decode.at([5], decode.string), fn(correlation_id) {
-                decode.then(decode.at([6], decode.string), fn(data_json) {
-                  decode.then(
-                    decode.at([7], decode.string),
-                    fn(metadata_json) {
-                      decode.then(
-                        decode.at([8], decode.int),
-                        fn(created_at) {
-                          decode.success(#(
-                            event_id,
-                            event_number,
-                            sid,
-                            stream_version,
-                            causation_id,
-                            correlation_id,
-                            data_json,
-                            metadata_json,
-                            created_at,
-                          ))
-                        },
-                      )
-                    },
-                  )
+            decode.then(decode.at([4], decode.string), fn(event_type) {
+              decode.then(decode.at([5], decode.string), fn(causation_id) {
+                decode.then(decode.at([6], decode.string), fn(correlation_id) {
+                  decode.then(decode.at([7], decode.string), fn(data_json) {
+                    decode.then(decode.at([8], decode.string), fn(metadata_json) {
+                      decode.then(decode.at([9], decode.int), fn(created_at) {
+                        decode.success(#(
+                          event_id,
+                          event_number,
+                          sid,
+                          stream_version,
+                          event_type,
+                          causation_id,
+                          correlation_id,
+                          data_json,
+                          metadata_json,
+                          created_at,
+                        ))
+                      })
+                    })
+                  })
                 })
               })
             })
@@ -449,6 +437,7 @@ fn read_all_forward(
             event_number,
             sid,
             stream_version,
+            event_type,
             causation_id_str,
             correlation_id_str,
             data_json,
@@ -456,27 +445,19 @@ fn read_all_forward(
             created_at,
           ) = row
           case config.deserialize(data_json) {
-            Ok(event_data) -> {
-              let cid = case causation_id_str {
-                "" -> None
-                s -> Some(s)
-              }
-              let cor = case correlation_id_str {
-                "" -> None
-                s -> Some(s)
-              }
+            Ok(event_data) ->
               Ok(RecordedEvent(
                 event_id: event_id,
                 event_number: event_number,
                 stream_id: sid,
                 stream_version: stream_version,
-                causation_id: cid,
-                correlation_id: cor,
+                event_type: event_type,
+                causation_id: nullable_to_option(causation_id_str),
+                correlation_id: nullable_to_option(correlation_id_str),
                 data: event_data,
-                metadata: deserialize_metadata(metadata_json),
+                metadata: json_to_metadata(metadata_json),
                 created_at: created_at,
               ))
-            }
             Error(_) -> Error(Nil)
           }
         })
@@ -630,7 +611,7 @@ fn subscribe_persistent(
                 _ -> {
                   let events = case stream == "$all" {
                     True -> read_all_forward(config, last_seen + 1)
-                    False -> read_stream_forward(config, stream, 1)
+                    False -> read_stream_forward(config, stream, 1, 100_000)
                   }
                   case events {
                     Ok(evts) ->
@@ -856,10 +837,18 @@ fn serialize_metadata(metadata: dict.Dict(String, String)) -> String {
   |> json.to_string
 }
 
-fn deserialize_metadata(json_str: String) -> dict.Dict(String, String) {
+fn json_to_metadata(json_str: String) -> dict.Dict(String, String) {
   case json.parse(json_str, decode.dict(decode.string, decode.string)) {
     Ok(d) -> d
     Error(_) -> dict.new()
+  }
+}
+
+/// Convert a nullable DB string (empty or SQL NULL decoded as "") to Option.
+fn nullable_to_option(s: String) -> Option(String) {
+  case s {
+    "" -> None
+    v -> Some(v)
   }
 }
 

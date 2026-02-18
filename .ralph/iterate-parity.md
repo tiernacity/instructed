@@ -23,7 +23,7 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [x] 12. Process Manager (routing, state persistence, error handling, command dispatch)
 - [x] 13. Application & Supervision Tree
 - [x] 14. Causation & Correlation Chain
-- [ ] 15. Strong vs Eventual Consistency
+- [x] 15. Strong vs Eventual Consistency
 - [ ] 16. PostgreSQL Adapter
 - [ ] 17. SQLite Adapter
 - [ ] 18. Multi Module
@@ -33,10 +33,10 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 
 ## Current State
 - **Build**: clean (`gleam build` — no errors, no warnings)
-- **Tests**: 89 passed, no failures
-- **Last commit**: `4d3f4f3` — Module 14: Causation & Correlation Chain
-- **Source files**: 16 modules in `instructed/src/instructed/`
-- **Test files**: 9 test files in `instructed/test/`
+- **Tests**: 105 passed, no failures
+- **Last commit**: `725eea3` — Module 15: Strong vs Eventual Consistency
+- **Source files**: 17 modules in `instructed/src/instructed/`
+- **Test files**: 10 test files in `instructed/test/`
 
 ## Verification Commands
 ```bash
@@ -188,7 +188,7 @@ Unlike Commanded's PubSub-based broadcast (for distributed cluster support), Ins
 - [x] Process Manager → Router: dispatch_command with causation_id from event
 - [x] Process Manager → Event Store: state saved as snapshot; loaded on restart
 - [x] Application → All: event_store threaded to all start_* helpers
-- [ ] Consistency → Subscriptions: (Module 15) strong handlers register; dispatch waits
+- [x] Consistency → Subscriptions: strong handlers register; dispatch waits (Module 15)
 - [x] Aggregate Server → Snapshots: snapshot loaded during rebuild; written after N events
 
 ## Key Invariants Reference
@@ -203,7 +203,7 @@ Unlike Commanded's PubSub-based broadcast (for distributed cluster support), Ins
 8. Event handler errors invoke error callback — never silently swallowed ✅
 9. PM state persisted (snapshot) after each handled event ✅ (fixed in M12)
 10. PM dispatches with causation_id = source event_id, correlation_id preserved ✅
-11. Strong consistency blocks dispatch until all strong handlers acked — TODO (M15)
+11. Strong consistency blocks dispatch until all strong handlers acked ✅
 12. Subscription callbacks deliver events to subscriber's process ✅
 13. Aggregate stream prefix must never change ✅ (documented)
 14. Snapshot version incremented when aggregate struct changes ✅ (documented)
