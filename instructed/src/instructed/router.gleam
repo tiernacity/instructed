@@ -268,7 +268,8 @@ fn load_aggregate_state(
   router: Router(state, command, event),
   stream_id: String,
 ) -> Result(#(state, Int), String) {
-  case router.event_store.read_stream_forward(stream_id, 1) {
+  // Read all events with large batch size (matches Commanded's 1000 default)
+  case router.event_store.read_stream_forward(stream_id, 1, 1000) {
     Ok(recorded_events) -> {
       let events = list.map(recorded_events, fn(e) { e.data })
       let state = aggregate.rebuild_state(router.aggregate, events)
@@ -283,6 +284,7 @@ fn load_aggregate_state(
       let reason = case err {
         error.VersionConflict -> "version conflict"
         error.StreamNotFound -> "stream not found"
+        error.StreamAlreadyExists -> "stream already exists"
         error.SnapshotNotFound -> "snapshot not found"
         error.SubscriptionAlreadyExists -> "subscription already exists"
         error.SubscriptionNotFound -> "subscription not found"

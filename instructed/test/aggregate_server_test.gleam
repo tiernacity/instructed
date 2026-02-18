@@ -132,7 +132,7 @@ pub fn aggregate_server_persists_events_test() {
     aggregate_server.execute(server, CreateTask("4", "Persist test"), 5000)
 
   // Read events from the store directly
-  let assert Ok(events) = store.read_stream_forward("task-4", 1)
+  let assert Ok(events) = store.read_stream_forward("task-4", 1, 1000)
   should.equal(list.length(events), 1)
   let assert [first] = events
   should.equal(first.data, TaskCreated("4", "Persist test"))

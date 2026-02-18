@@ -26,6 +26,8 @@ pub type EventStoreError {
   VersionConflict
   /// The requested stream does not exist
   StreamNotFound
+  /// The stream already exists (returned when NoStream expected version fails)
+  StreamAlreadyExists
   /// The requested snapshot does not exist
   SnapshotNotFound
   /// A subscription with this name already exists

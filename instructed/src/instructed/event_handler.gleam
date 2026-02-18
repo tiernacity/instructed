@@ -3,6 +3,9 @@
 //// Event handlers are used for side effects, read model projections,
 //// and process manager triggering. Each handler runs as an OTP Actor.
 ////
+//// After processing each event, the handler acknowledges it to the event
+//// store, enabling backpressure (next event won't be delivered until ack).
+////
 //// ## Example
 ////
 //// ```gleam
@@ -26,14 +29,15 @@
 //// ```
 
 import gleam/erlang/process.{type Subject}
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/event.{type RecordedEvent}
-import instructed/event_store.{type EventStore, Origin}
+import instructed/event_store.{type EventStore, type Subscription, Origin}
 
 /// Configuration for an event handler.
 pub type EventHandlerConfig(event, handler_state) {
   EventHandlerConfig(
-    /// Unique name for this event handler
+    /// Unique name for this event handler (must be stable across restarts)
     name: String,
     /// Function to handle each event.
     handle_event: fn(event, RecordedEvent(event), handler_state) ->
@@ -81,15 +85,22 @@ type HandlerActorState(event, handler_state) {
   HandlerActorState(
     config: EventHandlerConfig(event, handler_state),
     handler_state: handler_state,
+    /// Event store reference for acknowledging events
+    event_store: Option(EventStore(event)),
+    /// Subscription reference for acknowledging events
+    subscription: Option(Subscription),
   )
 }
 
 /// Messages the event handler actor receives.
 pub opaque type HandlerMessage(event) {
   HandleEvent(RecordedEvent(event))
+  /// Internal: set subscription info for event acknowledgment
+  SetSubscriptionInfo(EventStore(event), Subscription)
 }
 
 /// Start an event handler, subscribing to the event store.
+/// Events are acknowledged after processing to enable backpressure.
 pub fn start(
   config: EventHandlerConfig(event, handler_state),
   event_store: EventStore(event),
@@ -98,6 +109,8 @@ pub fn start(
     HandlerActorState(
       config: config,
       handler_state: config.initial_state,
+      event_store: None,
+      subscription: None,
     )
 
   case
@@ -108,6 +121,7 @@ pub fn start(
     Ok(started) -> {
       let subject = started.data
 
+      // Non-blocking handler: sends event to actor's mailbox
       let handler = fn(event: RecordedEvent(event)) {
         process.send(subject, HandleEvent(event))
       }
@@ -120,10 +134,24 @@ pub fn start(
       // Delete existing subscription (for restarts)
       let _ = event_store.delete_subscription(stream, config.name)
 
-      let _ =
-        event_store.subscribe_persistent(stream, config.name, Origin, handler)
-
-      Ok(subject)
+      case
+        event_store.subscribe_persistent(
+          stream,
+          config.name,
+          Origin,
+          handler,
+        )
+      {
+        Ok(subscription) -> {
+          // Send subscription info to actor so it can ack events
+          process.send(
+            subject,
+            SetSubscriptionInfo(event_store, subscription),
+          )
+          Ok(subject)
+        }
+        Error(_) -> Error("Failed to create subscription")
+      }
     }
     Error(_) -> Error("Failed to start event handler actor")
   }
@@ -137,6 +165,16 @@ fn handle_actor_message(
   HandlerMessage(event),
 ) {
   case msg {
+    SetSubscriptionInfo(es, sub) -> {
+      actor.continue(
+        HandlerActorState(
+          ..state,
+          event_store: Some(es),
+          subscription: Some(sub),
+        ),
+      )
+    }
+
     HandleEvent(recorded_event) -> {
       case
         state.config.handle_event(
@@ -146,14 +184,32 @@ fn handle_actor_message(
         )
       {
         Ok(new_handler_state) -> {
+          // Acknowledge the event for backpressure
+          ack_event(state, recorded_event)
           actor.continue(
             HandlerActorState(..state, handler_state: new_handler_state),
           )
         }
         Error(_reason) -> {
+          // Still ack on error to prevent blocking the subscription
+          // (proper error handling with retry/skip/stop will be added in Module 10)
+          ack_event(state, recorded_event)
           actor.continue(state)
         }
       }
     }
+  }
+}
+
+fn ack_event(
+  state: HandlerActorState(event, handler_state),
+  event: RecordedEvent(event),
+) -> Nil {
+  case state.event_store, state.subscription {
+    Some(es), Some(sub) -> {
+      let _ = es.ack_event(sub, event)
+      Nil
+    }
+    _, _ -> Nil
   }
 }

@@ -221,7 +221,7 @@ fn handle_message(
 fn load_state(
   state: ServerState(state, command, event),
 ) -> ServerState(state, command, event) {
-  case state.config.event_store.read_stream_forward(state.config.stream_id, 1) {
+  case state.config.event_store.read_stream_forward(state.config.stream_id, 1, 1000) {
     Ok(recorded_events) -> {
       let events = list.map(recorded_events, fn(e) { e.data })
       let agg_state =

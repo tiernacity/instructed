@@ -3,6 +3,16 @@
 //// This event store stores all events in memory and is designed
 //// primarily for testing purposes. Events are lost when the process stops.
 ////
+//// ## Subscription Model
+////
+//// Persistent subscriptions deliver events one at a time to the subscriber
+//// via message passing. The subscriber must acknowledge each event via
+//// `ack_event` before the next event is delivered. This provides backpressure
+//// and matches Commanded's in-memory adapter behaviour.
+////
+//// The subscription checkpoint (last acknowledged event number) is tracked
+//// in memory. On restart, subscriptions resume from the last checkpoint.
+////
 //// ## Example
 ////
 //// ```gleam
@@ -20,11 +30,11 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/error.{
-  type EventStoreError, SnapshotNotFound, StreamNotFound,
-  SubscriptionAlreadyExists, SubscriptionNotFound, VersionConflict,
+  type EventStoreError, SnapshotNotFound, StreamAlreadyExists,
+  StreamNotFound, SubscriptionAlreadyExists, SubscriptionNotFound,
+  VersionConflict,
 }
-import instructed/event.{type EventData, type RecordedEvent,
-  RecordedEvent}
+import instructed/event.{type EventData, type RecordedEvent, RecordedEvent}
 import instructed/event_store.{
   type EventStore, type ExpectedVersion, type StartFrom, type Subscription,
   AnyVersion, Current, EventStore, ExactVersion, FromEventNumber, NoStream,
@@ -37,15 +47,15 @@ import youid/uuid
 
 type StoreState(event) {
   StoreState(
-    /// All events stored globally, newest first
+    /// All events stored globally, newest first (actually append order)
     all_events: List(RecordedEvent(event)),
-    /// Events indexed by stream ID
+    /// Events indexed by stream ID (in append order)
     streams: Dict(String, List(RecordedEvent(event))),
     /// Transient subscribers (all streams)
     all_subscribers: List(TransientSub(event)),
     /// Transient subscribers (specific streams)
     stream_subscribers: Dict(String, List(TransientSub(event))),
-    /// Persistent subscriptions
+    /// Persistent subscriptions keyed by "stream:name"
     persistent_subs: Dict(String, PersistentSub(event)),
     /// Snapshots by source UUID
     snapshots: Dict(String, SnapshotData(event)),
@@ -60,12 +70,19 @@ type TransientSub(event) {
   TransientSub(id: String, handler: fn(RecordedEvent(event)) -> Nil)
 }
 
+/// A persistent subscription tracks:
+/// - checkpoint: last acknowledged event number (durable position)
+/// - in_flight: event currently being processed by subscriber (if any)
+/// - pending: events queued waiting to be sent
+/// - handler: non-blocking callback to deliver events to subscriber
 type PersistentSub(event) {
   PersistentSub(
     name: String,
     stream: String,
     handler: fn(RecordedEvent(event)) -> Nil,
-    last_seen: Int,
+    checkpoint: Int,
+    in_flight: Option(RecordedEvent(event)),
+    pending: List(RecordedEvent(event)),
   )
 }
 
@@ -80,6 +97,7 @@ pub opaque type Message(event) {
   ReadStream(
     stream_id: String,
     start_version: Int,
+    batch_size: Int,
     reply: Subject(Result(List(RecordedEvent(event)), EventStoreError)),
   )
   ReadAll(
@@ -150,303 +168,521 @@ fn handle_message(
   msg: Message(event),
 ) -> actor.Next(StoreState(event), Message(event)) {
   case msg {
-    Append(stream_id, expected_version, events, reply) -> {
-      let stream_events =
-        dict.get(state.streams, stream_id) |> option_from_result
-      let current_version = case stream_events {
-        Some(evts) -> list.length(evts)
-        None -> 0
-      }
+    Append(stream_id, expected_version, events, reply) ->
+      handle_append(state, stream_id, expected_version, events, reply)
 
-      let version_ok = case expected_version {
-        AnyVersion -> True
-        NoStream -> current_version == 0
-        StreamExists -> current_version > 0
-        ExactVersion(v) -> current_version == v
-      }
+    ReadStream(stream_id, start_version, batch_size, reply) ->
+      handle_read_stream(state, stream_id, start_version, batch_size, reply)
 
-      case version_ok {
-        False -> {
-          process.send(reply, Error(VersionConflict))
-          actor.continue(state)
-        }
-        True -> {
-          let existing = case stream_events {
-            Some(evts) -> evts
-            None -> []
-          }
+    ReadAll(start_number, reply) ->
+      handle_read_all(state, start_number, reply)
 
-          let #(recorded, next_num, next_ver) =
-            create_recorded_events(
-              events,
-              stream_id,
-              state.next_event_number,
-              current_version,
-            )
+    SubscribeAll(handler, reply) ->
+      handle_subscribe_all(state, handler, reply)
 
-          let new_stream_events = list.append(existing, recorded)
+    SubscribeStream(stream_id, handler, reply) ->
+      handle_subscribe_stream(state, stream_id, handler, reply)
 
-          let new_streams =
-            dict.insert(state.streams, stream_id, new_stream_events)
-          let new_all = list.append(state.all_events, recorded)
+    SubscribePersistent(stream, name, start_from, handler, reply) ->
+      handle_subscribe_persistent(
+        state,
+        stream,
+        name,
+        start_from,
+        handler,
+        reply,
+      )
 
-          // Notify transient subscribers
-          list.each(state.all_subscribers, fn(sub) {
-            list.each(recorded, fn(evt) { sub.handler(evt) })
-          })
-          let stream_subs =
-            dict.get(state.stream_subscribers, stream_id)
-            |> option_from_result
-          case stream_subs {
-            Some(subs) ->
-              list.each(subs, fn(sub) {
-                list.each(recorded, fn(evt) { sub.handler(evt) })
-              })
-            None -> Nil
-          }
+    AckEvent(sub, event, reply) ->
+      handle_ack_event(state, sub, event, reply)
 
-          // Notify persistent subscribers
-          let _ = dict.each(state.persistent_subs, fn(_key, psub) {
-            case psub.stream == "$all" || psub.stream == stream_id {
-              True ->
-                list.each(recorded, fn(evt) {
-                  case evt.event_number > psub.last_seen {
-                    True -> psub.handler(evt)
-                    False -> Nil
-                  }
-                })
-              False -> Nil
-            }
-          })
+    Unsubscribe(sub, reply) ->
+      handle_unsubscribe(state, sub, reply)
 
-          let _ = next_ver
-          let new_state =
-            StoreState(
-              ..state,
-              all_events: new_all,
-              streams: new_streams,
-              next_event_number: next_num,
-            )
-          process.send(reply, Ok(current_version + list.length(recorded)))
-          actor.continue(new_state)
-        }
-      }
-    }
+    DeleteSubscription(stream, name, reply) ->
+      handle_delete_subscription(state, stream, name, reply)
 
-    ReadStream(stream_id, start_version, reply) -> {
-      case dict.get(state.streams, stream_id) {
-        Ok(events) -> {
-          let filtered =
-            list.filter(events, fn(e) { e.stream_version >= start_version })
-          process.send(reply, Ok(filtered))
-        }
-        Error(_) -> process.send(reply, Error(StreamNotFound))
-      }
-      actor.continue(state)
-    }
+    ReadSnapshot(source_uuid, reply) ->
+      handle_read_snapshot(state, source_uuid, reply)
 
-    ReadAll(start_number, reply) -> {
-      let filtered =
-        list.filter(state.all_events, fn(e) {
-          e.event_number >= start_number
-        })
-      process.send(reply, Ok(filtered))
-      actor.continue(state)
-    }
+    RecordSnapshot(snap, reply) ->
+      handle_record_snapshot(state, snap, reply)
 
-    SubscribeAll(handler, reply) -> {
-      let sub_id = "sub-" <> int.to_string(state.next_sub_id)
-      let sub = TransientSub(id: sub_id, handler: handler)
-      let new_state =
-        StoreState(
-          ..state,
-          all_subscribers: [sub, ..state.all_subscribers],
-          next_sub_id: state.next_sub_id + 1,
-        )
-      process.send(reply, Ok(Subscription(id: sub_id)))
-      actor.continue(new_state)
-    }
-
-    SubscribeStream(stream_id, handler, reply) -> {
-      let sub_id = "sub-" <> int.to_string(state.next_sub_id)
-      let sub = TransientSub(id: sub_id, handler: handler)
-      let existing =
-        dict.get(state.stream_subscribers, stream_id)
-        |> option_from_result
-      let subs = case existing {
-        Some(s) -> [sub, ..s]
-        None -> [sub]
-      }
-      let new_state =
-        StoreState(
-          ..state,
-          stream_subscribers: dict.insert(
-            state.stream_subscribers,
-            stream_id,
-            subs,
-          ),
-          next_sub_id: state.next_sub_id + 1,
-        )
-      process.send(reply, Ok(Subscription(id: sub_id)))
-      actor.continue(new_state)
-    }
-
-    SubscribePersistent(stream, name, start_from, handler, reply) -> {
-      let key = stream <> ":" <> name
-      case dict.get(state.persistent_subs, key) {
-        Ok(_) -> {
-          process.send(reply, Error(SubscriptionAlreadyExists))
-          actor.continue(state)
-        }
-        Error(_) -> {
-          let last_seen = case start_from {
-            Origin -> 0
-            Current -> case state.all_events {
-              [] -> 0
-              _ ->
-                list.fold(state.all_events, 0, fn(acc, e) {
-                  case e.event_number > acc {
-                    True -> e.event_number
-                    False -> acc
-                  }
-                })
-            }
-            FromEventNumber(n) -> n - 1
-          }
-          let psub =
-            PersistentSub(
-              name: name,
-              stream: stream,
-              handler: handler,
-              last_seen: last_seen,
-            )
-          let new_state =
-            StoreState(
-              ..state,
-              persistent_subs: dict.insert(state.persistent_subs, key, psub),
-            )
-          // Send historical events if starting from origin or specific number
-          case start_from {
-            Current -> Nil
-            _ -> {
-              let events = case stream == "$all" {
-                True -> state.all_events
-                False ->
-                  dict.get(state.streams, stream)
-                  |> option_from_result
-                  |> option.unwrap([])
-              }
-              list.each(events, fn(evt) {
-                case evt.event_number > last_seen {
-                  True -> handler(evt)
-                  False -> Nil
-                }
-              })
-            }
-          }
-          process.send(reply, Ok(Subscription(id: key)))
-          actor.continue(new_state)
-        }
-      }
-    }
-
-    AckEvent(sub, _event, reply) -> {
-      // For in-memory, ack is essentially a no-op but we track position
-      let _ = sub
-      process.send(reply, Ok(Nil))
-      actor.continue(state)
-    }
-
-    Unsubscribe(sub, reply) -> {
-      let new_all_subs =
-        list.filter(state.all_subscribers, fn(s) { s.id != sub.id })
-      let new_stream_subs =
-        dict.map_values(state.stream_subscribers, fn(_k, subs) {
-          list.filter(subs, fn(s) { s.id != sub.id })
-        })
-      let new_persistent =
-        dict.filter(state.persistent_subs, fn(k, _v) { k != sub.id })
-      let new_state =
-        StoreState(
-          ..state,
-          all_subscribers: new_all_subs,
-          stream_subscribers: new_stream_subs,
-          persistent_subs: new_persistent,
-        )
-      process.send(reply, Ok(Nil))
-      actor.continue(new_state)
-    }
-
-    DeleteSubscription(stream, name, reply) -> {
-      let key = stream <> ":" <> name
-      case dict.get(state.persistent_subs, key) {
-        Ok(_) -> {
-          let new_state =
-            StoreState(
-              ..state,
-              persistent_subs: dict.delete(state.persistent_subs, key),
-            )
-          process.send(reply, Ok(Nil))
-          actor.continue(new_state)
-        }
-        Error(_) -> {
-          process.send(reply, Error(SubscriptionNotFound))
-          actor.continue(state)
-        }
-      }
-    }
-
-    ReadSnapshot(source_uuid, reply) -> {
-      case dict.get(state.snapshots, source_uuid) {
-        Ok(snap) -> process.send(reply, Ok(snap))
-        Error(_) -> process.send(reply, Error(SnapshotNotFound))
-      }
-      actor.continue(state)
-    }
-
-    RecordSnapshot(snap, reply) -> {
-      let new_state =
-        StoreState(
-          ..state,
-          snapshots: dict.insert(state.snapshots, snap.source_uuid, snap),
-        )
-      process.send(reply, Ok(Nil))
-      actor.continue(new_state)
-    }
-
-    DeleteSnapshot(source_uuid, reply) -> {
-      let new_state =
-        StoreState(
-          ..state,
-          snapshots: dict.delete(state.snapshots, source_uuid),
-        )
-      process.send(reply, Ok(Nil))
-      actor.continue(new_state)
-    }
+    DeleteSnapshot(source_uuid, reply) ->
+      handle_delete_snapshot(state, source_uuid, reply)
 
     Reset(reply) -> {
       process.send(reply, Ok(Nil))
       actor.continue(initial_state())
     }
 
-    GetLatestEventNumber(reply) -> {
-      case state.all_events {
-        [] -> process.send(reply, Ok(None))
-        _ -> {
-          let max =
-            list.fold(state.all_events, 0, fn(acc, e) {
-              case e.event_number > acc {
-                True -> e.event_number
-                False -> acc
-              }
-            })
-          process.send(reply, Ok(Some(max)))
+    GetLatestEventNumber(reply) ->
+      handle_get_latest_event_number(state, reply)
+  }
+}
+
+// --- Append ---
+
+fn handle_append(
+  state: StoreState(event),
+  stream_id: String,
+  expected_version: ExpectedVersion,
+  events: List(EventData(event)),
+  reply: Subject(Result(Int, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let stream_events = dict.get(state.streams, stream_id)
+  let current_version = case stream_events {
+    Ok(evts) -> list.length(evts)
+    Error(_) -> 0
+  }
+  let stream_exists = case stream_events {
+    Ok(_) -> True
+    Error(_) -> False
+  }
+
+  // Check expected version - with specific error types matching Commanded
+  let version_check = case expected_version {
+    AnyVersion -> Ok(Nil)
+    NoStream ->
+      case stream_exists {
+        True -> Error(StreamAlreadyExists)
+        False -> Ok(Nil)
+      }
+    StreamExists ->
+      case stream_exists {
+        True -> Ok(Nil)
+        False -> Error(StreamNotFound)
+      }
+    ExactVersion(v) ->
+      case current_version == v {
+        True -> Ok(Nil)
+        False -> Error(VersionConflict)
+      }
+  }
+
+  case version_check {
+    Error(err) -> {
+      process.send(reply, Error(err))
+      actor.continue(state)
+    }
+    Ok(_) -> {
+      let existing = case stream_events {
+        Ok(evts) -> evts
+        Error(_) -> []
+      }
+
+      let #(recorded, next_num, _next_ver) =
+        create_recorded_events(
+          events,
+          stream_id,
+          state.next_event_number,
+          current_version,
+        )
+
+      let new_stream_events = list.append(existing, recorded)
+      let new_streams =
+        dict.insert(state.streams, stream_id, new_stream_events)
+      let new_all = list.append(state.all_events, recorded)
+
+      // Notify transient subscribers (non-blocking callbacks)
+      list.each(state.all_subscribers, fn(sub) {
+        list.each(recorded, fn(evt) { sub.handler(evt) })
+      })
+      case dict.get(state.stream_subscribers, stream_id) {
+        Ok(subs) ->
+          list.each(subs, fn(sub) {
+            list.each(recorded, fn(evt) { sub.handler(evt) })
+          })
+        Error(_) -> Nil
+      }
+
+      // Queue events for persistent subscribers and deliver if available
+      let new_persistent_subs =
+        dict.map_values(state.persistent_subs, fn(_key, psub) {
+          case psub.stream == "$all" || psub.stream == stream_id {
+            True -> {
+              // Filter to only new events (after checkpoint)
+              let new_events =
+                list.filter(recorded, fn(evt) {
+                  evt.event_number > psub.checkpoint
+                })
+              // Add to pending queue
+              let updated =
+                PersistentSub(
+                  ..psub,
+                  pending: list.append(psub.pending, new_events),
+                )
+              // Try to deliver next event if nothing in-flight
+              maybe_deliver_next(updated)
+            }
+            False -> psub
+          }
+        })
+
+      let new_state =
+        StoreState(
+          ..state,
+          all_events: new_all,
+          streams: new_streams,
+          next_event_number: next_num,
+          persistent_subs: new_persistent_subs,
+        )
+      process.send(reply, Ok(current_version + list.length(recorded)))
+      actor.continue(new_state)
+    }
+  }
+}
+
+/// Try to deliver the next pending event to the subscriber.
+/// Only delivers if there's no event currently in-flight.
+fn maybe_deliver_next(psub: PersistentSub(event)) -> PersistentSub(event) {
+  case psub.in_flight {
+    Some(_) ->
+      // Already processing an event, wait for ack
+      psub
+    None ->
+      case psub.pending {
+        [] ->
+          // No pending events
+          psub
+        [next, ..rest] -> {
+          // Deliver event to subscriber via handler callback.
+          // The handler MUST be non-blocking (e.g., process.send to an actor).
+          psub.handler(next)
+          PersistentSub(..psub, in_flight: Some(next), pending: rest)
         }
       }
+  }
+}
+
+// --- Read Stream ---
+
+fn handle_read_stream(
+  state: StoreState(event),
+  stream_id: String,
+  start_version: Int,
+  batch_size: Int,
+  reply: Subject(Result(List(RecordedEvent(event)), EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  case dict.get(state.streams, stream_id) {
+    Ok(events) -> {
+      let filtered =
+        events
+        |> list.filter(fn(e) { e.stream_version >= start_version })
+        |> list.take(batch_size)
+      process.send(reply, Ok(filtered))
+    }
+    Error(_) -> process.send(reply, Error(StreamNotFound))
+  }
+  actor.continue(state)
+}
+
+// --- Read All ---
+
+fn handle_read_all(
+  state: StoreState(event),
+  start_number: Int,
+  reply: Subject(Result(List(RecordedEvent(event)), EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let filtered =
+    list.filter(state.all_events, fn(e) { e.event_number >= start_number })
+  process.send(reply, Ok(filtered))
+  actor.continue(state)
+}
+
+// --- Transient Subscriptions ---
+
+fn handle_subscribe_all(
+  state: StoreState(event),
+  handler: fn(RecordedEvent(event)) -> Nil,
+  reply: Subject(Result(Subscription, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let sub_id = "sub-" <> int.to_string(state.next_sub_id)
+  let sub = TransientSub(id: sub_id, handler: handler)
+  let new_state =
+    StoreState(
+      ..state,
+      all_subscribers: [sub, ..state.all_subscribers],
+      next_sub_id: state.next_sub_id + 1,
+    )
+  process.send(reply, Ok(Subscription(id: sub_id)))
+  actor.continue(new_state)
+}
+
+fn handle_subscribe_stream(
+  state: StoreState(event),
+  stream_id: String,
+  handler: fn(RecordedEvent(event)) -> Nil,
+  reply: Subject(Result(Subscription, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let sub_id = "sub-" <> int.to_string(state.next_sub_id)
+  let sub = TransientSub(id: sub_id, handler: handler)
+  let existing = case dict.get(state.stream_subscribers, stream_id) {
+    Ok(s) -> s
+    Error(_) -> []
+  }
+  let subs = [sub, ..existing]
+  let new_state =
+    StoreState(
+      ..state,
+      stream_subscribers: dict.insert(
+        state.stream_subscribers,
+        stream_id,
+        subs,
+      ),
+      next_sub_id: state.next_sub_id + 1,
+    )
+  process.send(reply, Ok(Subscription(id: sub_id)))
+  actor.continue(new_state)
+}
+
+// --- Persistent Subscriptions ---
+
+fn handle_subscribe_persistent(
+  state: StoreState(event),
+  stream: String,
+  name: String,
+  start_from: StartFrom,
+  handler: fn(RecordedEvent(event)) -> Nil,
+  reply: Subject(Result(Subscription, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let key = stream <> ":" <> name
+  case dict.get(state.persistent_subs, key) {
+    Ok(_) -> {
+      process.send(reply, Error(SubscriptionAlreadyExists))
+      actor.continue(state)
+    }
+    Error(_) -> {
+      let checkpoint = case start_from {
+        Origin -> 0
+        Current ->
+          case state.all_events {
+            [] -> 0
+            _ ->
+              list.fold(state.all_events, 0, fn(acc, e) {
+                case e.event_number > acc {
+                  True -> e.event_number
+                  False -> acc
+                }
+              })
+          }
+        FromEventNumber(n) -> n - 1
+      }
+
+      // Gather historical events to replay
+      let historical_events = case start_from {
+        Current -> []
+        _ -> {
+          let events = case stream == "$all" {
+            True -> state.all_events
+            False ->
+              case dict.get(state.streams, stream) {
+                Ok(evts) -> evts
+                Error(_) -> []
+              }
+          }
+          list.filter(events, fn(evt) { evt.event_number > checkpoint })
+        }
+      }
+
+      let psub =
+        PersistentSub(
+          name: name,
+          stream: stream,
+          handler: handler,
+          checkpoint: checkpoint,
+          in_flight: None,
+          pending: historical_events,
+        )
+
+      // Try to deliver the first event
+      let psub = maybe_deliver_next(psub)
+
+      let new_state =
+        StoreState(
+          ..state,
+          persistent_subs: dict.insert(state.persistent_subs, key, psub),
+        )
+      process.send(reply, Ok(Subscription(id: key)))
+      actor.continue(new_state)
+    }
+  }
+}
+
+// --- Ack Event ---
+
+fn handle_ack_event(
+  state: StoreState(event),
+  sub: Subscription,
+  event: RecordedEvent(event),
+  reply: Subject(Result(Nil, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  case dict.get(state.persistent_subs, sub.id) {
+    Ok(psub) -> {
+      // Update checkpoint to the acknowledged event's event_number
+      let new_checkpoint = event.event_number
+      let updated =
+        PersistentSub(
+          ..psub,
+          checkpoint: new_checkpoint,
+          in_flight: None,
+        )
+      // Try to deliver next pending event
+      let updated = maybe_deliver_next(updated)
+      let new_state =
+        StoreState(
+          ..state,
+          persistent_subs: dict.insert(
+            state.persistent_subs,
+            sub.id,
+            updated,
+          ),
+        )
+      process.send(reply, Ok(Nil))
+      actor.continue(new_state)
+    }
+    Error(_) -> {
+      process.send(reply, Error(SubscriptionNotFound))
       actor.continue(state)
     }
   }
 }
+
+// --- Unsubscribe ---
+
+fn handle_unsubscribe(
+  state: StoreState(event),
+  sub: Subscription,
+  reply: Subject(Result(Nil, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  // Remove from transient subscribers
+  let new_all_subs =
+    list.filter(state.all_subscribers, fn(s) { s.id != sub.id })
+  let new_stream_subs =
+    dict.map_values(state.stream_subscribers, fn(_k, subs) {
+      list.filter(subs, fn(s) { s.id != sub.id })
+    })
+  // For persistent subscriptions: pause delivery but keep position
+  // We remove the subscriber reference but keep the subscription with its checkpoint
+  let new_persistent =
+    dict.map_values(state.persistent_subs, fn(k, psub) {
+      case k == sub.id {
+        True ->
+          // Reset in-flight back to pending if there was one
+          case psub.in_flight {
+            Some(evt) ->
+              PersistentSub(
+                ..psub,
+                in_flight: None,
+                pending: [evt, ..psub.pending],
+              )
+            None -> psub
+          }
+        False -> psub
+      }
+    })
+  let new_state =
+    StoreState(
+      ..state,
+      all_subscribers: new_all_subs,
+      stream_subscribers: new_stream_subs,
+      persistent_subs: new_persistent,
+    )
+  process.send(reply, Ok(Nil))
+  actor.continue(new_state)
+}
+
+// --- Delete Subscription ---
+
+fn handle_delete_subscription(
+  state: StoreState(event),
+  stream: String,
+  name: String,
+  reply: Subject(Result(Nil, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let key = stream <> ":" <> name
+  case dict.get(state.persistent_subs, key) {
+    Ok(_) -> {
+      let new_state =
+        StoreState(
+          ..state,
+          persistent_subs: dict.delete(state.persistent_subs, key),
+        )
+      process.send(reply, Ok(Nil))
+      actor.continue(new_state)
+    }
+    Error(_) -> {
+      process.send(reply, Error(SubscriptionNotFound))
+      actor.continue(state)
+    }
+  }
+}
+
+// --- Snapshots ---
+
+fn handle_read_snapshot(
+  state: StoreState(event),
+  source_uuid: String,
+  reply: Subject(Result(SnapshotData(event), EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  case dict.get(state.snapshots, source_uuid) {
+    Ok(snap) -> process.send(reply, Ok(snap))
+    Error(_) -> process.send(reply, Error(SnapshotNotFound))
+  }
+  actor.continue(state)
+}
+
+fn handle_record_snapshot(
+  state: StoreState(event),
+  snap: SnapshotData(event),
+  reply: Subject(Result(Nil, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let new_state =
+    StoreState(
+      ..state,
+      snapshots: dict.insert(state.snapshots, snap.source_uuid, snap),
+    )
+  process.send(reply, Ok(Nil))
+  actor.continue(new_state)
+}
+
+fn handle_delete_snapshot(
+  state: StoreState(event),
+  source_uuid: String,
+  reply: Subject(Result(Nil, EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  let new_state =
+    StoreState(
+      ..state,
+      snapshots: dict.delete(state.snapshots, source_uuid),
+    )
+  process.send(reply, Ok(Nil))
+  actor.continue(new_state)
+}
+
+// --- Get Latest Event Number ---
+
+fn handle_get_latest_event_number(
+  state: StoreState(event),
+  reply: Subject(Result(Option(Int), EventStoreError)),
+) -> actor.Next(StoreState(event), Message(event)) {
+  case state.all_events {
+    [] -> process.send(reply, Ok(None))
+    _ -> {
+      let max =
+        list.fold(state.all_events, 0, fn(acc, e) {
+          case e.event_number > acc {
+            True -> e.event_number
+            False -> acc
+          }
+        })
+      process.send(reply, Ok(Some(max)))
+    }
+  }
+  actor.continue(state)
+}
+
+// --- Helpers ---
 
 fn create_recorded_events(
   events: List(EventData(event)),
@@ -473,13 +709,6 @@ fn create_recorded_events(
       #(list.append(recorded_list, [recorded]), num + 1, new_ver)
     })
   result
-}
-
-fn option_from_result(result: Result(a, b)) -> Option(a) {
-  case result {
-    Ok(val) -> Some(val)
-    Error(_) -> None
-  }
 }
 
 @external(erlang, "os", "system_time")
@@ -518,9 +747,9 @@ pub fn to_event_store(
         Append(stream_id, expected_version, events, reply)
       })
     },
-    read_stream_forward: fn(stream_id, start_version) {
+    read_stream_forward: fn(stream_id, start_version, batch_size) {
       process.call(subject, call_timeout, fn(reply) {
-        ReadStream(stream_id, start_version, reply)
+        ReadStream(stream_id, start_version, batch_size, reply)
       })
     },
     subscribe: fn(handler) {

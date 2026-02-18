@@ -151,7 +151,7 @@ pub fn read_stream(
   app: Application(event),
   stream_id: String,
 ) -> Result(List(RecordedEvent(event)), error.EventStoreError) {
-  app.event_store.read_stream_forward(stream_id, 1)
+  app.event_store.read_stream_forward(stream_id, 1, 1000)
 }
 
 import instructed/error

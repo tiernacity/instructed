@@ -134,7 +134,7 @@ pub fn dispatch_with_prefix_test() {
   let assert Ok(_) = router.dispatch(r, CreateCounter("c4"))
 
   // Verify events are stored with prefix
-  let assert Ok(events) = store.read_stream_forward("counter-c4", 1)
+  let assert Ok(events) = store.read_stream_forward("counter-c4", 1, 1000)
   should.equal(events |> list.length, 1)
 }
 
