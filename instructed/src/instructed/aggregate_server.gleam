@@ -38,7 +38,7 @@ import instructed/aggregate.{type Aggregate}
 import instructed/error.{type DispatchError}
 import instructed/event.{type RecordedEvent, EventData}
 import instructed/event_store.{type EventStore, ExactVersion}
-import instructed/router.{type DispatchResult, DispatchResult}
+import instructed/dispatch_result.{type DispatchResult, DispatchResult}
 import instructed/snapshot.{type SnapshotConfig}
 
 /// Default retry attempts on version conflict.

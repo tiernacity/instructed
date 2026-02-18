@@ -15,8 +15,8 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [x] 4. Aggregate Core (types + state rebuilding)
 - [x] 5. Aggregate Server (GenServer process per instance)
 - [x] 6. Snapshot Types & Integration
-- [ ] 7. Command Context & Execution
-- [ ] 8. Middleware Pipeline
+- [x] 7. Command Context & Execution
+- [x] 8. Middleware Pipeline
 - [ ] 9. Command Router (wiring aggregate server, identity, retry)
 - [ ] 10. Event Handler (lifecycle, subscriptions, error handling, idempotency)
 - [ ] 11. Projection (builds on event handler patterns)

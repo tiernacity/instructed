@@ -31,7 +31,8 @@ import gleam/otp/actor
 import instructed/event.{type RecordedEvent}
 import instructed/event_store.{type EventStore}
 import instructed/projection.{type ProjectionConfig, type ProjectionMessage}
-import instructed/router.{type DispatchResult, type Router}
+import instructed/dispatch_result.{type DispatchResult}
+import instructed/router.{type Router}
 
 /// Application configuration.
 pub type AppConfig(event) {
