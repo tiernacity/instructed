@@ -3,21 +3,29 @@
 //// A projection subscribes to domain events and builds a queryable read model.
 //// This is the "Query" side of CQRS.
 ////
-//// After processing each event, the projection acknowledges it to the event
-//// store, enabling backpressure (next event won't be delivered until ack).
+//// In Commanded, projections ARE event handlers — there's no separate
+//// projection module in core. The `commanded_ecto_projections` library adds
+//// database-backed projections. Instructed provides in-memory projections
+//// with the same handler guarantees (ack, idempotency, error handling).
+////
+//// ## Features
+////
+//// - In-memory state queryable via get_state
+//// - Event acknowledgment for backpressure
+//// - Idempotency via last_seen_event tracking
+//// - Error handling via on_error callback
+//// - start_from semantics (only applies on first subscription)
 ////
 //// ## Example
 ////
 //// ```gleam
-//// import instructed/projection
-////
 //// let proj = projection.new(
 ////   name: "account_balances",
 ////   initial_state: dict.new(),
 ////   handle_event: fn(event, _recorded, state) {
 ////     case event {
 ////       AccountOpened(num, balance) ->
-////         Ok(dict.insert(state, num, AccountBalance(num, balance)))
+////         Ok(dict.insert(state, num, balance))
 ////       _ -> Ok(state)
 ////     }
 ////   },
@@ -30,21 +38,29 @@
 import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
+import instructed/error
 import instructed/event.{type RecordedEvent}
 import instructed/event_store.{
-  type EventStore, type Subscription, Origin,
+  type EventStore, type StartFrom, type Subscription, Origin,
 }
 
 /// Configuration for a projection.
 pub type ProjectionConfig(event, projection_state) {
   ProjectionConfig(
-    /// Unique name for this projection
+    /// Unique name for this projection (must be stable across restarts)
     name: String,
     /// Initial state for the projection
     initial_state: projection_state,
     /// Function to handle each event and update projection state
     handle_event: fn(event, RecordedEvent(event), projection_state) ->
       Result(projection_state, String),
+    /// Where to start from on first subscription creation
+    start_from: StartFrom,
+    /// Optional error callback
+    on_error: Option(
+      fn(String, RecordedEvent(event), projection_state) ->
+        error.ErrorAction(projection_state),
+    ),
   )
 }
 
@@ -59,7 +75,26 @@ pub fn new(
     name: name,
     initial_state: initial_state,
     handle_event: handle_event,
+    start_from: Origin,
+    on_error: None,
   )
+}
+
+/// Set where to start from (only applies on first subscription creation).
+pub fn with_start_from(
+  config: ProjectionConfig(event, projection_state),
+  start_from: StartFrom,
+) -> ProjectionConfig(event, projection_state) {
+  ProjectionConfig(..config, start_from: start_from)
+}
+
+/// Set the error callback.
+pub fn with_error_handler(
+  config: ProjectionConfig(event, projection_state),
+  on_error: fn(String, RecordedEvent(event), projection_state) ->
+    error.ErrorAction(projection_state),
+) -> ProjectionConfig(event, projection_state) {
+  ProjectionConfig(..config, on_error: Some(on_error))
 }
 
 /// Internal state of the projection actor.
@@ -67,10 +102,9 @@ type ProjectionActorState(event, projection_state) {
   ProjectionActorState(
     config: ProjectionConfig(event, projection_state),
     state: projection_state,
-    /// Event store reference for acknowledging events
     event_store: Option(EventStore(event)),
-    /// Subscription reference for acknowledging events
     subscription: Option(Subscription),
+    last_seen_event: Option(Int),
   )
 }
 
@@ -78,12 +112,10 @@ type ProjectionActorState(event, projection_state) {
 pub opaque type ProjectionMessage(event, projection_state) {
   ProjectionHandleEvent(RecordedEvent(event))
   GetState(Subject(projection_state))
-  /// Internal: set subscription info for event acknowledgment
   SetSubscriptionInfo(EventStore(event), Subscription)
 }
 
 /// Start a projection, subscribing to the event store.
-/// Events are acknowledged after processing to enable backpressure.
 pub fn start(
   config: ProjectionConfig(event, projection_state),
   event_store: EventStore(event),
@@ -94,6 +126,7 @@ pub fn start(
       state: config.initial_state,
       event_store: None,
       subscription: None,
+      last_seen_event: None,
     )
 
   case
@@ -104,29 +137,45 @@ pub fn start(
     Ok(started) -> {
       let subject = started.data
 
-      // Non-blocking handler: sends event to actor's mailbox
       let handler = fn(event: RecordedEvent(event)) {
         process.send(subject, ProjectionHandleEvent(event))
       }
 
-      // Delete any existing subscription first (for restarts)
-      let _ = event_store.delete_subscription("$all", config.name)
-
+      // Try to subscribe (don't delete existing - resume from last position)
       case
         event_store.subscribe_persistent(
           "$all",
           config.name,
-          Origin,
+          config.start_from,
           handler,
         )
       {
         Ok(subscription) -> {
-          // Send subscription info to actor so it can ack events
           process.send(
             subject,
             SetSubscriptionInfo(event_store, subscription),
           )
           Ok(subject)
+        }
+        Error(error.SubscriptionAlreadyExists) -> {
+          let _ = event_store.delete_subscription("$all", config.name)
+          case
+            event_store.subscribe_persistent(
+              "$all",
+              config.name,
+              config.start_from,
+              handler,
+            )
+          {
+            Ok(subscription) -> {
+              process.send(
+                subject,
+                SetSubscriptionInfo(event_store, subscription),
+              )
+              Ok(subject)
+            }
+            Error(_) -> Error("Failed to create subscription")
+          }
         }
         Error(_) -> Error("Failed to create subscription")
       }
@@ -162,23 +211,132 @@ fn handle_projection_message(
     }
 
     ProjectionHandleEvent(recorded_event) -> {
-      case
-        state.config.handle_event(
-          recorded_event.data,
-          recorded_event,
-          state.state,
-        )
-      {
-        Ok(new_state) -> {
-          // Acknowledge the event for backpressure
-          ack_event(state, recorded_event)
-          actor.continue(ProjectionActorState(..state, state: new_state))
-        }
-        Error(_) -> {
-          // Still ack on error to prevent blocking the subscription
-          // (proper error handling will be added in Module 10)
+      // Idempotency guard
+      case state.last_seen_event {
+        Some(last) if recorded_event.event_number <= last -> {
           ack_event(state, recorded_event)
           actor.continue(state)
+        }
+        _ -> {
+          case
+            state.config.handle_event(
+              recorded_event.data,
+              recorded_event,
+              state.state,
+            )
+          {
+            Ok(new_state) -> {
+              ack_event(state, recorded_event)
+              actor.continue(
+                ProjectionActorState(
+                  ..state,
+                  state: new_state,
+                  last_seen_event: Some(recorded_event.event_number),
+                ),
+              )
+            }
+            Error(reason) -> {
+              // Handle error via callback or skip
+              case state.config.on_error {
+                None -> {
+                  // Default: skip and continue (projections shouldn't block)
+                  ack_event(state, recorded_event)
+                  actor.continue(
+                    ProjectionActorState(
+                      ..state,
+                      last_seen_event: Some(recorded_event.event_number),
+                    ),
+                  )
+                }
+                Some(error_fn) -> {
+                  case error_fn(reason, recorded_event, state.state) {
+                    error.Skip -> {
+                      ack_event(state, recorded_event)
+                      actor.continue(
+                        ProjectionActorState(
+                          ..state,
+                          last_seen_event: Some(recorded_event.event_number),
+                        ),
+                      )
+                    }
+                    error.Retry(new_state) -> {
+                      case
+                        state.config.handle_event(
+                          recorded_event.data,
+                          recorded_event,
+                          new_state,
+                        )
+                      {
+                        Ok(final_state) -> {
+                          ack_event(state, recorded_event)
+                          actor.continue(
+                            ProjectionActorState(
+                              ..state,
+                              state: final_state,
+                              last_seen_event: Some(
+                                recorded_event.event_number,
+                              ),
+                            ),
+                          )
+                        }
+                        Error(_) -> {
+                          ack_event(state, recorded_event)
+                          actor.continue(
+                            ProjectionActorState(
+                              ..state,
+                              state: new_state,
+                              last_seen_event: Some(
+                                recorded_event.event_number,
+                              ),
+                            ),
+                          )
+                        }
+                      }
+                    }
+                    error.RetryWithDelay(delay_ms, new_state) -> {
+                      process.sleep(delay_ms)
+                      case
+                        state.config.handle_event(
+                          recorded_event.data,
+                          recorded_event,
+                          new_state,
+                        )
+                      {
+                        Ok(final_state) -> {
+                          ack_event(state, recorded_event)
+                          actor.continue(
+                            ProjectionActorState(
+                              ..state,
+                              state: final_state,
+                              last_seen_event: Some(
+                                recorded_event.event_number,
+                              ),
+                            ),
+                          )
+                        }
+                        Error(_) -> {
+                          ack_event(state, recorded_event)
+                          actor.continue(
+                            ProjectionActorState(
+                              ..state,
+                              state: new_state,
+                              last_seen_event: Some(
+                                recorded_event.event_number,
+                              ),
+                            ),
+                          )
+                        }
+                      }
+                    }
+                    error.Stop(_) -> {
+                      ack_event(state, recorded_event)
+                      actor.stop()
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
