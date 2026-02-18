@@ -30,15 +30,16 @@
 //// ```
 
 import gleam/dict
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Subject, type Timer}
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/aggregate.{type Aggregate}
 import instructed/error.{type DispatchError}
 import instructed/event.{type RecordedEvent, EventData}
 import instructed/event_store.{type EventStore, ExactVersion}
 import instructed/dispatch_result.{type DispatchResult, DispatchResult}
+import instructed/lifespan.{type Lifespan, type LifespanDecision}
 import instructed/snapshot.{type SnapshotConfig}
 
 /// Default retry attempts on version conflict.
@@ -62,6 +63,9 @@ pub type Config(state, command, event) {
     retry_attempts: Int,
     /// Snapshot configuration
     snapshot_config: SnapshotConfig,
+    /// Optional lifespan configuration.
+    /// Controls when the aggregate process should stop itself.
+    lifespan: Option(Lifespan(state, command, event)),
   )
 }
 
@@ -77,6 +81,7 @@ pub fn new_config(
     stream_id: stream_id,
     retry_attempts: default_retry_attempts,
     snapshot_config: snapshot.default_config(),
+    lifespan: None,
   )
 }
 
@@ -96,6 +101,16 @@ pub fn with_snapshot_config(
   Config(..config, snapshot_config: snapshot_config)
 }
 
+/// Set lifespan configuration.
+/// Controls when the aggregate process should stop itself based on
+/// commands, errors, or externally-applied events.
+pub fn with_lifespan(
+  config: Config(state, command, event),
+  lifespan: Lifespan(state, command, event),
+) -> Config(state, command, event) {
+  Config(..config, lifespan: Some(lifespan))
+}
+
 /// The internal state of an aggregate server.
 type ServerState(state, command, event) {
   ServerState(
@@ -105,11 +120,20 @@ type ServerState(state, command, event) {
     loaded: Bool,
     /// Number of events since last snapshot
     events_since_snapshot: Int,
+    /// Pending lifespan idle timer (for StopAfter decisions)
+    pending_timer: Option(Timer),
+    /// Self-subject reference, set immediately after start.
+    /// Used to schedule lifespan timeout messages.
+    self_subject: Option(Subject(ServerMessage(state, command, event))),
   )
 }
 
 /// Messages the aggregate server can receive.
 pub opaque type ServerMessage(state, command, event) {
+  /// Initialises the server's self-subject reference (sent immediately after start).
+  SetSelf(subject: Subject(ServerMessage(state, command, event)))
+  /// Lifespan idle timeout fired — stop the aggregate process.
+  LifespanTimeout
   Execute(
     command: command,
     causation_id: Option(String),
@@ -133,6 +157,8 @@ pub fn start(
       aggregate_version: 0,
       loaded: False,
       events_since_snapshot: 0,
+      pending_timer: None,
+      self_subject: None,
     )
 
   case
@@ -142,6 +168,9 @@ pub fn start(
   {
     Ok(started) -> {
       let subject = started.data
+
+      // Send self-subject so the actor can schedule lifespan timers
+      process.send(subject, SetSelf(subject))
 
       // Subscribe to the aggregate's own stream to catch external events.
       // This matches Commanded's handle_continue(:subscribe_to_events).
@@ -202,7 +231,19 @@ fn handle_message(
   ServerMessage(state, command, event),
 ) {
   case msg {
+    SetSelf(subject) -> {
+      actor.continue(ServerState(..state, self_subject: Some(subject)))
+    }
+
+    LifespanTimeout -> {
+      // Idle timeout fired — stop the aggregate process
+      actor.stop()
+    }
+
     Execute(command, causation_id, correlation_id, metadata, reply) -> {
+      // Cancel any pending idle timer (new command resets the clock)
+      let state = cancel_pending_timer(state)
+
       // Ensure aggregate state is loaded from event store
       let state = case state.loaded {
         True -> state
@@ -221,7 +262,16 @@ fn handle_message(
         )
 
       process.send(reply, result)
-      actor.continue(new_state)
+
+      // Apply lifespan decision based on result
+      case result {
+        Ok(_) ->
+          apply_lifespan_after_command(new_state, command)
+        Error(error.AggregateError(reason)) ->
+          apply_lifespan_after_error(new_state, command, reason)
+        Error(_) ->
+          actor.continue(new_state)
+      }
     }
 
     ExternalEvent(recorded_event) -> {
@@ -237,13 +287,13 @@ fn handle_message(
                   state.aggregate_state,
                   recorded_event.data,
                 )
-              actor.continue(
+              let new_state =
                 ServerState(
                   ..state,
                   aggregate_state: new_agg_state,
                   aggregate_version: recorded_event.stream_version,
-                ),
-              )
+                )
+              apply_lifespan_after_event(new_state, recorded_event.data)
             }
             False -> {
               // Gap in events - reload from event store
@@ -462,6 +512,111 @@ fn maybe_take_snapshot(
       ServerState(..state, events_since_snapshot: 0)
     }
     False -> state
+  }
+}
+
+// --- Lifespan helpers ---
+
+/// Cancel any pending idle timeout timer.
+fn cancel_pending_timer(
+  state: ServerState(state, command, event),
+) -> ServerState(state, command, event) {
+  case state.pending_timer {
+    None -> state
+    Some(timer) -> {
+      let _ = process.cancel_timer(timer)
+      ServerState(..state, pending_timer: None)
+    }
+  }
+}
+
+/// Apply a lifespan decision, returning the appropriate actor.Next value.
+fn apply_lifespan_decision(
+  state: ServerState(state, command, event),
+  decision: LifespanDecision,
+) -> actor.Next(
+  ServerState(state, command, event),
+  ServerMessage(state, command, event),
+) {
+  case decision {
+    lifespan.KeepRunning -> actor.continue(state)
+    lifespan.Hibernate -> actor.continue(state)
+    lifespan.Stop -> actor.stop()
+    lifespan.StopAfter(ms) ->
+      schedule_lifespan_timeout(state, ms)
+  }
+}
+
+/// Apply lifespan decision after a successful command execution.
+fn apply_lifespan_after_command(
+  state: ServerState(state, command, event),
+  command: command,
+) -> actor.Next(
+  ServerState(state, command, event),
+  ServerMessage(state, command, event),
+) {
+  case state.config.lifespan {
+    None -> actor.continue(state)
+    Some(ls) -> {
+      let decision = ls.after_command(state.aggregate_state, command)
+      apply_lifespan_decision(state, decision)
+    }
+  }
+}
+
+/// Apply lifespan decision after a command error.
+fn apply_lifespan_after_error(
+  state: ServerState(state, command, event),
+  command: command,
+  reason: String,
+) -> actor.Next(
+  ServerState(state, command, event),
+  ServerMessage(state, command, event),
+) {
+  case state.config.lifespan {
+    None -> actor.continue(state)
+    Some(ls) -> {
+      let decision = ls.after_error(state.aggregate_state, command, reason)
+      apply_lifespan_decision(state, decision)
+    }
+  }
+}
+
+/// Apply lifespan decision after an external event is applied.
+fn apply_lifespan_after_event(
+  state: ServerState(state, command, event),
+  event: event,
+) -> actor.Next(
+  ServerState(state, command, event),
+  ServerMessage(state, command, event),
+) {
+  case state.config.lifespan {
+    None -> actor.continue(state)
+    Some(ls) -> {
+      let decision = ls.after_event(state.aggregate_state, event)
+      apply_lifespan_decision(state, decision)
+    }
+  }
+}
+
+/// Schedule a LifespanTimeout message to ourselves after ms milliseconds.
+/// Uses the self_subject stored during actor initialization.
+fn schedule_lifespan_timeout(
+  state: ServerState(state, command, event),
+  ms: Int,
+) -> actor.Next(
+  ServerState(state, command, event),
+  ServerMessage(state, command, event),
+) {
+  let state = cancel_pending_timer(state)
+  case state.self_subject {
+    None ->
+      // Subject not yet initialized — can't schedule; just continue
+      actor.continue(state)
+    Some(subject) -> {
+      let timer = process.send_after(subject, ms, LifespanTimeout)
+      actor.continue(ServerState(..state, pending_timer: Some(timer)))
+    }
   }
 }
 
