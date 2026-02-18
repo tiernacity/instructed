@@ -96,6 +96,7 @@ pub opaque type Message(event) {
   ReadStream(
     stream_id: String,
     start_version: Int,
+    count: Int,
     reply: Subject(Result(List(RecordedEvent(event)), EventStoreError)),
   )
   ReadAll(
@@ -245,9 +246,9 @@ pub fn to_event_store(
         Append(stream_id, expected_version, events, reply)
       })
     },
-    read_stream_forward: fn(stream_id, start_version) {
+    read_stream_forward: fn(stream_id, start_version, count) {
       process.call(subject, call_timeout, fn(reply) {
-        ReadStream(stream_id, start_version, reply)
+        ReadStream(stream_id, start_version, count, reply)
       })
     },
     subscribe: fn(handler) {
@@ -331,8 +332,11 @@ fn handle_message(
       actor.continue(state)
     }
 
-    ReadStream(stream_id, start_version, reply) -> {
-      process.send(reply, handle_read_stream(state, stream_id, start_version))
+    ReadStream(stream_id, start_version, count, reply) -> {
+      process.send(
+        reply,
+        handle_read_stream(state, stream_id, start_version, count),
+      )
       actor.continue(state)
     }
 
@@ -523,6 +527,7 @@ fn insert_events(
                   event_number: event_number,
                   stream_id: stream_id,
                   stream_version: new_ver,
+                  event_type: event_type,
                   causation_id: evt.causation_id,
                   correlation_id: evt.correlation_id,
                   data: evt.data,
@@ -569,15 +574,20 @@ fn handle_read_stream(
   state: StoreState(event),
   stream_id: String,
   start_version: Int,
+  count: Int,
 ) -> Result(List(RecordedEvent(event)), EventStoreError) {
   let sql =
-    "SELECT event_id, event_number, stream_id, stream_version, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = ? AND stream_version >= ? ORDER BY stream_version ASC"
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = ? AND stream_version >= ? ORDER BY stream_version ASC LIMIT ?"
 
   case
     sqlight.query(
       sql,
       on: state.conn,
-      with: [sqlight.text(stream_id), sqlight.int(start_version)],
+      with: [
+        sqlight.text(stream_id),
+        sqlight.int(start_version),
+        sqlight.int(count),
+      ],
       expecting: event_row_decoder(),
     )
   {
@@ -598,7 +608,7 @@ fn handle_read_all(
   start_number: Int,
 ) -> Result(List(RecordedEvent(event)), EventStoreError) {
   let sql =
-    "SELECT event_id, event_number, stream_id, stream_version, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= ? ORDER BY event_number ASC"
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= ? ORDER BY event_number ASC"
 
   case
     sqlight.query(
@@ -619,6 +629,7 @@ type EventRow {
     event_number: Int,
     stream_id: String,
     stream_version: Int,
+    event_type: String,
     causation_id: String,
     correlation_id: String,
     data_json: String,
@@ -632,16 +643,18 @@ fn event_row_decoder() -> decode.Decoder(EventRow) {
   use event_number <- decode.field(1, decode.int)
   use stream_id <- decode.field(2, decode.string)
   use stream_version <- decode.field(3, decode.int)
-  use causation_id <- decode.field(4, decode.string)
-  use correlation_id <- decode.field(5, decode.string)
-  use data_json <- decode.field(6, decode.string)
-  use metadata_json <- decode.field(7, decode.string)
-  use created_at <- decode.field(8, decode.int)
+  use event_type <- decode.field(4, decode.string)
+  use causation_id <- decode.field(5, decode.string)
+  use correlation_id <- decode.field(6, decode.string)
+  use data_json <- decode.field(7, decode.string)
+  use metadata_json <- decode.field(8, decode.string)
+  use created_at <- decode.field(9, decode.int)
   decode.success(EventRow(
     event_id: event_id,
     event_number: event_number,
     stream_id: stream_id,
     stream_version: stream_version,
+    event_type: event_type,
     causation_id: causation_id,
     correlation_id: correlation_id,
     data_json: data_json,
@@ -656,27 +669,30 @@ fn decode_event_rows(
 ) -> List(RecordedEvent(event)) {
   list.filter_map(rows, fn(row) {
     case config.deserialize(row.data_json) {
-      Ok(event_data) -> {
-        let cid = case row.causation_id {
-          "" -> None
-          s -> Some(s)
-        }
-        let cor = case row.correlation_id {
-          "" -> None
-          s -> Some(s)
-        }
+      Ok(event_data) ->
         Ok(RecordedEvent(
           event_id: row.event_id,
           event_number: row.event_number,
           stream_id: row.stream_id,
           stream_version: row.stream_version,
-          causation_id: cid,
-          correlation_id: cor,
+          event_type: row.event_type,
+          causation_id: case row.causation_id {
+            "" -> None
+            s -> Some(s)
+          },
+          correlation_id: case row.correlation_id {
+            "" -> None
+            s -> Some(s)
+          },
           data: event_data,
-          metadata: deserialize_metadata(row.metadata_json),
+          metadata: case
+            json.parse(row.metadata_json, decode.dict(decode.string, decode.string))
+          {
+            Ok(d) -> d
+            Error(_) -> dict.new()
+          },
           created_at: row.created_at,
         ))
-      }
       Error(_) -> Error(Nil)
     }
   })
@@ -758,7 +774,7 @@ fn handle_subscribe_persistent(
             _ -> {
               let events = case stream == "$all" {
                 True -> handle_read_all(state, last_seen + 1)
-                False -> handle_read_stream(state, stream, 1)
+                False -> handle_read_stream(state, stream, 1, 1_000_000)
               }
               case events {
                 Ok(evts) ->
@@ -984,13 +1000,6 @@ fn serialize_metadata(metadata: dict.Dict(String, String)) -> String {
   })
   |> json.object
   |> json.to_string
-}
-
-fn deserialize_metadata(json_str: String) -> dict.Dict(String, String) {
-  case json.parse(json_str, decode.dict(decode.string, decode.string)) {
-    Ok(d) -> d
-    Error(_) -> dict.new()
-  }
 }
 
 @external(erlang, "os", "system_time")

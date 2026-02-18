@@ -24,7 +24,7 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [x] 13. Application & Supervision Tree
 - [x] 14. Causation & Correlation Chain
 - [x] 15. Strong vs Eventual Consistency
-- [ ] 16. PostgreSQL Adapter
+- [x] 16. PostgreSQL Adapter
 - [ ] 17. SQLite Adapter
 - [ ] 18. Multi Module
 - [ ] 19. Aggregate Lifespan
@@ -32,9 +32,9 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [ ] 21. Telemetry & Observability
 
 ## Current State
-- **Build**: clean (`gleam build` — no errors, no warnings)
-- **Tests**: 105 passed, no failures
-- **Last commit**: `725eea3` — Module 15: Strong vs Eventual Consistency
+- **Build**: clean (`gleam build` — no errors, no warnings; `instructed-postgres` clean too)
+- **Tests**: 105 passed, no failures (instructed); postgres tests need live DB
+- **Last commit**: `dda2ee0` — Module 16: PostgreSQL Adapter
 - **Source files**: 17 modules in `instructed/src/instructed/`
 - **Test files**: 10 test files in `instructed/test/`
 
