@@ -41,6 +41,7 @@ import instructed/event_store.{type EventStore, ExactVersion}
 import instructed/dispatch_result.{type DispatchResult, DispatchResult}
 import instructed/lifespan.{type Lifespan, type LifespanDecision}
 import instructed/snapshot.{type SnapshotConfig}
+import instructed/upcast.{type Upcaster}
 
 /// Default retry attempts on version conflict.
 /// Matches Commanded's default of 10 (Invariant 16).
@@ -66,6 +67,10 @@ pub type Config(state, command, event) {
     /// Optional lifespan configuration.
     /// Controls when the aggregate process should stop itself.
     lifespan: Option(Lifespan(state, command, event)),
+    /// Optional event upcaster.
+    /// Applied when reading events from the store during state rebuild.
+    /// Use this to transform older event representations to the current schema.
+    upcaster: Option(Upcaster(event)),
   )
 }
 
@@ -82,6 +87,7 @@ pub fn new_config(
     retry_attempts: default_retry_attempts,
     snapshot_config: snapshot.default_config(),
     lifespan: None,
+    upcaster: None,
   )
 }
 
@@ -109,6 +115,17 @@ pub fn with_lifespan(
   lifespan: Lifespan(state, command, event),
 ) -> Config(state, command, event) {
   Config(..config, lifespan: Some(lifespan))
+}
+
+/// Set an event upcaster.
+/// The upcaster is applied when reading events from the store during
+/// state rebuild, transforming older event representations to the current
+/// schema before they are processed by `apply_event`.
+pub fn with_upcaster(
+  config: Config(state, command, event),
+  upcaster: Upcaster(event),
+) -> Config(state, command, event) {
+  Config(..config, upcaster: Some(upcaster))
 }
 
 /// The internal state of an aggregate server.
@@ -275,6 +292,12 @@ fn handle_message(
     }
 
     ExternalEvent(recorded_event) -> {
+      // Apply upcaster to the external event if configured
+      let recorded_event =
+        case state.config.upcaster {
+          None -> recorded_event
+          Some(u) -> upcast.apply(u, recorded_event)
+        }
       // Handle externally appended events (from self-subscription).
       // Only apply events we haven't seen yet.
       case recorded_event.stream_version > state.aggregate_version {
@@ -446,10 +469,11 @@ fn execute_once(
 fn rebuild_from_current_version(
   state: ServerState(state, command, event),
 ) -> ServerState(state, command, event) {
+  let store = effective_event_store(state)
   case
     aggregate.rebuild_from_version(
       state.config.aggregate,
-      state.config.event_store,
+      store,
       state.config.stream_id,
       state.aggregate_state,
       state.aggregate_version,
@@ -469,10 +493,11 @@ fn rebuild_from_current_version(
 fn load_state(
   state: ServerState(state, command, event),
 ) -> ServerState(state, command, event) {
+  let store = effective_event_store(state)
   case
     aggregate.populate_from_event_store(
       state.config.aggregate,
-      state.config.event_store,
+      store,
       state.config.stream_id,
       state.config.snapshot_config,
     )
@@ -512,6 +537,45 @@ fn maybe_take_snapshot(
       ServerState(..state, events_since_snapshot: 0)
     }
     False -> state
+  }
+}
+
+// --- Upcasting helpers ---
+
+/// Wrap an EventStore to apply upcasting to all read events.
+/// This transparently applies the upcaster to events returned by
+/// read_stream_forward and read_all_forward.
+fn apply_upcasting_to_store(
+  store: EventStore(event),
+  upcaster: Upcaster(event),
+) -> EventStore(event) {
+  let read_stream = store.read_stream_forward
+  let read_all = store.read_all_forward
+  event_store.EventStore(
+    ..store,
+    read_stream_forward: fn(stream_id, start_version, count) {
+      case read_stream(stream_id, start_version, count) {
+        Ok(events) -> Ok(upcast.apply_all(upcaster, events))
+        Error(e) -> Error(e)
+      }
+    },
+    read_all_forward: fn(start_number) {
+      case read_all(start_number) {
+        Ok(events) -> Ok(upcast.apply_all(upcaster, events))
+        Error(e) -> Error(e)
+      }
+    },
+  )
+}
+
+/// Get the effective event store, with upcasting applied if configured.
+fn effective_event_store(
+  state: ServerState(state, command, event),
+) -> EventStore(event) {
+  case state.config.upcaster {
+    None -> state.config.event_store
+    Some(upcaster) ->
+      apply_upcasting_to_store(state.config.event_store, upcaster)
   }
 }
 

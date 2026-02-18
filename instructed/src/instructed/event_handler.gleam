@@ -42,6 +42,7 @@ import instructed/event_store.{
 }
 import instructed/middleware.{type Consistency, Eventual, Strong}
 import instructed/subscriptions.{type SubMessage}
+import instructed/upcast.{type Upcaster}
 
 /// Configuration for an event handler.
 pub type EventHandlerConfig(event, handler_state) {
@@ -71,6 +72,10 @@ pub type EventHandlerConfig(event, handler_state) {
     /// When set and `consistency: Strong`, the handler sends an ack after
     /// each successfully processed event so waiting dispatchers can unblock.
     subscriptions: Option(Subject(SubMessage)),
+    /// Optional event upcaster.
+    /// Applied to each event before it is delivered to `handle_event`.
+    /// Use this to transform older event representations to the current schema.
+    upcaster: Option(Upcaster(event)),
   )
 }
 
@@ -98,6 +103,7 @@ pub fn new(
     start_from: Origin,
     consistency: Eventual,
     subscriptions: None,
+    upcaster: None,
   )
 }
 
@@ -146,6 +152,17 @@ pub fn with_subscriptions(
   subs: Subject(SubMessage),
 ) -> EventHandlerConfig(event, handler_state) {
   EventHandlerConfig(..config, subscriptions: Some(subs))
+}
+
+/// Set an event upcaster.
+/// The upcaster is applied to each event before it is delivered to
+/// the `handle_event` callback, allowing older event representations to
+/// be transparently transformed to the current schema.
+pub fn with_upcaster(
+  config: EventHandlerConfig(event, handler_state),
+  upcaster: Upcaster(event),
+) -> EventHandlerConfig(event, handler_state) {
+  EventHandlerConfig(..config, upcaster: Some(upcaster))
 }
 
 /// Internal state of the event handler actor.
@@ -203,8 +220,13 @@ pub fn start(
         None -> Nil
       }
 
-      // Non-blocking handler: sends event to actor's mailbox
+      // Non-blocking handler: sends event to actor's mailbox.
+      // Apply upcaster if configured before delivering to the handler.
       let handler = fn(event: RecordedEvent(event)) {
+        let event = case config.upcaster {
+          None -> event
+          Some(u) -> upcast.apply(u, event)
+        }
         process.send(subject, HandleEvent(event))
       }
 

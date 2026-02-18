@@ -43,6 +43,7 @@ import instructed/event_store.{type EventStore, type Subscription, Origin}
 import instructed/middleware.{type Consistency, Eventual, Strong}
 import instructed/snapshot
 import instructed/subscriptions.{type SubMessage}
+import instructed/upcast.{type Upcaster}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -139,6 +140,10 @@ pub type ProcessManagerConfig(event, command, pm_state) {
     /// When set and `consistency: Strong`, the PM sends an ack after
     /// each successfully processed event so waiting dispatchers can unblock.
     subscriptions: Option(Subject(SubMessage)),
+    /// Optional event upcaster.
+    /// Applied to each event before it is delivered to `handle`.
+    /// Use this to transform older event representations to the current schema.
+    upcaster: Option(Upcaster(event)),
   )
 }
 
@@ -169,6 +174,7 @@ pub fn new(
     on_command_error: None,
     consistency: Eventual,
     subscriptions: None,
+    upcaster: None,
   )
 }
 
@@ -218,6 +224,17 @@ pub fn with_subscriptions(
   subs: Subject(SubMessage),
 ) -> ProcessManagerConfig(event, command, pm_state) {
   ProcessManagerConfig(..config, subscriptions: Some(subs))
+}
+
+/// Set an event upcaster.
+/// The upcaster is applied to each event before it is delivered to
+/// the `handle` callback, allowing older event representations to be
+/// transparently transformed to the current schema.
+pub fn with_upcaster(
+  config: ProcessManagerConfig(event, command, pm_state),
+  upcaster: Upcaster(event),
+) -> ProcessManagerConfig(event, command, pm_state) {
+  ProcessManagerConfig(..config, upcaster: Some(upcaster))
 }
 
 // ---------------------------------------------------------------------------
@@ -294,7 +311,12 @@ pub fn start(
         None -> Nil
       }
 
+      // Apply upcaster if configured before delivering to the process manager.
       let handler = fn(ev: RecordedEvent(event)) {
+        let ev = case config.upcaster {
+          None -> ev
+          Some(u) -> upcast.apply(u, ev)
+        }
         process.send(subject, PMHandleEvent(ev))
       }
 
