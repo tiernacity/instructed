@@ -51,6 +51,7 @@
 //// ```
 
 import gleam/dict.{type Dict}
+import gleam/erlang/process.{type Subject}
 import gleam/option.{type Option, None, Some}
 import instructed/dispatch_result.{type DispatchResult}
 import instructed/error.{type DispatchError, type EventStoreError}
@@ -62,7 +63,7 @@ import instructed/process_manager.{
 }
 import instructed/projection.{type ProjectionConfig, type ProjectionMessage}
 import instructed/router.{type Router}
-import gleam/erlang/process.{type Subject}
+import instructed/subscriptions.{type SubMessage}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -75,6 +76,10 @@ pub type AppConfig(event, command, aggregate_state) {
     event_store: EventStore(event),
     /// Optional command router for aggregate dispatch
     router: Option(Router(aggregate_state, command, event)),
+    /// Optional subscriptions actor for strong consistency tracking.
+    /// When set, it is automatically injected into the router and all
+    /// event handlers and process managers started via the application.
+    subscriptions: Option(Subject(SubMessage)),
   )
 }
 
@@ -90,6 +95,8 @@ pub type Application(event, command, aggregate_state) {
     event_store: EventStore(event),
     /// Optional command router
     router: Option(Router(aggregate_state, command, event)),
+    /// Optional subscriptions actor for strong consistency tracking.
+    subscriptions: Option(Subject(SubMessage)),
   )
 }
 
@@ -101,7 +108,7 @@ pub type Application(event, command, aggregate_state) {
 pub fn new(
   event_store: EventStore(event),
 ) -> AppConfig(event, command, aggregate_state) {
-  AppConfig(event_store: event_store, router: None)
+  AppConfig(event_store: event_store, router: None, subscriptions: None)
 }
 
 /// Set the command router for this application.
@@ -110,6 +117,25 @@ pub fn with_router(
   router: Router(aggregate_state, command, event),
 ) -> AppConfig(event, command, aggregate_state) {
   AppConfig(..config, router: Some(router))
+}
+
+/// Attach a subscriptions actor to the application.
+///
+/// When set, the subscriptions actor is automatically injected into:
+/// - The router (so `dispatch` with `consistency: Strong` can block)
+/// - All event handlers started via `start_event_handler/2`
+/// - All process managers started via `start_process_manager/2`
+///
+/// Call `subscriptions.start()` first to obtain the Subject, then:
+/// ```gleam
+/// let assert Ok(subs) = subscriptions.start()
+/// let config = application.new(store) |> application.with_subscriptions(subs)
+/// ```
+pub fn with_subscriptions(
+  config: AppConfig(event, command, aggregate_state),
+  subs: Subject(SubMessage),
+) -> AppConfig(event, command, aggregate_state) {
+  AppConfig(..config, subscriptions: Some(subs))
 }
 
 // ---------------------------------------------------------------------------
@@ -127,9 +153,16 @@ pub fn with_router(
 pub fn start(
   config: AppConfig(event, command, aggregate_state),
 ) -> Result(Application(event, command, aggregate_state), String) {
+  // If a subscriptions actor is configured, inject it into the router so
+  // strong-consistency dispatch can block until handlers have processed events.
+  let router = case config.router, config.subscriptions {
+    Some(r), Some(subs) -> Some(router.with_subscriptions(r, subs))
+    r, _ -> r
+  }
   Ok(Application(
     event_store: config.event_store,
-    router: config.router,
+    router: router,
+    subscriptions: config.subscriptions,
   ))
 }
 
@@ -189,13 +222,19 @@ pub fn dispatch_with_context(
 
 /// Start an event handler wired to the application's event store.
 ///
-/// Returns the handler's Subject which can be supervised externally.
+/// If the application has a subscriptions actor configured, it is automatically
+/// injected into the handler. The handler will ack the subscriptions actor after
+/// each successfully processed event when `consistency: Strong` is set.
 ///
 /// Equivalent to Commanded's `EventHandler.start_link(application: MyApp)`.
 pub fn start_event_handler(
   app: Application(event, command, aggregate_state),
   config: EventHandlerConfig(event, handler_state),
 ) -> Result(Subject(HandlerMessage(event)), String) {
+  let config = case app.subscriptions, config.subscriptions {
+    Some(subs), None -> event_handler.with_subscriptions(config, subs)
+    _, _ -> config
+  }
   event_handler.start(config, app.event_store)
 }
 
@@ -211,7 +250,9 @@ pub fn start_projection(
 
 /// Start a process manager wired to the application's event store.
 ///
-/// Returns the process manager's Subject which can be supervised externally.
+/// If the application has a subscriptions actor configured, it is automatically
+/// injected into the process manager. The PM will ack the subscriptions actor after
+/// each event when `consistency: Strong` is set.
 ///
 /// Note: `pm_command` is the process manager's command type, which may differ
 /// from the router's command type. PMs dispatch commands through their own
@@ -222,6 +263,10 @@ pub fn start_process_manager(
   app: Application(event, command, aggregate_state),
   config: ProcessManagerConfig(event, pm_command, pm_state),
 ) -> Result(Subject(PMMessage(event)), String) {
+  let config = case app.subscriptions, config.subscriptions {
+    Some(subs), None -> process_manager.with_subscriptions(config, subs)
+    _, _ -> config
+  }
   process_manager.start(config, app.event_store)
 }
 
@@ -259,4 +304,14 @@ pub fn event_store(
   app: Application(event, command, aggregate_state),
 ) -> EventStore(event) {
   app.event_store
+}
+
+/// Get the subscriptions actor from the application, if configured.
+///
+/// Useful for manually registering handlers or sending acks outside the
+/// standard event handler / process manager lifecycle.
+pub fn get_subscriptions(
+  app: Application(event, command, aggregate_state),
+) -> Option(Subject(SubMessage)) {
+  app.subscriptions
 }

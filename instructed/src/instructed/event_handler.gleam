@@ -40,7 +40,8 @@ import instructed/event.{type RecordedEvent}
 import instructed/event_store.{
   type EventStore, type StartFrom, type Subscription, Origin,
 }
-import instructed/middleware.{type Consistency, Eventual}
+import instructed/middleware.{type Consistency, Eventual, Strong}
+import instructed/subscriptions.{type SubMessage}
 
 /// Configuration for an event handler.
 pub type EventHandlerConfig(event, handler_state) {
@@ -66,6 +67,10 @@ pub type EventHandlerConfig(event, handler_state) {
     start_from: StartFrom,
     /// Consistency level (eventual or strong)
     consistency: Consistency,
+    /// Optional subscriptions actor for strong consistency acking.
+    /// When set and `consistency: Strong`, the handler sends an ack after
+    /// each successfully processed event so waiting dispatchers can unblock.
+    subscriptions: Option(Subject(SubMessage)),
   )
 }
 
@@ -92,6 +97,7 @@ pub fn new(
     stream_id: AllStreams,
     start_from: Origin,
     consistency: Eventual,
+    subscriptions: None,
   )
 }
 
@@ -126,6 +132,20 @@ pub fn with_consistency(
   consistency: Consistency,
 ) -> EventHandlerConfig(event, handler_state) {
   EventHandlerConfig(..config, consistency: consistency)
+}
+
+/// Set the subscriptions actor for strong consistency acking.
+///
+/// When set and the handler is configured with `consistency: Strong`,
+/// the handler sends an ack to the subscriptions actor after each
+/// successfully processed event, allowing waiting dispatchers to unblock.
+///
+/// Equivalent to Commanded's `Subscriptions.ack_event/4` call in handlers.
+pub fn with_subscriptions(
+  config: EventHandlerConfig(event, handler_state),
+  subs: Subject(SubMessage),
+) -> EventHandlerConfig(event, handler_state) {
+  EventHandlerConfig(..config, subscriptions: Some(subs))
 }
 
 /// Internal state of the event handler actor.
@@ -174,6 +194,14 @@ pub fn start(
   {
     Ok(started) -> {
       let subject = started.data
+
+      // Register with the subscriptions actor so strong-consistency waiters
+      // know about this handler (Invariant 11).
+      case config.subscriptions {
+        Some(subs) ->
+          subscriptions.register(subs, config.name, config.consistency)
+        None -> Nil
+      }
 
       // Non-blocking handler: sends event to actor's mailbox
       let handler = fn(event: RecordedEvent(event)) {
@@ -270,6 +298,18 @@ fn handle_actor_message(
           {
             Ok(new_handler_state) -> {
               ack_event(state, recorded_event)
+              // Ack strong-consistency subscriptions after successful processing
+              // (Invariant 11): unblocks any waiting dispatchers
+              case state.config.consistency, state.config.subscriptions {
+                Strong, Some(subs) ->
+                  subscriptions.ack_event(
+                    subs,
+                    state.config.name,
+                    recorded_event.stream_id,
+                    recorded_event.stream_version,
+                  )
+                _, _ -> Nil
+              }
               actor.continue(
                 HandlerActorState(
                   ..state,

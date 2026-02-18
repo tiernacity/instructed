@@ -40,7 +40,9 @@ import gleam/otp/actor
 import instructed/error
 import instructed/event.{type RecordedEvent}
 import instructed/event_store.{type EventStore, type Subscription, Origin}
+import instructed/middleware.{type Consistency, Eventual, Strong}
 import instructed/snapshot
+import instructed/subscriptions.{type SubMessage}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -130,6 +132,13 @@ pub type ProcessManagerConfig(event, command, pm_state) {
       fn(String, command, List(command), RecordedEvent(event), pm_state) ->
         PMCommandErrorAction(command),
     ),
+    /// Consistency level (eventual or strong).
+    /// Strong-consistency PMs ack the subscriptions actor after each event.
+    consistency: Consistency,
+    /// Optional subscriptions actor for strong consistency acking.
+    /// When set and `consistency: Strong`, the PM sends an ack after
+    /// each successfully processed event so waiting dispatchers can unblock.
+    subscriptions: Option(Subject(SubMessage)),
   )
 }
 
@@ -158,6 +167,8 @@ pub fn new(
     after_command: None,
     on_event_error: None,
     on_command_error: None,
+    consistency: Eventual,
+    subscriptions: None,
   )
 }
 
@@ -185,6 +196,28 @@ pub fn with_command_error_handler(
     PMCommandErrorAction(command),
 ) -> ProcessManagerConfig(event, command, pm_state) {
   ProcessManagerConfig(..config, on_command_error: Some(on_error))
+}
+
+/// Set the consistency level for this process manager.
+///
+/// Strong-consistency PMs ack the subscriptions actor after each event,
+/// allowing waiting dispatchers to unblock once this PM has processed the event.
+pub fn with_consistency(
+  config: ProcessManagerConfig(event, command, pm_state),
+  consistency: Consistency,
+) -> ProcessManagerConfig(event, command, pm_state) {
+  ProcessManagerConfig(..config, consistency: consistency)
+}
+
+/// Set the subscriptions actor for strong consistency acking.
+///
+/// Must be combined with `with_consistency(config, Strong)` to take effect.
+/// Equivalent to Commanded's `Subscriptions.ack_event/4` call in process managers.
+pub fn with_subscriptions(
+  config: ProcessManagerConfig(event, command, pm_state),
+  subs: Subject(SubMessage),
+) -> ProcessManagerConfig(event, command, pm_state) {
+  ProcessManagerConfig(..config, subscriptions: Some(subs))
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +286,14 @@ pub fn start(
     Ok(started) -> {
       let subject = started.data
 
+      // Register with the subscriptions actor so strong-consistency waiters
+      // know about this process manager (Invariant 11).
+      case config.subscriptions {
+        Some(subs) ->
+          subscriptions.register(subs, config.name, config.consistency)
+        None -> Nil
+      }
+
       let handler = fn(ev: RecordedEvent(event)) {
         process.send(subject, PMHandleEvent(ev))
       }
@@ -319,6 +360,17 @@ fn handle_pm_message(
 
     PMHandleEvent(recorded_event) -> {
       let new_state = route_event(state, recorded_event)
+      // Ack strong-consistency subscriptions after processing (Invariant 11)
+      case new_state.config.consistency, new_state.config.subscriptions {
+        Strong, Some(subs) ->
+          subscriptions.ack_event(
+            subs,
+            new_state.config.name,
+            recorded_event.stream_id,
+            recorded_event.stream_version,
+          )
+        _, _ -> Nil
+      }
       actor.continue(new_state)
     }
   }

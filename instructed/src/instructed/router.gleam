@@ -48,6 +48,7 @@ import instructed/error.{type DispatchError}
 import instructed/event_store.{type EventStore}
 import instructed/middleware.{type Middleware, type Pipeline}
 import instructed/snapshot
+import instructed/subscriptions.{type SubMessage}
 import youid/uuid
 
 /// A command router configuration.
@@ -74,6 +75,10 @@ pub type Router(state, command, event) {
     /// Registry for aggregate server processes.
     /// Started automatically when the router is created.
     registry: Option(Subject(RegistryMessage(state, command, event))),
+    /// Optional subscriptions actor for strong consistency tracking.
+    /// When set, `dispatch` with `consistency: Strong` will block until all
+    /// registered strong handlers have acked the events produced by the command.
+    subscriptions: Option(Subject(SubMessage)),
   )
 }
 
@@ -103,6 +108,7 @@ pub fn new(
     snapshot_every: None,
     dispatch_timeout: 5000,
     registry: registry,
+    subscriptions: None,
   )
 }
 
@@ -144,6 +150,19 @@ pub fn with_snapshot_every(
   every: Int,
 ) -> Router(state, command, event) {
   Router(..router, snapshot_every: Some(every))
+}
+
+/// Set the subscriptions actor for strong consistency tracking.
+///
+/// When set, dispatching with `consistency: Strong` will block until all
+/// registered strong-consistency handlers have processed the produced events.
+///
+/// Equivalent to Commanded's `Subscriptions.wait_for/5` integration in the dispatcher.
+pub fn with_subscriptions(
+  router: Router(state, command, event),
+  subs: Subject(SubMessage),
+) -> Router(state, command, event) {
+  Router(..router, subscriptions: Some(subs))
 }
 
 /// Dispatch a command through the router.
@@ -235,7 +254,23 @@ fn dispatch_through_server(
       {
         Ok(result) -> {
           let _ = middleware.run_after_dispatch(pipeline, router.middleware)
-          Ok(result)
+          // Wait for strong-consistency handlers if requested (Invariant 11)
+          case pipeline.consistency, router.subscriptions {
+            middleware.Strong, Some(subs) -> {
+              case
+                subscriptions.wait_for(
+                  subs,
+                  stream_id,
+                  result.aggregate_version,
+                  router.dispatch_timeout,
+                )
+              {
+                Ok(Nil) -> Ok(result)
+                Error(Nil) -> Error(error.ConsistencyTimeout)
+              }
+            }
+            _, _ -> Ok(result)
+          }
         }
         Error(err) -> {
           let _ = middleware.run_after_failure(pipeline, router.middleware)
