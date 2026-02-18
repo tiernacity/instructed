@@ -289,6 +289,7 @@ fn load_aggregate_state(
         error.SnapshotNotFound -> "snapshot not found"
         error.SubscriptionAlreadyExists -> "subscription already exists"
         error.SubscriptionNotFound -> "subscription not found"
+        error.TooManySubscribers -> "too many subscribers"
         error.StorageError(r) -> "storage error: " <> r
       }
       Error(reason)
