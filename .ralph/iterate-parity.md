@@ -19,7 +19,7 @@ Iterative module-by-module implementation to bring Instructed (Gleam CQRS/ES) to
 - [x] 8. Middleware Pipeline
 - [x] 9. Command Router (wiring aggregate server, identity, retry)
 - [x] 10. Event Handler (lifecycle, subscriptions, error handling, idempotency)
-- [ ] 11. Projection (builds on event handler patterns)
+- [x] 11. Projection (builds on event handler patterns)
 - [ ] 12. Process Manager (routing, state persistence, error handling, command dispatch)
 - [ ] 13. Application & Supervision Tree
 - [ ] 14. Causation & Correlation Chain
