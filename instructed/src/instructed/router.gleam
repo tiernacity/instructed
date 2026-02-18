@@ -49,6 +49,7 @@ import instructed/event_store.{type EventStore}
 import instructed/middleware.{type Middleware, type Pipeline}
 import instructed/snapshot
 import instructed/subscriptions.{type SubMessage}
+import instructed/telemetry
 import youid/uuid
 
 /// A command router configuration.
@@ -221,8 +222,32 @@ pub fn dispatch_with_context(
       // Check if halted by middleware
       case pipeline.halted {
         True -> Error(error.Halted)
-        False ->
-          dispatch_through_server(router, pipeline, stream_id)
+        False -> {
+          let t_start = telemetry.system_time()
+          telemetry.emit(telemetry.CommandDispatchStart(
+            command_id: command_id,
+            aggregate_stream_id: stream_id,
+            system_time: t_start,
+          ))
+          let result = dispatch_through_server(router, pipeline, stream_id)
+          case result {
+            Ok(dr) ->
+              telemetry.emit(telemetry.CommandDispatchStop(
+                command_id: command_id,
+                aggregate_stream_id: stream_id,
+                duration_ns: telemetry.system_time() - t_start,
+                event_count: list.length(dr.events),
+              ))
+            Error(err) ->
+              telemetry.emit(telemetry.CommandDispatchException(
+                command_id: command_id,
+                aggregate_stream_id: stream_id,
+                duration_ns: telemetry.system_time() - t_start,
+                error: string.inspect(err),
+              ))
+          }
+          result
+        }
       }
     }
   }

@@ -37,6 +37,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/error.{type ErrorAction}
 import instructed/event.{type RecordedEvent}
+import instructed/telemetry
 import instructed/event_store.{
   type EventStore, type StartFrom, type Subscription, Origin,
 }
@@ -310,7 +311,13 @@ fn handle_actor_message(
           actor.continue(state)
         }
         _ -> {
-          // Process the event
+          // Process the event — instrument with telemetry (M21)
+          let t_start =
+            telemetry.event_handle_start(
+              state.config.name,
+              recorded_event.event_type,
+              recorded_event.event_number,
+            )
           case
             state.config.handle_event(
               recorded_event.data,
@@ -319,6 +326,12 @@ fn handle_actor_message(
             )
           {
             Ok(new_handler_state) -> {
+              telemetry.event_handle_stop(
+                state.config.name,
+                recorded_event.event_type,
+                recorded_event.event_number,
+                t_start,
+              )
               ack_event(state, recorded_event)
               // Ack strong-consistency subscriptions after successful processing
               // (Invariant 11): unblocks any waiting dispatchers
@@ -341,6 +354,13 @@ fn handle_actor_message(
               )
             }
             Error(reason) -> {
+              telemetry.event_handle_exception(
+                state.config.name,
+                recorded_event.event_type,
+                recorded_event.event_number,
+                t_start,
+                reason,
+              )
               // Error handling via callback (Invariant 8)
               handle_error(state, reason, recorded_event)
             }
