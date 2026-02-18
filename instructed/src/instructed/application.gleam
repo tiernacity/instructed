@@ -1,159 +1,262 @@
-//// Application module - top-level supervisor for Instructed.
+//// Application module - top-level coordinator for Instructed.
 ////
-//// The Application module provides a convenient way to start and manage
-//// all the processes needed for a CQRS/ES system: event store, aggregate
-//// servers, event handlers, process managers, and projections.
+//// An Instructed application is a lightweight struct that groups together:
+//// - An event store (shared by all components)
+//// - An optional command router (for aggregate dispatch)
 ////
-//// ## Example
+//// The application provides convenience functions for:
+//// - Dispatching commands (delegates to the router)
+//// - Starting event handlers, projections, and process managers
+////   (wiring them to the application's event store)
+//// - Reading aggregate events for state reconstruction
+////
+//// ## Key differences from Commanded
+////
+//// Commanded's Application is an Elixir module that acts as a named
+//// OTP Supervisor, starting all infrastructure components (event store,
+//// pubsub, registry, aggregate supervisor, subscriptions) under a
+//// supervision tree.
+////
+//// Instructed's Application is a plain struct. Supervision is handled
+//// by the user using `gleam/otp/static_supervisor`:
 ////
 //// ```gleam
-//// import instructed/application as app
-//// import instructed/in_memory_event_store
+//// import gleam/otp/static_supervisor as sup
 ////
 //// pub fn main() {
-////   // Start the event store
+////   // The event store starts as a supervisor child
 ////   let assert Ok(store_subject) = in_memory_event_store.start()
 ////   let store = in_memory_event_store.to_event_store(store_subject)
 ////
-////   // Create and start the application
-////   let config = app.new(store)
-////   let assert Ok(application) = app.start(config)
+////   let app = application.new(store) |> application.with_router(my_router)
+////   let assert Ok(application) = application.start(app)
 ////
-////   // Dispatch commands through the application
-////   let assert Ok(_) = app.dispatch(application, my_router, my_command)
+////   // Start event handlers as supervisor children
+////   let assert Ok(_) = application.start_event_handler(application, my_handler_config)
+////   let assert Ok(_) = application.start_process_manager(application, my_pm_config)
+////   let assert Ok(_) = application.start_projection(application, my_proj_config)
+//// }
+//// ```
+////
+//// ## Named applications (multi-tenancy)
+////
+//// Start multiple applications with separate event stores for isolation:
+////
+//// ```gleam
+//// for tenant <- [tenant1, tenant2] {
+////   let assert Ok(store) = start_tenant_store(tenant)
+////   let app = application.new(store) |> application.with_router(router)
+////   let assert Ok(_) = application.start(app)
 //// }
 //// ```
 
 import gleam/dict.{type Dict}
-import gleam/erlang/process.{type Subject}
-import gleam/option
-import gleam/otp/actor
-import instructed/event.{type RecordedEvent}
-import instructed/event_store.{type EventStore}
-import instructed/projection.{type ProjectionConfig, type ProjectionMessage}
+import gleam/option.{type Option, None, Some}
 import instructed/dispatch_result.{type DispatchResult}
+import instructed/error.{type DispatchError, type EventStoreError}
+import instructed/event.{type RecordedEvent}
+import instructed/event_handler.{type EventHandlerConfig, type HandlerMessage}
+import instructed/event_store.{type EventStore}
+import instructed/process_manager.{
+  type PMMessage, type ProcessManagerConfig,
+}
+import instructed/projection.{type ProjectionConfig, type ProjectionMessage}
 import instructed/router.{type Router}
+import gleam/erlang/process.{type Subject}
 
-/// Application configuration.
-pub type AppConfig(event) {
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Configuration for building an application.
+pub type AppConfig(event, command, aggregate_state) {
   AppConfig(
-    /// The event store to use
+    /// The event store all components will share
     event_store: EventStore(event),
+    /// Optional command router for aggregate dispatch
+    router: Option(Router(aggregate_state, command, event)),
   )
 }
 
 /// A running application instance.
-pub type Application(event) {
+///
+/// Holds references to the event store and command router.
+/// This is a plain struct — all process management happens externally
+/// (start_event_handler, start_projection, start_process_manager return
+/// Subjects that the caller can supervise).
+pub type Application(event, command, aggregate_state) {
   Application(
-    /// The event store
+    /// The event store shared by all components
     event_store: EventStore(event),
-    /// Actor subject for managing state
-    subject: Subject(AppMessage(event)),
+    /// Optional command router
+    router: Option(Router(aggregate_state, command, event)),
   )
 }
 
-/// Internal app state tracking started components.
-type AppState(event) {
-  AppState(
-    event_store: EventStore(event),
-    projection_names: List(String),
-  )
+// ---------------------------------------------------------------------------
+// Configuration builder
+// ---------------------------------------------------------------------------
+
+/// Create a new application configuration with an event store.
+pub fn new(
+  event_store: EventStore(event),
+) -> AppConfig(event, command, aggregate_state) {
+  AppConfig(event_store: event_store, router: None)
 }
 
-/// Messages for the application actor.
-pub opaque type AppMessage(event) {
-  GetEventStore(Subject(EventStore(event)))
+/// Set the command router for this application.
+pub fn with_router(
+  config: AppConfig(event, command, aggregate_state),
+  router: Router(aggregate_state, command, event),
+) -> AppConfig(event, command, aggregate_state) {
+  AppConfig(..config, router: Some(router))
 }
 
-/// Create a new application configuration.
-pub fn new(event_store: EventStore(event)) -> AppConfig(event) {
-  AppConfig(event_store: event_store)
-}
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
 
-/// Start the application supervisor.
+/// Start the application.
+///
+/// Returns an `Application` struct that components can use to access
+/// the shared event store and dispatch commands.
+///
+/// The application itself is not an OTP process — it is a lightweight
+/// struct. The caller is responsible for starting individual components
+/// (event handlers, projections, process managers) and supervising them.
 pub fn start(
-  config: AppConfig(event),
-) -> Result(Application(event), String) {
-  let app_state =
-    AppState(
-      event_store: config.event_store,
-      projection_names: [],
-    )
-
-  case
-    actor.new(app_state)
-    |> actor.on_message(handle_app_message)
-    |> actor.start
-  {
-    Ok(started) -> {
-      Ok(Application(
-        event_store: config.event_store,
-        subject: started.data,
-      ))
-    }
-    Error(_) -> Error("Failed to start application")
-  }
+  config: AppConfig(event, command, aggregate_state),
+) -> Result(Application(event, command, aggregate_state), String) {
+  Ok(Application(
+    event_store: config.event_store,
+    router: config.router,
+  ))
 }
 
-fn handle_app_message(
-  state: AppState(event),
-  msg: AppMessage(event),
-) -> actor.Next(AppState(event), AppMessage(event)) {
-  case msg {
-    GetEventStore(reply) -> {
-      process.send(reply, state.event_store)
-      actor.continue(state)
-    }
-  }
-}
+// ---------------------------------------------------------------------------
+// Command dispatch
+// ---------------------------------------------------------------------------
 
-/// Dispatch a command through a router.
+/// Dispatch a command through the application's router.
+///
+/// Returns an error if no router is configured.
+///
+/// Equivalent to Commanded's `MyApp.dispatch(command)`.
 pub fn dispatch(
-  app: Application(event),
-  router: Router(state, command, event),
+  app: Application(event, command, aggregate_state),
   command: command,
-) -> Result(DispatchResult(state, event), error.DispatchError) {
-  // Ensure the router uses the app's event store
-  let router = router.Router(..router, event_store: app.event_store)
-  router.dispatch(router, command)
+) -> Result(DispatchResult(aggregate_state, event), DispatchError) {
+  case app.router {
+    None -> Error(error.AggregateStartError("No router configured"))
+    Some(r) -> {
+      let r = router.Router(..r, event_store: app.event_store)
+      router.dispatch(r, command)
+    }
+  }
 }
 
-/// Dispatch a command with explicit context.
+/// Dispatch a command with explicit causation/correlation metadata.
+///
+/// Equivalent to Commanded's `MyApp.dispatch(command, opts)` with
+/// `causation_id`, `correlation_id`, and `metadata` options.
 pub fn dispatch_with_context(
-  app: Application(event),
-  router: Router(state, command, event),
+  app: Application(event, command, aggregate_state),
   command: command,
   command_id: String,
-  causation_id: option.Option(String),
-  correlation_id: option.Option(String),
+  causation_id: Option(String),
+  correlation_id: Option(String),
   metadata: Dict(String, String),
-) -> Result(DispatchResult(state, event), error.DispatchError) {
-  let router = router.Router(..router, event_store: app.event_store)
-  router.dispatch_with_context(
-    router,
-    command,
-    command_id,
-    causation_id,
-    correlation_id,
-    metadata,
-  )
+) -> Result(DispatchResult(aggregate_state, event), DispatchError) {
+  case app.router {
+    None -> Error(error.AggregateStartError("No router configured"))
+    Some(r) -> {
+      let r = router.Router(..r, event_store: app.event_store)
+      router.dispatch_with_context(
+        r,
+        command,
+        command_id,
+        causation_id,
+        correlation_id,
+        metadata,
+      )
+    }
+  }
 }
 
-/// Start a projection within the application.
+// ---------------------------------------------------------------------------
+// Component start helpers
+// ---------------------------------------------------------------------------
+
+/// Start an event handler wired to the application's event store.
+///
+/// Returns the handler's Subject which can be supervised externally.
+///
+/// Equivalent to Commanded's `EventHandler.start_link(application: MyApp)`.
+pub fn start_event_handler(
+  app: Application(event, command, aggregate_state),
+  config: EventHandlerConfig(event, handler_state),
+) -> Result(Subject(HandlerMessage(event)), String) {
+  event_handler.start(config, app.event_store)
+}
+
+/// Start a projection wired to the application's event store.
+///
+/// Returns the projection's Subject which can be supervised externally.
 pub fn start_projection(
-  app: Application(event),
+  app: Application(event, command, aggregate_state),
   config: ProjectionConfig(event, projection_state),
 ) -> Result(Subject(ProjectionMessage(event, projection_state)), String) {
   projection.start(config, app.event_store)
 }
 
-/// Read events from a stream.
+/// Start a process manager wired to the application's event store.
+///
+/// Returns the process manager's Subject which can be supervised externally.
+///
+/// Note: `pm_command` is the process manager's command type, which may differ
+/// from the router's command type. PMs dispatch commands through their own
+/// `dispatch_command` function (configured in `ProcessManagerConfig`).
+///
+/// Equivalent to Commanded's `ProcessManager.start_link(application: MyApp)`.
+pub fn start_process_manager(
+  app: Application(event, command, aggregate_state),
+  config: ProcessManagerConfig(event, pm_command, pm_state),
+) -> Result(Subject(PMMessage(event)), String) {
+  process_manager.start(config, app.event_store)
+}
+
+// ---------------------------------------------------------------------------
+// Event store access
+// ---------------------------------------------------------------------------
+
+/// Read all events from a stream.
+///
+/// Equivalent to Commanded's `Commanded.EventStore.stream_forward/3`.
 pub fn read_stream(
-  app: Application(event),
+  app: Application(event, command, aggregate_state),
   stream_id: String,
-) -> Result(List(RecordedEvent(event)), error.EventStoreError) {
+) -> Result(List(RecordedEvent(event)), EventStoreError) {
   app.event_store.read_stream_forward(stream_id, 1, 1000)
 }
 
-import instructed/error
+/// Read a page of events from a stream starting at a given version.
+///
+/// Useful for pagination and incremental reads.
+pub fn read_stream_from(
+  app: Application(event, command, aggregate_state),
+  stream_id: String,
+  start_version: Int,
+  count: Int,
+) -> Result(List(RecordedEvent(event)), EventStoreError) {
+  app.event_store.read_stream_forward(stream_id, start_version, count)
+}
 
+/// Get the event store from the application.
+///
+/// Allows direct event store access when needed (e.g., for testing,
+/// or for custom read model queries).
+pub fn event_store(
+  app: Application(event, command, aggregate_state),
+) -> EventStore(event) {
+  app.event_store
+}
