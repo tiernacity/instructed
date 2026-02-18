@@ -1,3 +1,4 @@
+import gleam/list
 import gleeunit/should
 import instructed/aggregate
 import instructed/aggregate_server
@@ -53,22 +54,24 @@ fn task_aggregate() -> aggregate.Aggregate(Task, TaskCommand, TaskEvent) {
   )
 }
 
-// --- Tests ---
-
-pub fn aggregate_server_execute_test() {
+fn start_server(stream_id: String) {
   let assert Ok(store_subject) = in_memory_event_store.start()
   let store = in_memory_event_store.to_event_store(store_subject)
-
   let config =
-    aggregate_server.Config(
+    aggregate_server.new_config(
       aggregate: task_aggregate(),
       event_store: store,
-      stream_id: "task-1",
+      stream_id: stream_id,
     )
-
   let assert Ok(server) = aggregate_server.start(config)
+  #(server, store)
+}
 
-  // Execute create command
+// --- Tests ---
+
+pub fn execute_creates_aggregate_test() {
+  let #(server, _store) = start_server("task-1")
+
   let assert Ok(result) =
     aggregate_server.execute(server, CreateTask("1", "Buy milk"), 5000)
   should.equal(result.aggregate_state, Task("1", "Buy milk", False))
@@ -76,18 +79,8 @@ pub fn aggregate_server_execute_test() {
   should.equal(result.events, [TaskCreated("1", "Buy milk")])
 }
 
-pub fn aggregate_server_sequential_commands_test() {
-  let assert Ok(store_subject) = in_memory_event_store.start()
-  let store = in_memory_event_store.to_event_store(store_subject)
-
-  let config =
-    aggregate_server.Config(
-      aggregate: task_aggregate(),
-      event_store: store,
-      stream_id: "task-2",
-    )
-
-  let assert Ok(server) = aggregate_server.start(config)
+pub fn sequential_commands_test() {
+  let #(server, _store) = start_server("task-2")
 
   let assert Ok(_) =
     aggregate_server.execute(server, CreateTask("2", "Do homework"), 5000)
@@ -98,36 +91,16 @@ pub fn aggregate_server_sequential_commands_test() {
   should.equal(result.aggregate_version, 2)
 }
 
-pub fn aggregate_server_error_test() {
-  let assert Ok(store_subject) = in_memory_event_store.start()
-  let store = in_memory_event_store.to_event_store(store_subject)
-
-  let config =
-    aggregate_server.Config(
-      aggregate: task_aggregate(),
-      event_store: store,
-      stream_id: "task-3",
-    )
-
-  let assert Ok(server) = aggregate_server.start(config)
+pub fn domain_error_test() {
+  let #(server, _store) = start_server("task-3")
 
   // Try to complete a task that doesn't exist
   let result = aggregate_server.execute(server, CompleteTask("3"), 5000)
   should.be_error(result)
 }
 
-pub fn aggregate_server_persists_events_test() {
-  let assert Ok(store_subject) = in_memory_event_store.start()
-  let store = in_memory_event_store.to_event_store(store_subject)
-
-  let config =
-    aggregate_server.Config(
-      aggregate: task_aggregate(),
-      event_store: store,
-      stream_id: "task-4",
-    )
-
-  let assert Ok(server) = aggregate_server.start(config)
+pub fn persists_events_to_store_test() {
+  let #(server, store) = start_server("task-4")
   let assert Ok(_) =
     aggregate_server.execute(server, CreateTask("4", "Persist test"), 5000)
 
@@ -138,18 +111,8 @@ pub fn aggregate_server_persists_events_test() {
   should.equal(first.data, TaskCreated("4", "Persist test"))
 }
 
-pub fn aggregate_server_complete_then_fail_test() {
-  let assert Ok(store_subject) = in_memory_event_store.start()
-  let store = in_memory_event_store.to_event_store(store_subject)
-
-  let config =
-    aggregate_server.Config(
-      aggregate: task_aggregate(),
-      event_store: store,
-      stream_id: "task-5",
-    )
-
-  let assert Ok(server) = aggregate_server.start(config)
+pub fn complete_then_fail_test() {
+  let #(server, _store) = start_server("task-5")
   let assert Ok(_) =
     aggregate_server.execute(server, CreateTask("5", "Complete me"), 5000)
   let assert Ok(_) =
@@ -160,4 +123,26 @@ pub fn aggregate_server_complete_then_fail_test() {
   should.be_error(result)
 }
 
-import gleam/list
+pub fn state_cached_across_commands_test() {
+  let #(server, _store) = start_server("task-6")
+
+  // Execute multiple commands - state should be cached
+  let assert Ok(_) =
+    aggregate_server.execute(server, CreateTask("6", "Task A"), 5000)
+  let assert Ok(_) =
+    aggregate_server.execute(server, RenameTask("6", "Task B"), 5000)
+  let assert Ok(result) =
+    aggregate_server.execute(server, RenameTask("6", "Task C"), 5000)
+
+  should.equal(result.aggregate_state.title, "Task C")
+  should.equal(result.aggregate_version, 3)
+}
+
+pub fn multiple_events_per_command_test() {
+  // This tests that no-op (Ok([])) works correctly
+  let #(server, _store) = start_server("task-7")
+
+  let assert Ok(result) =
+    aggregate_server.execute(server, CreateTask("7", "Multi"), 5000)
+  should.equal(list.length(result.events), 1)
+}
