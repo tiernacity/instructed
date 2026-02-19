@@ -78,12 +78,13 @@ fn create_store(name: String) -> EventStore(TodoEvent) {
         Ok(url) -> {
           io.println("Using DATABASE_URL")
           let assert Ok(c) = pog.url_config(pool_name, url)
-          c
+          c |> pog.pool_size(20)
         }
         Error(_) -> {
           io.println("No DATABASE_URL set, using defaults (localhost/instructed_todo)")
           pog.default_config(pool_name)
           |> pog.database("instructed_todo")
+          |> pog.pool_size(20)
         }
       }
       let assert Ok(started) = pog.start(config)

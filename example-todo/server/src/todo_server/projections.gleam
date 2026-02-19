@@ -36,12 +36,29 @@ pub fn active_todos_projection() -> ProjectionConfig(TodoEvent, AllTodosState) {
           Ok(update_view(state, id, fn(v) { TodoView(..v, priority: priority) }))
         DueDateUpdated(id, due_date) ->
           Ok(update_view(state, id, fn(v) { TodoView(..v, due_date: due_date) }))
-        TodoCompleted(id, _) -> Ok(dict.delete(state, id))
-        TodoReopened(id) -> {
-          let _ = id
-          Ok(state)
+        TodoCompleted(id, completed_at) -> {
+          // Shadow-copy so we can restore on TodoReopened
+          case dict.get(state, id) {
+            Ok(v) -> {
+              let state = dict.delete(state, id)
+              Ok(dict.insert(state, "completed:" <> id, TodoView(..v, status: Completed, completed_at: completed_at)))
+            }
+            Error(_) -> Ok(dict.delete(state, id))
+          }
         }
-        TodoDeleted(id) -> Ok(dict.delete(state, id))
+        TodoReopened(id) -> {
+          case dict.get(state, "completed:" <> id) {
+            Ok(v) -> {
+              let state = dict.delete(state, "completed:" <> id)
+              Ok(dict.insert(state, id, TodoView(..v, status: Active, completed_at: "")))
+            }
+            Error(_) -> Ok(state)
+          }
+        }
+        TodoDeleted(id) -> {
+          let state = dict.delete(state, id)
+          Ok(dict.delete(state, "completed:" <> id))
+        }
       }
     },
   )
@@ -235,11 +252,17 @@ pub fn by_priority_projection() -> ProjectionConfig(
             None -> Ok(state)
           }
         }
-        TodoCompleted(id, _) -> Ok(remove_from_all_priorities(state, id))
+        TodoCompleted(id, _) -> {
+          // Mark as Completed (keep in list so TodoReopened can restore)
+          Ok(update_in_all_priorities(state, id, fn(v) {
+            TodoView(..v, status: Completed)
+          }))
+        }
         TodoDeleted(id) -> Ok(remove_from_all_priorities(state, id))
         TodoReopened(id) -> {
-          let _ = id
-          Ok(state)
+          Ok(update_in_all_priorities(state, id, fn(v) {
+            TodoView(..v, status: Active, completed_at: "")
+          }))
         }
         _ -> Ok(state)
       }
@@ -323,10 +346,49 @@ fn remove_from_all_priorities(
 }
 
 fn find_view_in_priorities(
-  _state: ByPriorityState,
-  _id: String,
+  state: ByPriorityState,
+  id: String,
 ) -> option.Option(TodoView) {
-  None
+  let all =
+    list.flatten([state.critical, state.high, state.medium, state.low])
+  case list.find(all, fn(v: TodoView) { v.id == id }) {
+    Ok(v) -> Some(v)
+    Error(_) -> None
+  }
+}
+
+fn update_in_all_priorities(
+  state: ByPriorityState,
+  id: String,
+  updater: fn(TodoView) -> TodoView,
+) -> ByPriorityState {
+  let update_list = fn(items: List(TodoView)) {
+    list.map(items, fn(v) {
+      case v.id == id {
+        True -> updater(v)
+        False -> v
+      }
+    })
+  }
+  ByPriorityState(
+    critical: update_list(state.critical),
+    high: update_list(state.high),
+    medium: update_list(state.medium),
+    low: update_list(state.low),
+  )
+}
+
+/// Filter a ByPriorityState to only include active items.
+pub fn filter_active_priorities(state: ByPriorityState) -> ByPriorityState {
+  let keep_active = fn(items: List(TodoView)) {
+    list.filter(items, fn(v) { v.status == Active })
+  }
+  ByPriorityState(
+    critical: keep_active(state.critical),
+    high: keep_active(state.high),
+    medium: keep_active(state.medium),
+    low: keep_active(state.low),
+  )
 }
 
 fn sort_by_due_date(todos: List(TodoView)) -> List(TodoView) {

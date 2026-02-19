@@ -218,9 +218,30 @@ fi
 # ============================================================
 echo ""
 echo -e "${BOLD}--- Verification ---${NC}"
-sleep 1
 
 EXPECTED_TOTAL=$((NUM + 1 + 1 + NUM_T4))
+
+# Wait for projections to catch up (poll until stable or timeout)
+echo "Waiting for projections to settle (expecting ${EXPECTED_TOTAL} todos)..."
+SETTLE_ATTEMPTS=0
+MAX_SETTLE=30
+PREV_COUNT=0
+while [ $SETTLE_ATTEMPTS -lt $MAX_SETTLE ]; do
+  CURRENT=$(get_json "todos" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "0")
+  if [ "$CURRENT" = "$EXPECTED_TOTAL" ]; then
+    log "Projections settled at ${CURRENT} todos after ~${SETTLE_ATTEMPTS}s"
+    break
+  fi
+  if [ "$CURRENT" != "$PREV_COUNT" ]; then
+    echo "  ... ${CURRENT}/${EXPECTED_TOTAL} todos projected"
+  fi
+  PREV_COUNT=$CURRENT
+  SETTLE_ATTEMPTS=$((SETTLE_ATTEMPTS + 1))
+  sleep 1
+done
+if [ $SETTLE_ATTEMPTS -eq $MAX_SETTLE ]; then
+  warn "Projections did not fully settle after ${MAX_SETTLE}s (at ${CURRENT}/${EXPECTED_TOTAL})"
+fi
 # NUM t1-* + stress-target + toggle-target + NUM_T4 t4-*
 
 ALL_JSON=$(get_json "todos")

@@ -11,6 +11,7 @@ import gleam/json
 import gleam/list
 import gleam/string
 import mist.{type Connection}
+import todo_server/projections
 import todo_server/server.{type TodoServer}
 import todo_shared/codec
 
@@ -97,7 +98,12 @@ fn handle_get_all(srv: TodoServer) -> Response(mist.ResponseData) {
 
 fn handle_get_active(srv: TodoServer) -> Response(mist.ResponseData) {
   let todos = server.get_active_todos(srv)
-  json_response(200, json.array(dict.values(todos), codec.encode_todo_view))
+  // Filter out shadow "completed:" keys used for TodoReopened support
+  let filtered =
+    dict.to_list(todos)
+    |> list.filter(fn(pair) { !string.starts_with(pair.0, "completed:") })
+    |> list.map(fn(pair) { pair.1 })
+  json_response(200, json.array(filtered, codec.encode_todo_view))
 }
 
 fn handle_get_completed(srv: TodoServer) -> Response(mist.ResponseData) {
@@ -120,6 +126,7 @@ fn handle_get_overdue(srv: TodoServer) -> Response(mist.ResponseData) {
 
 fn handle_get_by_priority(srv: TodoServer) -> Response(mist.ResponseData) {
   let by_pri = server.get_by_priority(srv)
+  let by_pri = projections.filter_active_priorities(by_pri)
   let body_str = codec.encode_by_priority(by_pri)
   response.new(200)
   |> response.set_header("content-type", "application/json")

@@ -365,6 +365,13 @@ type PollerState(event) {
     pending: List(RecordedEvent(event)),
     /// Self-reference for scheduling timer
     self: Subject(PollerMessage),
+    /// Number of consecutive polls that found a gap at last_seen+1.
+    /// BIGSERIAL gaps happen when concurrent transactions commit out of order
+    /// or roll back (e.g. VersionConflict). Temporary gaps resolve when the
+    /// in-flight transaction commits; permanent gaps (from rollbacks) never do.
+    gap_retries: Int,
+    /// After this many gap retries, skip past the gap (permanent gap from rollback)
+    max_gap_retries: Int,
   )
 }
 
@@ -392,6 +399,10 @@ fn start_poller(
       pending: [],
       // Will be set after start
       self: poller_ready,
+      gap_retries: 0,
+      // 10 retries × 1s poll interval = 10s max wait for in-flight transactions.
+      // After that, assume the gap is permanent (rolled-back transaction).
+      max_gap_retries: 10,
     )
 
   case
@@ -497,15 +508,75 @@ fn do_poll(state: PollerState(event)) -> PollerState(event) {
   case events {
     Ok([]) -> state
     Ok([first, ..rest]) -> {
-      // Deliver the first event, queue the rest
-      state.handler(first)
-      PollerState(
-        ..state,
-        in_flight: True,
-        pending: rest,
-      )
+      // Gap detection: with concurrent BIGSERIAL inserts, we may see
+      // event N+2 before N+1 if the transaction for N+1 hasn't committed yet.
+      // We must not advance past the gap or we'll permanently skip events.
+      case first.event_number == state.last_seen + 1 {
+        True -> {
+          // Contiguous — deliver first event, queue contiguous tail
+          let #(contiguous_tail, _non_contiguous) =
+            take_contiguous_prefix(rest, first.event_number + 1)
+          state.handler(first)
+          PollerState(
+            ..state,
+            in_flight: True,
+            pending: contiguous_tail,
+            gap_retries: 0,
+          )
+        }
+        False -> {
+          // Gap detected at last_seen+1. Either:
+          // (a) in-flight transaction — will fill on next poll
+          // (b) permanent gap from rolled-back transaction
+          let new_retries = state.gap_retries + 1
+          case new_retries >= state.max_gap_retries {
+            True -> {
+              // Gap persisted too long — skip it (permanent gap from rollback).
+              // Deliver from the first available event.
+              let #(contiguous_tail, _non_contiguous) =
+                take_contiguous_prefix(rest, first.event_number + 1)
+              state.handler(first)
+              PollerState(
+                ..state,
+                in_flight: True,
+                pending: contiguous_tail,
+                gap_retries: 0,
+              )
+            }
+            False -> {
+              // Wait for gap to fill — don't deliver anything yet
+              PollerState(..state, gap_retries: new_retries)
+            }
+          }
+        }
+      }
     }
     Error(_) -> state
+  }
+}
+
+/// Extract the contiguous prefix of events starting from expected_number.
+/// Returns (contiguous_events, remaining_events).
+fn take_contiguous_prefix(
+  events: List(RecordedEvent(event)),
+  expected_number: Int,
+) -> #(List(RecordedEvent(event)), List(RecordedEvent(event))) {
+  do_take_contiguous(events, expected_number, [])
+}
+
+fn do_take_contiguous(
+  events: List(RecordedEvent(event)),
+  expected_number: Int,
+  acc: List(RecordedEvent(event)),
+) -> #(List(RecordedEvent(event)), List(RecordedEvent(event))) {
+  case events {
+    [] -> #(list.reverse(acc), [])
+    [first, ..rest] -> {
+      case first.event_number == expected_number {
+        True -> do_take_contiguous(rest, expected_number + 1, [first, ..acc])
+        False -> #(list.reverse(acc), events)
+      }
+    }
   }
 }
 
