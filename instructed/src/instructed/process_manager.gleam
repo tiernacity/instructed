@@ -509,15 +509,32 @@ fn route_event(
   }
 }
 
-/// Check if an instance is loaded in memory.
-/// Does NOT check snapshot storage — for routing validation only.
+/// Check if an instance exists — in memory OR in the snapshot store.
+///
+/// This is used for strict routing validation (`StartStrict`/`ContinueStrict`).
+/// Checking only in-memory state would miss instances from previous sessions
+/// that have snapshots but aren't loaded yet.
+///
+/// Matches Commanded's `ProcessManagerInstance.new?/1` which loads state
+/// from snapshot to determine if an instance exists.
 fn instance_exists(
   state: PMRouterState(event, command, pm_state),
   uuid: String,
 ) -> Bool {
   case dict.get(state.instances, uuid) {
     Ok(_) -> True
-    Error(_) -> False
+    Error(_) ->
+      // Check snapshot store for instances from previous sessions
+      case state.event_store {
+        None -> False
+        Some(es) -> {
+          let snapshot_id = pm_snapshot_id(state.config.name, uuid)
+          case es.read_snapshot(snapshot_id) {
+            Ok(_) -> True
+            Error(_) -> False
+          }
+        }
+      }
   }
 }
 
