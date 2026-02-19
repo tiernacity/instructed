@@ -39,6 +39,10 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/middleware.{type Consistency, Eventual, Strong}
 
+/// Monotonic time in nanoseconds for TTL tracking.
+@external(erlang, "instructed_subscriptions_ffi", "monotonic_time_ns")
+fn monotonic_time_ns() -> Int
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -64,6 +68,11 @@ pub opaque type SubMessage {
     reply_to: Subject(Nil),
     caller_pid: Option(Pid),
   )
+  /// Internal: periodic purge of stale ack entries to prevent memory leaks.
+  /// Matches Commanded's 1-hour TTL for ack entries.
+  Purge
+  /// Internal: store self-reference for scheduling purge messages.
+  SetSelf(subject: Subject(SubMessage))
 }
 
 // ---------------------------------------------------------------------------
@@ -79,16 +88,30 @@ type Waiter {
   )
 }
 
+/// Ack entry: version and timestamp (monotonic nanoseconds) of last ack.
+type AckEntry {
+  AckEntry(version: Int, timestamp_ns: Int)
+}
+
+/// TTL for ack entries: 1 hour in nanoseconds.
+/// Matches Commanded's purge interval.
+const ack_ttl_ns = 3_600_000_000_000
+
+/// Interval between purge cycles: 5 minutes in milliseconds.
+const purge_interval_ms = 300_000
+
 type SubState {
   SubState(
     /// Registered handlers: name → consistency
     handlers: Dict(String, Consistency),
-    /// Acked versions: (handler_name, stream_id) → max version acked
-    acked: Dict(#(String, String), Int),
+    /// Acked versions: (handler_name, stream_id) → AckEntry (version + timestamp)
+    acked: Dict(#(String, String), AckEntry),
     /// Pending waiters blocked until their version is acked
     waiters: List(Waiter),
     /// PID → handler name mapping for automatic dispatcher exclusion
     pid_to_name: Dict(Pid, String),
+    /// Self-reference for scheduling purge messages
+    self_subject: Option(Subject(SubMessage)),
   )
 }
 
@@ -107,6 +130,7 @@ pub fn start() -> Result(Subject(SubMessage), String) {
       acked: dict.new(),
       waiters: [],
       pid_to_name: dict.new(),
+      self_subject: None,
     )
 
   case
@@ -114,9 +138,21 @@ pub fn start() -> Result(Subject(SubMessage), String) {
     |> actor.on_message(handle_message)
     |> actor.start
   {
-    Ok(started) -> Ok(started.data)
+    Ok(started) -> {
+      let subject = started.data
+      // Store self-reference and schedule the first purge cycle.
+      process.send(subject, SetSelf(subject))
+      schedule_purge(subject)
+      Ok(subject)
+    }
     Error(_) -> Error("Failed to start subscriptions actor")
   }
+}
+
+/// Schedule the next purge cycle.
+fn schedule_purge(subject: Subject(SubMessage)) -> Nil {
+  let _ = process.send_after(subject, purge_interval_ms, Purge)
+  Nil
 }
 
 // ---------------------------------------------------------------------------
@@ -219,6 +255,10 @@ fn handle_message(
       actor.continue(SubState(..state, handlers: new_handlers))
     }
 
+    SetSelf(subject) -> {
+      actor.continue(SubState(..state, self_subject: Some(subject)))
+    }
+
     RegisterPid(pid, name) -> {
       let new_pid_to_name = dict.insert(state.pid_to_name, pid, name)
       actor.continue(SubState(..state, pid_to_name: new_pid_to_name))
@@ -228,12 +268,18 @@ fn handle_message(
       // Update max acked version for this handler + stream combo.
       // Guard against out-of-order delivery by keeping only the highest version.
       let key = #(name, stream_id)
-      let current = case dict.get(state.acked, key) {
-        Ok(v) -> v
+      let now = monotonic_time_ns()
+      let current_version = case dict.get(state.acked, key) {
+        Ok(entry) -> entry.version
         Error(_) -> 0
       }
-      let new_acked = case stream_version > current {
-        True -> dict.insert(state.acked, key, stream_version)
+      let new_acked = case stream_version > current_version {
+        True ->
+          dict.insert(
+            state.acked,
+            key,
+            AckEntry(version: stream_version, timestamp_ns: now),
+          )
         False -> state.acked
       }
       let new_state = SubState(..state, acked: new_acked)
@@ -246,6 +292,25 @@ fn handle_message(
       list.each(satisfied, fn(w) { process.send(w.reply_to, Nil) })
 
       actor.continue(SubState(..new_state, waiters: remaining))
+    }
+
+    Purge -> {
+      // Remove ack entries older than the TTL (1 hour).
+      // Prevents unbounded memory growth in long-running systems.
+      // Matches Commanded's periodic purge behavior.
+      let now = monotonic_time_ns()
+      let new_acked =
+        dict.filter(state.acked, fn(_key, entry) {
+          now - entry.timestamp_ns < ack_ttl_ns
+        })
+      // Reschedule the next purge. We need our own subject reference.
+      // Since we can't easily get it from actor state, we use self() to
+      // construct a send_after. The subject is passed via the start function.
+      case state.self_subject {
+        Some(subj) -> schedule_purge(subj)
+        None -> Nil
+      }
+      actor.continue(SubState(..state, acked: new_acked))
     }
 
     WaitFor(stream_id, stream_version, reply_to, caller_pid) -> {
@@ -314,7 +379,7 @@ fn is_waiter_satisfied(state: SubState, waiter: Waiter) -> Bool {
     names ->
       list.all(names, fn(name) {
         case dict.get(state.acked, #(name, waiter.stream_id)) {
-          Ok(version) -> version >= waiter.stream_version
+          Ok(entry) -> entry.version >= waiter.stream_version
           Error(_) -> False
         }
       })
