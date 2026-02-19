@@ -76,7 +76,8 @@ fn get_db() -> pog.Connection {
   let pool_name = process.new_name(prefix: "test_pool")
   let assert Ok(config) =
     pog.url_config(pool_name, "postgresql://postgres:postgres@db:5432/app")
-  let assert Ok(started) = pog.start(config)
+  let small_pool = pog.pool_size(config, 2)
+  let assert Ok(started) = pog.start(small_pool)
   started.data
 }
 

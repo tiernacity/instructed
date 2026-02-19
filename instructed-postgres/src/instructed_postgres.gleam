@@ -6,27 +6,24 @@
 //// - Persistent subscriptions with position tracking
 //// - Aggregate state snapshots
 ////
-//// ## Setup
+//// ## Architecture
 ////
-//// 1. Create the required database tables using `create_schema/1`
-//// 2. Create the event store with `new/2`, providing serialization functions
-//// 3. Use the returned `EventStore` with your Instructed application
+//// Unlike the in-memory and SQLite adapters which serialize all operations
+//// through a single OTP actor, this adapter supports concurrent writes.
+//// Correctness is achieved via:
 ////
-//// ## Example
+//// 1. **Transactional append with OCC** — version check + insert run in a
+////    single database transaction. UNIQUE constraint violations map to
+////    VersionConflict, enabling the aggregate server's OCC retry loop.
 ////
-//// ```gleam
-//// import instructed_postgres
-//// import pog
+//// 2. **Poll-based persistent subscriptions** — each persistent subscription
+////    runs a SubscriptionPoller actor that reads events from postgres in
+////    event_number order. Notifications are wake-up signals, not the delivery
+////    mechanism. This guarantees ordered, gap-free delivery even under
+////    concurrent writes with out-of-order BIGSERIAL commits.
 ////
-//// let db = pog.default_config() |> pog.connect()
-//// let assert Ok(Nil) = instructed_postgres.create_schema(db)
-//// let store = instructed_postgres.new(
-////   db: db,
-////   serialize: fn(event) { json.to_string(encode_event(event)) },
-////   deserialize: fn(json_str) { decode_event(json_str) },
-////   event_type: fn(event) { event_type_name(event) },
-//// )
-//// ```
+//// 3. **Transient subscriptions** — still use direct push via the notifier
+////    actor (unchanged, used by aggregate server self-subscription).
 
 import gleam/dict
 import gleam/dynamic/decode
@@ -36,14 +33,12 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
-
 import gleam/string
 import instructed/error.{
   type EventStoreError, SnapshotNotFound, StorageError, StreamNotFound,
   SubscriptionAlreadyExists, SubscriptionNotFound, VersionConflict,
 }
-import instructed/event.{type EventData, type RecordedEvent,
-  RecordedEvent}
+import instructed/event.{type EventData, type RecordedEvent, RecordedEvent}
 import instructed/event_store.{
   type EventStore, type ExpectedVersion, type StartFrom, type Subscription,
   AnyVersion, Current, EventStore, ExactVersion, FromEventNumber, NoStream,
@@ -53,10 +48,14 @@ import instructed/snapshot.{type SnapshotData, SnapshotData}
 import pog
 import youid/uuid
 
+// ============================================================================
+// Public API
+// ============================================================================
+
 /// Configuration for the PostgreSQL event store.
 pub type PgConfig(event) {
   PgConfig(
-    /// Database connection
+    /// Database connection pool
     db: pog.Connection,
     /// Serialize a domain event to JSON string
     serialize: fn(event) -> String,
@@ -127,8 +126,7 @@ fn execute_statements(
       Ok(Nil) ->
         case pog.query(sql) |> pog.execute(db) {
           Ok(_) -> Ok(Nil)
-          Error(e) ->
-            Error("Failed to execute: " <> string.inspect(e))
+          Error(e) -> Error("Failed to execute: " <> string.inspect(e))
         }
     }
   })
@@ -136,7 +134,7 @@ fn execute_statements(
 
 /// Create a new PostgreSQL-backed EventStore.
 pub fn new(config: PgConfig(event)) -> EventStore(event) {
-  // Start a subscription notifier actor
+  // Start the notifier actor (manages transient subs + wakes pollers)
   let assert Ok(notifier) = start_notifier()
 
   EventStore(
@@ -156,7 +154,7 @@ pub fn new(config: PgConfig(event)) -> EventStore(event) {
       subscribe_persistent(config, notifier, stream, name, start_from, handler)
     },
     ack_event: fn(sub, event) {
-      ack_event(config, sub, event)
+      ack_event(config, notifier, sub, event)
     },
     unsubscribe: fn(sub) {
       unsubscribe(notifier, sub)
@@ -183,7 +181,9 @@ pub fn new(config: PgConfig(event)) -> EventStore(event) {
   )
 }
 
-// --- Append ---
+// ============================================================================
+// Component 2: Transactional Append with OCC
+// ============================================================================
 
 fn append_to_stream(
   config: PgConfig(event),
@@ -192,77 +192,122 @@ fn append_to_stream(
   events: List(EventData(event)),
   notifier: Subject(NotifierMessage(event)),
 ) -> Result(Int, EventStoreError) {
-  // Check expected version
-  let current_version = get_stream_version(config, stream_id)
+  // Run the version check + insert inside a single transaction
+  let tx_result =
+    pog.transaction(config.db, fn(conn) {
+      // Read current version inside the transaction
+      let current_version = get_stream_version_with_conn(conn, stream_id)
 
-  let version_ok = case expected_version {
-    AnyVersion -> True
-    NoStream -> current_version == 0
-    StreamExists -> current_version > 0
-    ExactVersion(v) -> current_version == v
-  }
+      let version_ok = case expected_version {
+        AnyVersion -> True
+        NoStream -> current_version == 0
+        StreamExists -> current_version > 0
+        ExactVersion(v) -> current_version == v
+      }
 
-  case version_ok {
-    False -> Error(VersionConflict)
-    True -> {
-      let result =
-        list.fold(events, Ok(current_version), fn(acc, evt: EventData(event)) {
-          case acc {
-            Error(e) -> Error(e)
-            Ok(ver) -> {
-              let new_ver = ver + 1
-              let event_id = uuid.v4_string()
-              let now = now_ms()
-              let data_json = config.serialize(evt.data)
-              let metadata_json = serialize_metadata(evt.metadata)
-              let causation = option.unwrap(evt.causation_id, "")
-              let correlation = option.unwrap(evt.correlation_id, "")
-              let event_type = config.event_type(evt.data)
-
-              let sql =
-                "INSERT INTO event_store_events (event_id, stream_id, stream_version, event_type, data, metadata, causation_id, correlation_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
-
-              case
-                pog.query(sql)
-                |> pog.parameter(pog.text(event_id))
-                |> pog.parameter(pog.text(stream_id))
-                |> pog.parameter(pog.int(new_ver))
-                |> pog.parameter(pog.text(event_type))
-                |> pog.parameter(pog.text(data_json))
-                |> pog.parameter(pog.text(metadata_json))
-                |> pog.parameter(pog.text(causation))
-                |> pog.parameter(pog.text(correlation))
-                |> pog.parameter(pog.int(now))
-                |> pog.execute(config.db)
-              {
-                Ok(_) -> Ok(new_ver)
-                Error(e) -> Error(StorageError(string.inspect(e)))
-              }
-            }
-          }
-        })
-
-      case result {
-        Ok(final_version) -> {
-          // Notify subscribers about new events
-          let _ = case read_stream_forward(config, stream_id, current_version + 1, 100_000) {
-            Ok(new_events) -> {
-              list.each(new_events, fn(evt) {
-                process.send(notifier, NotifyEvent(stream_id, evt))
-              })
-              Nil
-            }
-            Error(_) -> Nil
-          }
-          Ok(final_version)
+      case version_ok {
+        False -> Error(VersionConflict)
+        True -> {
+          insert_events_in_tx(
+            conn,
+            config,
+            stream_id,
+            current_version,
+            events,
+          )
         }
-        Error(e) -> Error(e)
+      }
+    })
+
+  case tx_result {
+    Ok(final_version) -> {
+      // After successful commit, notify:
+      // 1. Read back committed events for transient subscribers
+      let _ = case
+        read_stream_forward(
+          config,
+          stream_id,
+          final_version - list.length(events) + 1,
+          list.length(events),
+        )
+      {
+        Ok(new_events) -> {
+          list.each(new_events, fn(evt) {
+            process.send(notifier, NotifyEvent(stream_id, evt))
+          })
+          Nil
+        }
+        Error(_) -> Nil
+      }
+      // 2. Wake all pollers
+      process.send(notifier, Wake)
+      Ok(final_version)
+    }
+    Error(pog.TransactionQueryError(pog.ConstraintViolated(_, constraint, _))) -> {
+      // UNIQUE(stream_id, stream_version) violation → VersionConflict
+      case string.contains(constraint, "stream_id") {
+        True -> Error(VersionConflict)
+        False -> Error(VersionConflict)
       }
     }
+    Error(pog.TransactionQueryError(e)) ->
+      Error(StorageError(string.inspect(e)))
+    Error(pog.TransactionRolledBack(VersionConflict)) ->
+      Error(VersionConflict)
+    Error(pog.TransactionRolledBack(e)) -> Error(e)
   }
 }
 
-fn get_stream_version(config: PgConfig(event), stream_id: String) -> Int {
+fn insert_events_in_tx(
+  conn: pog.Connection,
+  config: PgConfig(event),
+  stream_id: String,
+  current_version: Int,
+  events: List(EventData(event)),
+) -> Result(Int, EventStoreError) {
+  list.fold(events, Ok(current_version), fn(acc, evt: EventData(event)) {
+    case acc {
+      Error(e) -> Error(e)
+      Ok(ver) -> {
+        let new_ver = ver + 1
+        let event_id = uuid.v4_string()
+        let now = now_ms()
+        let data_json = config.serialize(evt.data)
+        let metadata_json = serialize_metadata(evt.metadata)
+        let causation = option.unwrap(evt.causation_id, "")
+        let correlation = option.unwrap(evt.correlation_id, "")
+        let event_type = config.event_type(evt.data)
+
+        let sql =
+          "INSERT INTO event_store_events (event_id, stream_id, stream_version, event_type, data, metadata, causation_id, correlation_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+
+        case
+          pog.query(sql)
+          |> pog.parameter(pog.text(event_id))
+          |> pog.parameter(pog.text(stream_id))
+          |> pog.parameter(pog.int(new_ver))
+          |> pog.parameter(pog.text(event_type))
+          |> pog.parameter(pog.text(data_json))
+          |> pog.parameter(pog.text(metadata_json))
+          |> pog.parameter(pog.text(causation))
+          |> pog.parameter(pog.text(correlation))
+          |> pog.parameter(pog.int(now))
+          |> pog.execute(conn)
+        {
+          Ok(_) -> Ok(new_ver)
+          Error(pog.ConstraintViolated(_, _, _)) ->
+            Error(VersionConflict)
+          Error(e) -> Error(StorageError(string.inspect(e)))
+        }
+      }
+    }
+  })
+}
+
+fn get_stream_version_with_conn(
+  conn: pog.Connection,
+  stream_id: String,
+) -> Int {
   let sql =
     "SELECT COALESCE(MAX(stream_version), 0) FROM event_store_events WHERE stream_id = $1"
 
@@ -272,7 +317,7 @@ fn get_stream_version(config: PgConfig(event), stream_id: String) -> Int {
     pog.query(sql)
     |> pog.parameter(pog.text(stream_id))
     |> pog.returning(row_decoder)
-    |> pog.execute(config.db)
+    |> pog.execute(conn)
   {
     Ok(response) ->
       case response.rows {
@@ -283,196 +328,248 @@ fn get_stream_version(config: PgConfig(event), stream_id: String) -> Int {
   }
 }
 
-// --- Read ---
+// ============================================================================
+// Component 1: SubscriptionPoller Actor
+// ============================================================================
 
-fn read_stream_forward(
+/// Messages for the subscription poller actor.
+type PollerMessage {
+  /// Wake up and poll for new events
+  PollNow
+  /// Acknowledge an event, advancing the cursor and delivering next
+  PollerAck(event_number: Int)
+  /// Timer-based fallback poll
+  TimerPoll
+  /// Set self reference (sent once after actor start)
+  SetSelf(Subject(PollerMessage))
+}
+
+/// State of the subscription poller actor.
+type PollerState(event) {
+  PollerState(
+    /// Last event_number successfully delivered to the handler
+    last_seen: Int,
+    /// The stream to subscribe to ("$all" or specific stream_id)
+    stream: String,
+    /// The handler callback
+    handler: fn(RecordedEvent(event)) -> Nil,
+    /// Database config for reading events
+    config: PgConfig(event),
+    /// Batch size for polling
+    batch_size: Int,
+    /// Fallback poll interval in milliseconds
+    poll_interval: Int,
+    /// Whether we have an event in-flight (waiting for ack)
+    in_flight: Bool,
+    /// Events fetched but not yet delivered (pending queue)
+    pending: List(RecordedEvent(event)),
+    /// Self-reference for scheduling timer
+    self: Subject(PollerMessage),
+  )
+}
+
+fn start_poller(
   config: PgConfig(event),
-  stream_id: String,
-  start_version: Int,
-  count: Int,
-) -> Result(List(RecordedEvent(event)), EventStoreError) {
-  let sql =
-    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = $1 AND stream_version >= $2 ORDER BY stream_version ASC LIMIT $3"
+  sub_id: String,
+  stream: String,
+  last_seen: Int,
+  handler: fn(RecordedEvent(event)) -> Nil,
+  notifier: Subject(NotifierMessage(event)),
+) -> Result(Subject(PollerMessage), actor.StartError) {
+  // We need to create the subject first, then start the actor
+  // Use a temporary subject to receive the poller subject back
+  let poller_ready = process.new_subject()
 
-  let row_decoder =
-    decode.then(decode.at([0], decode.string), fn(event_id) {
-      decode.then(decode.at([1], decode.int), fn(event_number) {
-        decode.then(decode.at([2], decode.string), fn(sid) {
-          decode.then(decode.at([3], decode.int), fn(stream_version) {
-            decode.then(decode.at([4], decode.string), fn(event_type) {
-              decode.then(decode.at([5], decode.string), fn(causation_id) {
-                decode.then(decode.at([6], decode.string), fn(correlation_id) {
-                  decode.then(decode.at([7], decode.string), fn(data_json) {
-                    decode.then(decode.at([8], decode.string), fn(metadata_json) {
-                      decode.then(decode.at([9], decode.int), fn(created_at) {
-                        decode.success(#(
-                          event_id,
-                          event_number,
-                          sid,
-                          stream_version,
-                          event_type,
-                          causation_id,
-                          correlation_id,
-                          data_json,
-                          metadata_json,
-                          created_at,
-                        ))
-                      })
-                    })
-                  })
-                })
-              })
-            })
-          })
-        })
-      })
-    })
+  let init_state =
+    PollerState(
+      last_seen: last_seen,
+      stream: stream,
+      handler: handler,
+      config: config,
+      batch_size: 1000,
+      poll_interval: 1000,
+      in_flight: False,
+      pending: [],
+      // Will be set after start
+      self: poller_ready,
+    )
 
   case
-    pog.query(sql)
-    |> pog.parameter(pog.text(stream_id))
-    |> pog.parameter(pog.int(start_version))
-    |> pog.parameter(pog.int(count))
-    |> pog.returning(row_decoder)
-    |> pog.execute(config.db)
+    actor.new(init_state)
+    |> actor.on_message(handle_poller_message)
+    |> actor.start
   {
-    Ok(response) -> {
-      case response.rows {
-        [] -> Error(StreamNotFound)
-        rows -> {
-          let events =
-            list.filter_map(rows, fn(row) {
-              let #(
-                event_id,
-                event_number,
-                sid,
-                stream_version,
-                event_type,
-                causation_id_str,
-                correlation_id_str,
-                data_json,
-                metadata_json,
-                created_at,
-              ) = row
-              case config.deserialize(data_json) {
-                Ok(event_data) ->
-                  Ok(RecordedEvent(
-                    event_id: event_id,
-                    event_number: event_number,
-                    stream_id: sid,
-                    stream_version: stream_version,
-                    event_type: event_type,
-                    causation_id: nullable_to_option(causation_id_str),
-                    correlation_id: nullable_to_option(correlation_id_str),
-                    data: event_data,
-                    metadata: json_to_metadata(metadata_json),
-                    created_at: created_at,
-                  ))
-                Error(_) -> Error(Nil)
-              }
-            })
-          case events {
-            [] -> Error(StreamNotFound)
-            _ -> Ok(events)
+    Ok(started) -> {
+      let poller_subject = started.data
+
+      // Set self reference so the poller can schedule timers
+      process.send(poller_subject, SetSelf(poller_subject))
+
+      // Register with notifier for wake signals and ack routing
+      process.send(notifier, AddPoller(sub_id, poller_subject))
+
+      // Trigger initial poll to deliver historical events
+      process.send(poller_subject, PollNow)
+
+      Ok(poller_subject)
+    }
+    Error(e) -> Error(e)
+  }
+}
+
+fn handle_poller_message(
+  state: PollerState(event),
+  msg: PollerMessage,
+) -> actor.Next(PollerState(event), PollerMessage) {
+  case msg {
+    PollNow | TimerPoll -> {
+      case state.in_flight {
+        True -> {
+          // Already processing an event, don't poll yet
+          actor.continue(state)
+        }
+        False -> {
+          case state.pending {
+            [next, ..rest] -> {
+              // Deliver next pending event
+              state.handler(next)
+              actor.continue(
+                PollerState(
+                  ..state,
+                  in_flight: True,
+                  pending: rest,
+                ),
+              )
+            }
+            [] -> {
+              // No pending events, poll from database
+              let new_state = do_poll(state)
+              // Schedule fallback timer
+              schedule_timer(new_state)
+              actor.continue(new_state)
+            }
           }
         }
       }
     }
-    Error(e) -> Error(StorageError(string.inspect(e)))
+
+    SetSelf(self) -> {
+      actor.continue(PollerState(..state, self: self))
+    }
+
+    PollerAck(event_number) -> {
+      // Advance cursor
+      let new_state =
+        PollerState(
+          ..state,
+          last_seen: event_number,
+          in_flight: False,
+        )
+      // Try to deliver next pending or poll for more
+      case new_state.pending {
+        [next, ..rest] -> {
+          new_state.handler(next)
+          actor.continue(
+            PollerState(
+              ..new_state,
+              in_flight: True,
+              pending: rest,
+            ),
+          )
+        }
+        [] -> {
+          // Poll for more events
+          let polled = do_poll(new_state)
+          schedule_timer(polled)
+          actor.continue(polled)
+        }
+      }
+    }
   }
 }
 
-fn read_all_forward(
+fn do_poll(state: PollerState(event)) -> PollerState(event) {
+  let events = case state.stream {
+    "$all" -> read_all_forward_limited(state.config, state.last_seen + 1, state.batch_size)
+    stream_id -> read_stream_by_event_number(state.config, stream_id, state.last_seen + 1, state.batch_size)
+  }
+
+  case events {
+    Ok([]) -> state
+    Ok([first, ..rest]) -> {
+      // Deliver the first event, queue the rest
+      state.handler(first)
+      PollerState(
+        ..state,
+        in_flight: True,
+        pending: rest,
+      )
+    }
+    Error(_) -> state
+  }
+}
+
+fn read_all_forward_limited(
   config: PgConfig(event),
   start_number: Int,
+  limit: Int,
 ) -> Result(List(RecordedEvent(event)), EventStoreError) {
   let sql =
-    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= $1 ORDER BY event_number ASC"
-
-  let row_decoder =
-    decode.then(decode.at([0], decode.string), fn(event_id) {
-      decode.then(decode.at([1], decode.int), fn(event_number) {
-        decode.then(decode.at([2], decode.string), fn(sid) {
-          decode.then(decode.at([3], decode.int), fn(stream_version) {
-            decode.then(decode.at([4], decode.string), fn(event_type) {
-              decode.then(decode.at([5], decode.string), fn(causation_id) {
-                decode.then(decode.at([6], decode.string), fn(correlation_id) {
-                  decode.then(decode.at([7], decode.string), fn(data_json) {
-                    decode.then(decode.at([8], decode.string), fn(metadata_json) {
-                      decode.then(decode.at([9], decode.int), fn(created_at) {
-                        decode.success(#(
-                          event_id,
-                          event_number,
-                          sid,
-                          stream_version,
-                          event_type,
-                          causation_id,
-                          correlation_id,
-                          data_json,
-                          metadata_json,
-                          created_at,
-                        ))
-                      })
-                    })
-                  })
-                })
-              })
-            })
-          })
-        })
-      })
-    })
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= $1 ORDER BY event_number ASC LIMIT $2"
 
   case
     pog.query(sql)
     |> pog.parameter(pog.int(start_number))
-    |> pog.returning(row_decoder)
+    |> pog.parameter(pog.int(limit))
+    |> pog.returning(event_row_decoder())
     |> pog.execute(config.db)
   {
-    Ok(response) -> {
-      let events =
-        list.filter_map(response.rows, fn(row) {
-          let #(
-            event_id,
-            event_number,
-            sid,
-            stream_version,
-            event_type,
-            causation_id_str,
-            correlation_id_str,
-            data_json,
-            metadata_json,
-            created_at,
-          ) = row
-          case config.deserialize(data_json) {
-            Ok(event_data) ->
-              Ok(RecordedEvent(
-                event_id: event_id,
-                event_number: event_number,
-                stream_id: sid,
-                stream_version: stream_version,
-                event_type: event_type,
-                causation_id: nullable_to_option(causation_id_str),
-                correlation_id: nullable_to_option(correlation_id_str),
-                data: event_data,
-                metadata: json_to_metadata(metadata_json),
-                created_at: created_at,
-              ))
-            Error(_) -> Error(Nil)
-          }
-        })
-      Ok(events)
-    }
+    Ok(response) -> Ok(decode_event_rows(config, response.rows))
     Error(e) -> Error(StorageError(string.inspect(e)))
   }
 }
 
-// --- Subscriptions ---
+fn read_stream_by_event_number(
+  config: PgConfig(event),
+  stream_id: String,
+  start_event_number: Int,
+  limit: Int,
+) -> Result(List(RecordedEvent(event)), EventStoreError) {
+  let sql =
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = $1 AND event_number >= $2 ORDER BY event_number ASC LIMIT $3"
 
-/// Notifier actor for managing subscription callbacks
+  case
+    pog.query(sql)
+    |> pog.parameter(pog.text(stream_id))
+    |> pog.parameter(pog.int(start_event_number))
+    |> pog.parameter(pog.int(limit))
+    |> pog.returning(event_row_decoder())
+    |> pog.execute(config.db)
+  {
+    Ok(response) -> Ok(decode_event_rows(config, response.rows))
+    Error(e) -> Error(StorageError(string.inspect(e)))
+  }
+}
+
+fn schedule_timer(state: PollerState(event)) -> Nil {
+  // Use process.send_after for fallback polling
+  let self = state.self
+  let _timer =
+    process.send_after(self, state.poll_interval, TimerPoll)
+  Nil
+}
+
+// ============================================================================
+// Component 3: Notifier (simplified — Wake for pollers, NotifyEvent for transient)
+// ============================================================================
+
 type NotifierState(event) {
   NotifierState(
     transient_subs: List(TransientSub(event)),
+    /// All registered pollers (for wake broadcasting)
+    pollers: List(Subject(PollerMessage)),
+    /// Pollers keyed by subscription_id (for ack routing)
+    poller_map: dict.Dict(String, Subject(PollerMessage)),
     next_id: Int,
   )
 }
@@ -486,17 +583,35 @@ type TransientSub(event) {
 }
 
 pub opaque type NotifierMessage(event) {
+  /// Push event data to transient subscribers (aggregate self-sub)
   NotifyEvent(stream_id: String, event: RecordedEvent(event))
+  /// Wake all pollers — no event payload, just a signal
+  Wake
+  /// Register a transient subscriber
   AddTransientSub(
     stream: String,
     handler: fn(RecordedEvent(event)) -> Nil,
     reply: Subject(Subscription),
   )
+  /// Register a poller for wake signals, with its subscription ID
+  AddPoller(sub_id: String, poller: Subject(PollerMessage))
+  /// Look up a poller by subscription ID
+  GetPoller(sub_id: String, reply: Subject(Option(Subject(PollerMessage))))
+  /// Remove a transient subscriber
   RemoveSub(sub_id: String, reply: Subject(Nil))
 }
 
-fn start_notifier() -> Result(Subject(NotifierMessage(event)), actor.StartError) {
-  let state = NotifierState(transient_subs: [], next_id: 1)
+fn start_notifier() -> Result(
+  Subject(NotifierMessage(event)),
+  actor.StartError,
+) {
+  let state =
+    NotifierState(
+      transient_subs: [],
+      pollers: [],
+      poller_map: dict.new(),
+      next_id: 1,
+    )
   case
     actor.new(state)
     |> actor.on_message(handle_notifier)
@@ -513,6 +628,7 @@ fn handle_notifier(
 ) -> actor.Next(NotifierState(event), NotifierMessage(event)) {
   case msg {
     NotifyEvent(stream_id, event) -> {
+      // Deliver to transient subscribers only
       list.each(state.transient_subs, fn(sub) {
         case sub.stream == "$all" || sub.stream == stream_id {
           True -> sub.handler(event)
@@ -522,14 +638,36 @@ fn handle_notifier(
       actor.continue(state)
     }
 
+    Wake -> {
+      // Forward PollNow to all registered pollers
+      list.each(state.pollers, fn(poller) {
+        process.send(poller, PollNow)
+      })
+      actor.continue(state)
+    }
+
     AddTransientSub(stream, handler, reply) -> {
       let sub_id = "tsub-" <> int.to_string(state.next_id)
       let sub = TransientSub(id: sub_id, stream: stream, handler: handler)
       process.send(reply, Subscription(id: sub_id))
       actor.continue(NotifierState(
+        ..state,
         transient_subs: [sub, ..state.transient_subs],
         next_id: state.next_id + 1,
       ))
+    }
+
+    AddPoller(sub_id, poller) -> {
+      actor.continue(NotifierState(
+        ..state,
+        pollers: [poller, ..state.pollers],
+        poller_map: dict.insert(state.poller_map, sub_id, poller),
+      ))
+    }
+
+    GetPoller(sub_id, reply) -> {
+      process.send(reply, dict.get(state.poller_map, sub_id) |> option.from_result)
+      actor.continue(state)
     }
 
     RemoveSub(sub_id, reply) -> {
@@ -540,6 +678,10 @@ fn handle_notifier(
     }
   }
 }
+
+// ============================================================================
+// Subscription Management
+// ============================================================================
 
 fn subscribe_transient(
   notifier: Subject(NotifierMessage(event)),
@@ -567,7 +709,6 @@ fn subscribe_persistent(
   // Check if subscription already exists
   let check_sql =
     "SELECT subscription_id FROM event_store_subscriptions WHERE stream_id = $1 AND subscription_name = $2"
-
   let check_decoder = decode.at([0], decode.string)
 
   case
@@ -605,29 +746,11 @@ fn subscribe_persistent(
             |> pog.execute(config.db)
           {
             Ok(_) -> {
-              // Send historical events if starting from origin
-              case start_from {
-                Current -> Nil
-                _ -> {
-                  let events = case stream == "$all" {
-                    True -> read_all_forward(config, last_seen + 1)
-                    False -> read_stream_forward(config, stream, 1, 100_000)
-                  }
-                  case events {
-                    Ok(evts) ->
-                      list.each(evts, fn(evt) {
-                        case evt.event_number > last_seen {
-                          True -> handler(evt)
-                          False -> Nil
-                        }
-                      })
-                    Error(_) -> Nil
-                  }
-                }
-              }
-
-              // Register for new events
-              let _ = subscribe_transient(notifier, stream, handler)
+              // Start a poller actor for this persistent subscription.
+              // The poller handles both historical replay and live delivery
+              // through the same poll-from-cursor mechanism.
+              let assert Ok(_poller) =
+                start_poller(config, sub_id, stream, last_seen, handler, notifier)
 
               Ok(Subscription(id: sub_id))
             }
@@ -642,9 +765,11 @@ fn subscribe_persistent(
 
 fn ack_event(
   config: PgConfig(event),
+  notifier: Subject(NotifierMessage(event)),
   sub: Subscription,
   event: RecordedEvent(event),
 ) -> Result(Nil, EventStoreError) {
+  // Update the subscription checkpoint in the database
   let sql =
     "UPDATE event_store_subscriptions SET last_seen_event_number = $1 WHERE subscription_id = $2"
 
@@ -654,7 +779,18 @@ fn ack_event(
     |> pog.parameter(pog.text(sub.id))
     |> pog.execute(config.db)
   {
-    Ok(_) -> Ok(Nil)
+    Ok(_) -> {
+      // Notify the poller that it can deliver the next event
+      let poller_opt =
+        process.call(notifier, 5000, fn(reply) {
+          GetPoller(sub.id, reply)
+        })
+      case poller_opt {
+        Some(poller) -> process.send(poller, PollerAck(event.event_number))
+        None -> Nil
+      }
+      Ok(Nil)
+    }
     Error(e) -> Error(StorageError(string.inspect(e)))
   }
 }
@@ -691,7 +827,64 @@ fn delete_subscription(
   }
 }
 
-// --- Snapshots ---
+// ============================================================================
+// Read Operations
+// ============================================================================
+
+fn read_stream_forward(
+  config: PgConfig(event),
+  stream_id: String,
+  start_version: Int,
+  count: Int,
+) -> Result(List(RecordedEvent(event)), EventStoreError) {
+  let sql =
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE stream_id = $1 AND stream_version >= $2 ORDER BY stream_version ASC LIMIT $3"
+
+  case
+    pog.query(sql)
+    |> pog.parameter(pog.text(stream_id))
+    |> pog.parameter(pog.int(start_version))
+    |> pog.parameter(pog.int(count))
+    |> pog.returning(event_row_decoder())
+    |> pog.execute(config.db)
+  {
+    Ok(response) -> {
+      case response.rows {
+        [] -> Error(StreamNotFound)
+        rows -> {
+          let events = decode_event_rows(config, rows)
+          case events {
+            [] -> Error(StreamNotFound)
+            _ -> Ok(events)
+          }
+        }
+      }
+    }
+    Error(e) -> Error(StorageError(string.inspect(e)))
+  }
+}
+
+fn read_all_forward(
+  config: PgConfig(event),
+  start_number: Int,
+) -> Result(List(RecordedEvent(event)), EventStoreError) {
+  let sql =
+    "SELECT event_id, event_number, stream_id, stream_version, event_type, causation_id, correlation_id, data, metadata, created_at FROM event_store_events WHERE event_number >= $1 ORDER BY event_number ASC"
+
+  case
+    pog.query(sql)
+    |> pog.parameter(pog.int(start_number))
+    |> pog.returning(event_row_decoder())
+    |> pog.execute(config.db)
+  {
+    Ok(response) -> Ok(decode_event_rows(config, response.rows))
+    Error(e) -> Error(StorageError(string.inspect(e)))
+  }
+}
+
+// ============================================================================
+// Snapshots
+// ============================================================================
 
 fn read_snapshot(
   config: PgConfig(event),
@@ -768,8 +961,7 @@ fn delete_snapshot(
   config: PgConfig(event),
   source_uuid: String,
 ) -> Result(Nil, EventStoreError) {
-  let sql =
-    "DELETE FROM event_store_snapshots WHERE source_uuid = $1"
+  let sql = "DELETE FROM event_store_snapshots WHERE source_uuid = $1"
 
   case
     pog.query(sql)
@@ -781,7 +973,9 @@ fn delete_snapshot(
   }
 }
 
-// --- Reset ---
+// ============================================================================
+// Reset
+// ============================================================================
 
 fn reset(config: PgConfig(event)) -> Result(Nil, EventStoreError) {
   let statements = [
@@ -802,13 +996,14 @@ fn reset(config: PgConfig(event)) -> Result(Nil, EventStoreError) {
   })
 }
 
-// --- Helpers ---
+// ============================================================================
+// Shared Helpers
+// ============================================================================
 
 fn get_latest_event_number(
   config: PgConfig(event),
 ) -> Result(Option(Int), EventStoreError) {
   let sql = "SELECT MAX(event_number) FROM event_store_events"
-
   let row_decoder = decode.at([0], decode.optional(decode.int))
 
   case
@@ -824,6 +1019,86 @@ fn get_latest_event_number(
     }
     Error(e) -> Error(StorageError(string.inspect(e)))
   }
+}
+
+type EventRow {
+  EventRow(
+    event_id: String,
+    event_number: Int,
+    stream_id: String,
+    stream_version: Int,
+    event_type: String,
+    causation_id: String,
+    correlation_id: String,
+    data_json: String,
+    metadata_json: String,
+    created_at: Int,
+  )
+}
+
+fn event_row_decoder() -> decode.Decoder(EventRow) {
+  decode.then(decode.at([0], decode.string), fn(event_id) {
+    decode.then(decode.at([1], decode.int), fn(event_number) {
+      decode.then(decode.at([2], decode.string), fn(sid) {
+        decode.then(decode.at([3], decode.int), fn(stream_version) {
+          decode.then(decode.at([4], decode.string), fn(event_type) {
+            decode.then(decode.at([5], decode.string), fn(causation_id) {
+              decode.then(decode.at([6], decode.string), fn(correlation_id) {
+                decode.then(decode.at([7], decode.string), fn(data_json) {
+                  decode.then(
+                    decode.at([8], decode.string),
+                    fn(metadata_json) {
+                      decode.then(
+                        decode.at([9], decode.int),
+                        fn(created_at) {
+                          decode.success(EventRow(
+                            event_id:,
+                            event_number:,
+                            stream_id: sid,
+                            stream_version:,
+                            event_type:,
+                            causation_id:,
+                            correlation_id:,
+                            data_json:,
+                            metadata_json:,
+                            created_at:,
+                          ))
+                        },
+                      )
+                    },
+                  )
+                })
+              })
+            })
+          })
+        })
+      })
+    })
+  })
+}
+
+fn decode_event_rows(
+  config: PgConfig(event),
+  rows: List(EventRow),
+) -> List(RecordedEvent(event)) {
+  list.filter_map(rows, fn(row) {
+    case config.deserialize(row.data_json) {
+      Ok(event_data) ->
+        Ok(RecordedEvent(
+          event_id: row.event_id,
+          event_number: row.event_number,
+          stream_id: row.stream_id,
+          stream_version: row.stream_version,
+          event_type: row.event_type,
+          causation_id: nullable_to_option(row.causation_id),
+          correlation_id: nullable_to_option(row.correlation_id),
+          data: event_data,
+          metadata: json_to_metadata(row.metadata_json),
+          created_at: row.created_at,
+        ))
+      Error(_) -> Error(Nil)
+    }
+  })
 }
 
 fn serialize_metadata(metadata: dict.Dict(String, String)) -> String {
@@ -844,7 +1119,6 @@ fn json_to_metadata(json_str: String) -> dict.Dict(String, String) {
   }
 }
 
-/// Convert a nullable DB string (empty or SQL NULL decoded as "") to Option.
 fn nullable_to_option(s: String) -> Option(String) {
   case s {
     "" -> None
