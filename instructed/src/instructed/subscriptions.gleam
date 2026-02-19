@@ -33,8 +33,9 @@
 //// ```
 
 import gleam/dict.{type Dict}
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Pid, type Subject}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/middleware.{type Consistency, Eventual, Strong}
 
@@ -49,10 +50,20 @@ import instructed/middleware.{type Consistency, Eventual, Strong}
 pub opaque type SubMessage {
   /// Register a handler's consistency level.
   Register(name: String, consistency: Consistency)
+  /// Register a process (PID) as belonging to a named handler.
+  /// Used for automatic dispatcher exclusion from consistency wait.
+  RegisterPid(pid: Pid, name: String)
   /// Acknowledge that a handler has processed a specific event version.
   AckEvent(name: String, stream_id: String, stream_version: Int)
   /// Request that the caller be unblocked when all strong handlers have acked.
-  WaitFor(stream_id: String, stream_version: Int, reply_to: Subject(Nil))
+  /// `caller_pid` is used to auto-exclude the calling handler (prevents deadlock
+  /// when a strong handler dispatches a command with strong consistency).
+  WaitFor(
+    stream_id: String,
+    stream_version: Int,
+    reply_to: Subject(Nil),
+    caller_pid: Option(Pid),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +71,12 @@ pub opaque type SubMessage {
 // ---------------------------------------------------------------------------
 
 type Waiter {
-  Waiter(stream_id: String, stream_version: Int, reply_to: Subject(Nil))
+  Waiter(
+    stream_id: String,
+    stream_version: Int,
+    reply_to: Subject(Nil),
+    exclude: List(String),
+  )
 }
 
 type SubState {
@@ -71,6 +87,8 @@ type SubState {
     acked: Dict(#(String, String), Int),
     /// Pending waiters blocked until their version is acked
     waiters: List(Waiter),
+    /// PID → handler name mapping for automatic dispatcher exclusion
+    pid_to_name: Dict(Pid, String),
   )
 }
 
@@ -84,7 +102,12 @@ type SubState {
 /// Returns an error string if the actor fails to start.
 pub fn start() -> Result(Subject(SubMessage), String) {
   let state =
-    SubState(handlers: dict.new(), acked: dict.new(), waiters: [])
+    SubState(
+      handlers: dict.new(),
+      acked: dict.new(),
+      waiters: [],
+      pid_to_name: dict.new(),
+    )
 
   case
     actor.new(state)
@@ -112,6 +135,24 @@ pub fn register(
   consistency: Consistency,
 ) -> Nil {
   process.send(subject, Register(name: name, consistency: consistency))
+}
+
+/// Register a process (PID) as belonging to a named handler.
+///
+/// This enables automatic dispatcher exclusion: when a strong-consistency handler
+/// dispatches a command that also requires strong consistency, the handler is
+/// automatically excluded from the wait, preventing deadlock.
+///
+/// Should be called by event handlers and process managers during startup.
+///
+/// Equivalent to Commanded's PID-based dispatcher exclusion in
+/// `Commanded.Subscriptions.wait_for/5`.
+pub fn register_pid(
+  subject: Subject(SubMessage),
+  pid: Pid,
+  name: String,
+) -> Nil {
+  process.send(subject, RegisterPid(pid: pid, name: name))
 }
 
 /// Acknowledge that a handler has finished processing an event.
@@ -149,12 +190,16 @@ pub fn wait_for(
   timeout_ms: Int,
 ) -> Result(Nil, Nil) {
   let reply_subject = process.new_subject()
+  // Capture the caller's PID so the subscriptions actor can auto-exclude
+  // the dispatching handler (prevents strong-consistency deadlock).
+  let caller_pid = Some(process.self())
   process.send(
     subject,
     WaitFor(
       stream_id: stream_id,
       stream_version: stream_version,
       reply_to: reply_subject,
+      caller_pid: caller_pid,
     ),
   )
   process.receive(reply_subject, timeout_ms)
@@ -172,6 +217,11 @@ fn handle_message(
     Register(name, consistency) -> {
       let new_handlers = dict.insert(state.handlers, name, consistency)
       actor.continue(SubState(..state, handlers: new_handlers))
+    }
+
+    RegisterPid(pid, name) -> {
+      let new_pid_to_name = dict.insert(state.pid_to_name, pid, name)
+      actor.continue(SubState(..state, pid_to_name: new_pid_to_name))
     }
 
     AckEvent(name, stream_id, stream_version) -> {
@@ -198,12 +248,23 @@ fn handle_message(
       actor.continue(SubState(..new_state, waiters: remaining))
     }
 
-    WaitFor(stream_id, stream_version, reply_to) -> {
+    WaitFor(stream_id, stream_version, reply_to, caller_pid) -> {
+      // Auto-exclude the calling handler to prevent deadlock when a
+      // strong-consistency handler dispatches with strong consistency.
+      let exclude = case caller_pid {
+        Some(pid) ->
+          case dict.get(state.pid_to_name, pid) {
+            Ok(name) -> [name]
+            Error(_) -> []
+          }
+        None -> []
+      }
       let waiter =
         Waiter(
           stream_id: stream_id,
           stream_version: stream_version,
           reply_to: reply_to,
+          exclude: exclude,
         )
       case is_waiter_satisfied(state, waiter) {
         True -> {
@@ -224,22 +285,31 @@ fn handle_message(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Check if a waiter is satisfied — all strong handlers have acked >= stream_version.
+/// Check if a waiter is satisfied — all strong handlers (minus excluded)
+/// have acked >= stream_version.
 ///
 /// Special case: if no strong handlers are registered, immediately satisfied.
+///
+/// The `exclude` list is used for automatic dispatcher exclusion: when a
+/// strong-consistency handler dispatches a command with strong consistency,
+/// it is excluded from the wait to prevent deadlock.
 fn is_waiter_satisfied(state: SubState, waiter: Waiter) -> Bool {
   let strong_names =
     dict.to_list(state.handlers)
     |> list.filter_map(fn(entry) {
       let #(name, consistency) = entry
       case consistency {
-        Strong -> Ok(name)
+        Strong ->
+          case list.contains(waiter.exclude, name) {
+            True -> Error(Nil)
+            False -> Ok(name)
+          }
         Eventual -> Error(Nil)
       }
     })
 
   case strong_names {
-    // No strong handlers registered → satisfied immediately
+    // No strong handlers registered (or all excluded) → satisfied immediately
     [] -> True
     names ->
       list.all(names, fn(name) {

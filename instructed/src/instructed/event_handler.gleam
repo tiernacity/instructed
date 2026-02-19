@@ -215,9 +215,14 @@ pub fn start(
 
       // Register with the subscriptions actor so strong-consistency waiters
       // know about this handler (Invariant 11).
+      // Also register the handler's PID for automatic dispatcher exclusion:
+      // if this handler dispatches a command with strong consistency,
+      // it will be excluded from the wait to prevent deadlock.
       case config.subscriptions {
-        Some(subs) ->
+        Some(subs) -> {
           subscriptions.register(subs, config.name, config.consistency)
+          subscriptions.register_pid(subs, process.self(), config.name)
+        }
         None -> Nil
       }
 
