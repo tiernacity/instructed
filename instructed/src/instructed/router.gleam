@@ -279,7 +279,7 @@ fn dispatch_through_server(
       {
         Ok(result) -> {
           let _ = middleware.run_after_dispatch(pipeline, router.middleware)
-          // Wait for strong-consistency handlers if requested (Invariant 11)
+          // Wait for strong/selective consistency handlers if requested (Invariant 11)
           case pipeline.consistency, router.subscriptions {
             middleware.Strong, Some(subs) -> {
               case
@@ -288,6 +288,20 @@ fn dispatch_through_server(
                   stream_id,
                   result.aggregate_version,
                   router.dispatch_timeout,
+                )
+              {
+                Ok(Nil) -> Ok(result)
+                Error(Nil) -> Error(error.ConsistencyTimeout)
+              }
+            }
+            middleware.Selective(handlers), Some(subs) -> {
+              case
+                subscriptions.wait_for_handlers(
+                  subs,
+                  stream_id,
+                  result.aggregate_version,
+                  router.dispatch_timeout,
+                  handlers,
                 )
               {
                 Ok(Nil) -> Ok(result)

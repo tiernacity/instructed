@@ -37,7 +37,7 @@ import gleam/erlang/process.{type Pid, type Subject}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
-import instructed/middleware.{type Consistency, Eventual, Strong}
+import instructed/middleware.{type Consistency, Eventual, Selective, Strong}
 
 /// Monotonic time in nanoseconds for TTL tracking.
 @external(erlang, "instructed_subscriptions_ffi", "monotonic_time_ns")
@@ -62,11 +62,13 @@ pub opaque type SubMessage {
   /// Request that the caller be unblocked when all strong handlers have acked.
   /// `caller_pid` is used to auto-exclude the calling handler (prevents deadlock
   /// when a strong handler dispatches a command with strong consistency).
+  /// `selected_handlers` limits which handlers must ack (empty = all strong).
   WaitFor(
     stream_id: String,
     stream_version: Int,
     reply_to: Subject(Nil),
     caller_pid: Option(Pid),
+    selected_handlers: List(String),
   )
   /// Internal: periodic purge of stale ack entries to prevent memory leaks.
   /// Matches Commanded's 1-hour TTL for ack entries.
@@ -85,6 +87,9 @@ type Waiter {
     stream_version: Int,
     reply_to: Subject(Nil),
     exclude: List(String),
+    /// If non-empty, only wait for these specific handlers (selective consistency).
+    /// If empty, wait for all strong-consistency handlers.
+    selected: List(String),
   )
 }
 
@@ -219,11 +224,33 @@ pub fn ack_event(
 /// If no strong-consistency handlers are registered, returns `Ok(Nil)` immediately.
 ///
 /// Equivalent to `Commanded.Subscriptions.wait_for/5`.
+/// Block until all strong-consistency handlers have acked the given stream version.
+///
+/// To wait for specific handlers only, use `wait_for_handlers/5`.
 pub fn wait_for(
   subject: Subject(SubMessage),
   stream_id: String,
   stream_version: Int,
   timeout_ms: Int,
+) -> Result(Nil, Nil) {
+  wait_for_handlers(subject, stream_id, stream_version, timeout_ms, [])
+}
+
+/// Block until the specified handlers have acked the given stream version.
+///
+/// If `selected_handlers` is empty, waits for ALL strong-consistency handlers
+/// (same as `wait_for/4`).
+///
+/// If `selected_handlers` is non-empty, only waits for those specific handlers,
+/// regardless of their registered consistency level.
+///
+/// Equivalent to Commanded's `consistency: [MyProjector, "OtherHandler"]`.
+pub fn wait_for_handlers(
+  subject: Subject(SubMessage),
+  stream_id: String,
+  stream_version: Int,
+  timeout_ms: Int,
+  selected_handlers: List(String),
 ) -> Result(Nil, Nil) {
   let reply_subject = process.new_subject()
   // Capture the caller's PID so the subscriptions actor can auto-exclude
@@ -236,6 +263,7 @@ pub fn wait_for(
       stream_version: stream_version,
       reply_to: reply_subject,
       caller_pid: caller_pid,
+      selected_handlers: selected_handlers,
     ),
   )
   process.receive(reply_subject, timeout_ms)
@@ -313,7 +341,7 @@ fn handle_message(
       actor.continue(SubState(..state, acked: new_acked))
     }
 
-    WaitFor(stream_id, stream_version, reply_to, caller_pid) -> {
+    WaitFor(stream_id, stream_version, reply_to, caller_pid, selected_handlers) -> {
       // Auto-exclude the calling handler to prevent deadlock when a
       // strong-consistency handler dispatches with strong consistency.
       let exclude = case caller_pid {
@@ -330,6 +358,7 @@ fn handle_message(
           stream_version: stream_version,
           reply_to: reply_to,
           exclude: exclude,
+          selected: selected_handlers,
         )
       case is_waiter_satisfied(state, waiter) {
         True -> {
@@ -350,31 +379,42 @@ fn handle_message(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Check if a waiter is satisfied — all strong handlers (minus excluded)
+/// Check if a waiter is satisfied — all required handlers (minus excluded)
 /// have acked >= stream_version.
 ///
-/// Special case: if no strong handlers are registered, immediately satisfied.
+/// When `waiter.selected` is non-empty, only those specific handlers are
+/// checked (selective consistency). Otherwise, all registered strong handlers
+/// are checked.
 ///
 /// The `exclude` list is used for automatic dispatcher exclusion: when a
 /// strong-consistency handler dispatches a command with strong consistency,
 /// it is excluded from the wait to prevent deadlock.
 fn is_waiter_satisfied(state: SubState, waiter: Waiter) -> Bool {
-  let strong_names =
-    dict.to_list(state.handlers)
-    |> list.filter_map(fn(entry) {
-      let #(name, consistency) = entry
-      case consistency {
-        Strong ->
-          case list.contains(waiter.exclude, name) {
-            True -> Error(Nil)
-            False -> Ok(name)
-          }
-        Eventual -> Error(Nil)
-      }
-    })
+  let required_names = case waiter.selected {
+    // Selective: wait only for the named handlers (regardless of their
+    // registered consistency level)
+    [_, ..] ->
+      list.filter(waiter.selected, fn(name) {
+        !list.contains(waiter.exclude, name)
+      })
+    // Non-selective: wait for all registered strong-consistency handlers
+    [] ->
+      dict.to_list(state.handlers)
+      |> list.filter_map(fn(entry) {
+        let #(name, consistency) = entry
+        case consistency {
+          Strong | Selective(_) ->
+            case list.contains(waiter.exclude, name) {
+              True -> Error(Nil)
+              False -> Ok(name)
+            }
+          Eventual -> Error(Nil)
+        }
+      })
+  }
 
-  case strong_names {
-    // No strong handlers registered (or all excluded) → satisfied immediately
+  case required_names {
+    // No handlers to wait for → satisfied immediately
     [] -> True
     names ->
       list.all(names, fn(name) {

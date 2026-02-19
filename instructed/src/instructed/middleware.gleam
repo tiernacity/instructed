@@ -53,6 +53,9 @@ pub type Consistency {
   Eventual
   /// Dispatch blocks until all strong-consistency handlers have processed events.
   Strong
+  /// Dispatch blocks until the named handlers have processed events.
+  /// Equivalent to Commanded's `consistency: [MyProjector, "OtherHandler"]`.
+  Selective(handlers: List(String))
 }
 
 /// The pipeline state that flows through middleware.
