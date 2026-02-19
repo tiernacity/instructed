@@ -22,7 +22,7 @@ fn make_store() {
   in_memory_event_store.to_event_store(sub)
 }
 
-fn append_event(store: event_store.EventStore(TestEvent), stream, event) {
+fn append_event(store: event_store.EventStore(TestEvent), stream: String, event: TestEvent) {
   let assert Ok(_) =
     store.append_to_stream(stream, NoStream, [
       EventData(
@@ -141,5 +141,128 @@ pub fn handler_continues_on_skip_test() {
   process.sleep(50)
 
   // Handler should still be alive after skipping
+  should.equal(process.is_alive(pid), True)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2: Recursive retry - retries multiple times then skips
+// ---------------------------------------------------------------------------
+
+pub fn handler_retries_multiple_times_then_skips_test() {
+  let store = make_store()
+  let attempt_counter = process.new_subject()
+
+  // Handler that fails 3 times then succeeds
+  let config =
+    event_handler.new(
+      name: "multi_retry_skip_handler",
+      handle_event: fn(_event, _recorded, state: Int) {
+        // state tracks attempt number
+        case state >= 3 {
+          True -> Ok(state)
+          False -> Error("not yet")
+        }
+      },
+      initial_state: 0,
+    )
+    |> event_handler.with_error_handler(fn(_reason, _event, state: Int) {
+      let new_state = state + 1
+      process.send(attempt_counter, new_state)
+      case new_state >= 3 {
+        // After 3 retries, skip
+        True -> error.Skip
+        False -> error.Retry(new_state)
+      }
+    })
+
+  let assert Ok(handler_subject) = event_handler.start(config, store)
+  let assert Ok(pid) = process.subject_owner(handler_subject)
+
+  append_event(store, "retry-stream-1", TestOccurred("r1"))
+  process.sleep(100)
+
+  // Should have called on_error 3 times (recursive retry)
+  let assert Ok(1) = process.receive(attempt_counter, 100)
+  let assert Ok(2) = process.receive(attempt_counter, 100)
+  let assert Ok(3) = process.receive(attempt_counter, 100)
+
+  // Handler should still be alive (skipped after retries)
+  should.equal(process.is_alive(pid), True)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2: Recursive retry - retries then stops
+// ---------------------------------------------------------------------------
+
+pub fn handler_retries_then_stops_test() {
+  let store = make_store()
+  let attempt_counter = process.new_subject()
+
+  let config =
+    event_handler.new(
+      name: "retry_then_stop_handler",
+      handle_event: fn(_event, _recorded, _state: Int) {
+        Error("always fails")
+      },
+      initial_state: 0,
+    )
+    |> event_handler.with_error_handler(fn(_reason, _event, state: Int) {
+      let new_state = state + 1
+      process.send(attempt_counter, new_state)
+      case new_state >= 2 {
+        True -> error.Stop("giving up after retries")
+        False -> error.Retry(new_state)
+      }
+    })
+
+  let assert Ok(handler_subject) = event_handler.start(config, store)
+  let assert Ok(pid) = process.subject_owner(handler_subject)
+
+  append_event(store, "retry-stream-2", TestOccurred("r2"))
+  process.sleep(100)
+
+  // Should have retried once then stopped
+  let assert Ok(1) = process.receive(attempt_counter, 100)
+  let assert Ok(2) = process.receive(attempt_counter, 100)
+
+  // Handler should have stopped
+  should.equal(process.is_alive(pid), False)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 2: Recursive RetryWithDelay
+// ---------------------------------------------------------------------------
+
+pub fn handler_retry_with_delay_recursive_test() {
+  let store = make_store()
+  let attempt_counter = process.new_subject()
+
+  let config =
+    event_handler.new(
+      name: "retry_delay_handler",
+      handle_event: fn(_event, _recorded, _state: Int) {
+        Error("transient failure")
+      },
+      initial_state: 0,
+    )
+    |> event_handler.with_error_handler(fn(_reason, _event, state: Int) {
+      let new_state = state + 1
+      process.send(attempt_counter, new_state)
+      case new_state >= 2 {
+        True -> error.Skip
+        False -> error.RetryWithDelay(10, new_state)
+      }
+    })
+
+  let assert Ok(handler_subject) = event_handler.start(config, store)
+  let assert Ok(pid) = process.subject_owner(handler_subject)
+
+  append_event(store, "retry-stream-3", TestOccurred("r3"))
+  process.sleep(200)
+
+  let assert Ok(1) = process.receive(attempt_counter, 100)
+  let assert Ok(2) = process.receive(attempt_counter, 100)
+
+  // Handler continues after skip
   should.equal(process.is_alive(pid), True)
 }

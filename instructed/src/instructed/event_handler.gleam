@@ -390,7 +390,11 @@ fn handle_error(
     Some(error_fn) -> {
       case error_fn(reason, recorded_event, state.handler_state) {
         error.Retry(new_state) -> {
-          // Retry with updated state — re-process the same event
+          // Retry with updated state — re-process the same event.
+          // If retry also fails, call on_error again (recursive)
+          // matching Commanded's recursive retry behavior.
+          let updated_state =
+            HandlerActorState(..state, handler_state: new_state)
           case
             state.config.handle_event(
               recorded_event.data,
@@ -400,6 +404,17 @@ fn handle_error(
           {
             Ok(final_state) -> {
               ack_event(state, recorded_event)
+              // Ack strong-consistency subscriptions after successful retry
+              case state.config.consistency, state.config.subscriptions {
+                Strong, Some(subs) ->
+                  subscriptions.ack_event(
+                    subs,
+                    state.config.name,
+                    recorded_event.stream_id,
+                    recorded_event.stream_version,
+                  )
+                _, _ -> Nil
+              }
               actor.continue(
                 HandlerActorState(
                   ..state,
@@ -408,18 +423,18 @@ fn handle_error(
                 ),
               )
             }
-            Error(_) -> {
-              // Retry failed again — ack and continue to prevent blocking
-              ack_event(state, recorded_event)
-              actor.continue(
-                HandlerActorState(..state, handler_state: new_state),
-              )
+            Error(retry_reason) -> {
+              // Retry failed — call on_error again recursively
+              handle_error(updated_state, retry_reason, recorded_event)
             }
           }
         }
         error.RetryWithDelay(delay_ms, new_state) -> {
-          // Sleep then retry
+          // Sleep then retry. If retry also fails, call on_error again
+          // (recursive) matching Commanded's recursive retry behavior.
           process.sleep(delay_ms)
+          let updated_state =
+            HandlerActorState(..state, handler_state: new_state)
           case
             state.config.handle_event(
               recorded_event.data,
@@ -429,6 +444,17 @@ fn handle_error(
           {
             Ok(final_state) -> {
               ack_event(state, recorded_event)
+              // Ack strong-consistency subscriptions after successful retry
+              case state.config.consistency, state.config.subscriptions {
+                Strong, Some(subs) ->
+                  subscriptions.ack_event(
+                    subs,
+                    state.config.name,
+                    recorded_event.stream_id,
+                    recorded_event.stream_version,
+                  )
+                _, _ -> Nil
+              }
               actor.continue(
                 HandlerActorState(
                   ..state,
@@ -437,11 +463,9 @@ fn handle_error(
                 ),
               )
             }
-            Error(_) -> {
-              ack_event(state, recorded_event)
-              actor.continue(
-                HandlerActorState(..state, handler_state: new_state),
-              )
+            Error(retry_reason) -> {
+              // Retry failed — call on_error again recursively
+              handle_error(updated_state, retry_reason, recorded_event)
             }
           }
         }
@@ -457,8 +481,6 @@ fn handle_error(
         }
         error.Stop(_reason) -> {
           // Stop the handler
-          // In Gleam, we can't easily stop with a reason from on_message.
-          // We ack the event to prevent re-delivery, then stop.
           ack_event(state, recorded_event)
           actor.stop()
         }
