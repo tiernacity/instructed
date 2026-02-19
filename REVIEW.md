@@ -1,10 +1,10 @@
 # CQRS/ES Feature Review: Instructed vs Commanded
 
-> **Generated**: 2026-02-18  
-> **Instructed version**: 1.0.0 (Gleam)  
-> **Commanded reference**: latest main branch (Elixir)
+> **Generated**: 2026-02-19
+> **Instructed version**: 1.0.0 (Gleam)
+> **Commanded version**: latest main branch (Elixir)
 
-This review systematically compares every feature, constraint, and guarantee between Instructed (this Gleam repo) and Commanded (the Elixir library it ports).
+This document systematically compares every feature, constraint, and guarantee between Instructed (Gleam CQRS/ES framework) and Commanded (the Elixir reference implementation it ports).
 
 **Status indicators:**
 - ✅ Feature present and equivalent
@@ -14,500 +14,527 @@ This review systematically compares every feature, constraint, and guarantee bet
 
 ---
 
+## Table of Contents
+
+### Core Features
+1. [Aggregates](#1-aggregates-)
+2. [Command Routing & Dispatch](#2-command-routing--dispatch-)
+3. [Middleware Pipeline](#3-middleware-pipeline-)
+4. [Event Handlers](#4-event-handlers-)
+5. [Projections](#5-projections-)
+6. [Process Managers](#6-process-managers-)
+7. [Snapshots](#7-snapshots-)
+8. [Event Store Interface](#8-event-store-interface-)
+
+### CQRS/ES Guarantees & Constraints
+9. [Optimistic Concurrency Control](#9-optimistic-concurrency-control-)
+10. [Command Serialization per Aggregate](#10-command-serialization-per-aggregate-)
+11. [Event Ordering](#11-event-ordering-)
+12. [Strong vs Eventual Consistency](#12-strong-vs-eventual-consistency-)
+13. [Error Handling & Retry Strategies](#13-error-handling--retry-strategies-)
+14. [Causation & Correlation ID Tracking](#14-causation--correlation-id-tracking-)
+15. [Idempotency](#15-idempotency-)
+
+### Advanced Features
+16. [Multi Module](#16-multi-module-)
+17. [Aggregate Lifespan Management](#17-aggregate-lifespan-management-)
+18. [Composite Router](#18-composite-router-)
+19. [Application Supervision Tree](#19-application-supervision-tree-)
+20. [Event Upcasting](#20-event-upcasting-)
+21. [Telemetry & Observability](#21-telemetry--observability-)
+22. [Batch Processing & Concurrency in Handlers](#22-batch-processing--concurrency-in-handlers-)
+
+### Summary
+- [Feature Parity Scorecard](#feature-parity-scorecard)
+- [Critical Issues](#critical-issues)
+- [Recommended Priority Order](#recommended-priority-order)
+
+---
+
 ## 1. Aggregates [⚠️]
 
 ### What Commanded Provides
-- Aggregate is an Elixir module with `defstruct` for state, `execute/2` callback for commands, `apply/2` callback for events
-- `execute/2` supports rich return types: single event, list of events, `{:ok, events}`, `:ok`, `nil`, `[]`, `{:error, reason}`, `%Multi{}`, or raising exceptions
-- `apply/2` must never fail — used during state rebuilding
-- Aggregate runs as a GenServer process (`Commanded.Aggregates.Aggregate`) with `restart: :temporary`
-- State population via `AggregateStateBuilder.populate/1`: reads snapshot, then streams events in batches of 1,000
-- Self-subscription to aggregate stream via `EventStore.subscribe/2` to catch externally appended events
-- Validates expected event sequence (`stream_version == aggregate_version + 1`); throws on unexpected gaps
-- Aggregate state is a struct; best practice docs advise keeping only data needed for command handling
+- Aggregate defined as a module with `execute/2` and `apply/2` callbacks (behaviour)
+- `execute/2` accepts many return types: single event, list, `{:ok, event}`, `{:ok, [events]}`, `:ok`, `nil`, `[]`, `{:ok, []}`, `{:error, reason}`, `%Multi{}`, or raised exceptions (caught)
+- `apply/2` must never fail — events are facts
+- State is an Elixir struct, created via `struct(module)` for the empty state
+- State rebuilding via `AggregateStateBuilder.populate/1` with snapshot integration and batched reading (1,000 events per batch)
+- Aggregate process is a GenServer with `restart: :temporary` under a DynamicSupervisor
+- External event handling via self-subscription to the aggregate's stream
+- Lazy state loading via `handle_continue(:populate_aggregate_state)` on first access
 
 ### What Instructed Provides
-- ✅ Aggregate is a record-of-functions (`Aggregate(state, command, event)`) with `execute`, `apply_event`, `empty_state` — idiomatic Gleam equivalent
-- ⚠️ `execute` returns `Result(List(event), String)` — supports `Ok([])` for no-ops and `Ok(events)` for success, `Error(reason)` for failures. Does NOT support returning a `Multi` from execute (Multi is external, used within execute via `to_result()`)
-- ✅ `apply_event` is a pure function that must never fail
-- ✅ Aggregate server runs as an OTP Actor (`aggregate_server.gleam`) with cached state
-- ✅ State population with snapshot support via `populate_from_event_store` — reads snapshot, then batches of 1,000
-- ✅ Self-subscription to aggregate stream for external events (`ExternalEvent` message handler)
-- ⚠️ Gap detection: on unexpected version, reloads full state from event store instead of throwing. This is actually more resilient than Commanded's behavior
-- 📝 Record-of-functions instead of module+behaviour — idiomatic Gleam design choice
+- ✅ Aggregate defined as a record of functions (`Aggregate(state, command, event)` in `aggregate.gleam`)
+- ✅ `execute` returns `Result(List(event), String)` — covers success with events, empty list (no-op), and errors
+- ✅ `apply_event` takes state + event, returns state (infallible by convention)
+- ✅ State rebuilding via `populate_from_event_store` with snapshot support and batched reading (1,000 default)
+- ✅ `rebuild_from_version` for incremental state rebuild (used during retry)
+- ✅ Aggregate server as OTP Actor (`aggregate_server.gleam`) with lazy loading on first command
+- ✅ Self-subscription to own stream for external events (`ExternalEvent` message handling)
+- 📝 Functions-as-records instead of behaviours — idiomatic Gleam, not a gap
+- ⚠️ `execute` returns `String` errors only — Commanded allows any term as error reason
+- ⚠️ No support for returning a single event (must always return a list) — minor ergonomic difference
+- ⚠️ No exception catching in `execute` — Commanded rescues exceptions and returns them as errors
 
 ### Gaps & Issues
-- **LOW**: `execute` cannot directly return a `Multi` struct — must call `multi.to_result()` inside execute. This is a minor ergonomic difference, not a correctness issue.
-- **LOW**: No `{:ok, event}` or `nil` return variants — Gleam's type system makes these unnecessary (use `Ok([event])` or `Ok([])`)
-- **LOW**: Exception handling differs — Gleam doesn't have exceptions; errors must be returned as `Error(reason)`. This is actually safer.
+- **MEDIUM** — Error type is `String` only (`Result(List(event), String)`). Commanded allows `{:error, any_term}`. This limits structured error reporting from aggregates. Design choice but reduces expressiveness.
+- **LOW** — No exception rescue in `execute`. In Gleam, panics crash the process. Commanded catches exceptions and returns them as `{:error, error}`. The Gleam approach is arguably more correct (let it crash), but differs from Commanded's behavior where the aggregate survives handler exceptions.
+- **LOW** — External event handling in `aggregate_server.gleam` checks for sequential version (`stream_version == aggregate_version + 1`) and reloads on gap. Commanded throws `{:error, :unexpected_event_received}` and stops. Instructed's approach (reload) is actually more resilient.
 
 ---
 
 ## 2. Command Routing & Dispatch [⚠️]
 
 ### What Commanded Provides
-- Compile-time macro-based `Router` module with `identify` and `dispatch` macros
-- `identify` macro: sets default identity field, prefix, per-aggregate; enforces one-per-aggregate-per-router
-- `dispatch` macro: registers command → handler/aggregate mapping with options (timeout, lifespan, consistency, returning, etc.)
-- `CompositeRouter`: combines multiple routers; detects duplicate command registrations at compile time
-- Identity extraction via `ExtractAggregateIdentity` middleware: supports field name atoms, 1-arity functions, prefix (string or function)
-- Identity converted to string via `String.Chars` protocol
-- Duplicate command detection at compile time
-- `Dispatcher.Payload` struct carries all dispatch metadata
-- Task-based execution via `Task.Supervisor.async_nolink` with `Task.yield/shutdown` for timeout
-- Retry on aggregate process death (`:aggregate_stopped`, `:remote_node_down`)
-- Default timeout: 5,000ms; default retry attempts: 10
+- Compile-time macro-based router with `identify` and `dispatch` macros
+- `identify` macro: sets default identity field/function per aggregate with optional prefix
+- `dispatch` macro: registers command→aggregate mapping with many options (identity, prefix, function, timeout, lifespan, consistency, before_execute)
+- Identity extraction via `ExtractAggregateIdentity` middleware
+- Custom identity types via `String.Chars` protocol
+- Duplicate command detection at compile time (raises `ArgumentError`)
+- Per-command `identity:` override
+- `before_execute` hook on handler module
+- Default timeout: 5,000ms
+- Default retry: 10 attempts
+- `returning` option: `:aggregate_state`, `:aggregate_version`, `:events`, `:execution_result`
+- Task-based execution via `Task.Supervisor.async_nolink` for isolation
+- Retry on aggregate process death (lifespan timeout during dispatch) and remote node down
 
 ### What Instructed Provides
-- ✅ Runtime `Router` record with `identity` function, `identity_prefix`, `middleware`, `retry_attempts`, `dispatch_timeout`
-- ✅ Identity extraction via user-provided function (`fn(command) -> String`)
-- ✅ Identity prefix support via `with_prefix`
-- ✅ Validates identity is non-empty string
-- ✅ Default timeout 5,000ms, default retry 10 attempts (matches Commanded)
-- ✅ Middleware pipeline integration (`before_dispatch`, `after_dispatch`, `after_failure`)
-- ✅ Strong consistency waiting via subscriptions integration
-- ✅ Registry actor manages aggregate server processes per stream_id
-- ❌ No compile-time dispatch — Gleam doesn't have macros
-- ❌ No duplicate command detection (runtime router, single command type per router)
-- ❌ No `returning` option on dispatch (always returns `DispatchResult` with state, version, events)
-- ⚠️ No Task-based dispatch — command executed via `process.call` directly to aggregate server actor (blocking the caller)
-- ⚠️ No retry on aggregate server death — if the actor stops during dispatch, the call times out
+- ✅ Runtime router configuration (`Router` record in `router.gleam`) with `new()`, builder pattern
+- ✅ Identity extraction via `identity` function on router
+- ✅ Identity prefix via `with_prefix`
+- ✅ Empty identity validation
+- ✅ Middleware pipeline execution (before_dispatch, after_dispatch, after_failure)
+- ✅ Registry for aggregate server processes (per stream_id)
+- ✅ Default timeout: 5,000ms (matches Commanded)
+- ✅ Default retry: 10 attempts (matches Commanded)
+- ✅ Dispatch with context (causation_id, correlation_id, metadata)
+- ✅ Strong consistency wait integration via subscriptions actor
+- 📝 Runtime configuration instead of compile-time macros — Gleam doesn't have macros
+- ⚠️ No `returning` option support — `CommandContext` defines the types but they're not wired into dispatch
+- ⚠️ No duplicate command detection — router handles one aggregate type; multiple routers are separate
+- ❌ No `before_execute` hook
+- ❌ No Task-based execution isolation — commands execute directly via `process.call`
+- ❌ No retry on aggregate process death during dispatch
 
 ### Gaps & Issues
-- **MEDIUM**: No `returning` option — dispatch always returns full `DispatchResult`. In Commanded, `returning: false` returns just `:ok` for performance. Instructed always materializes state + events. Not a correctness issue but impacts API compatibility.
-- **LOW**: No compile-time dispatch registration — 📝 intentional Gleam design (no macros). Runtime config is equivalent.
-- **MEDIUM**: No retry on aggregate process death. If the aggregate server stops (e.g., lifespan timeout) during a dispatch, the calling process gets a timeout rather than a retry. Commanded retries on `:aggregate_stopped` and `:remote_node_down`.
-- **HIGH**: Registry actor is a simple `Dict` lookup without cleanup — dead aggregate servers remain in the registry. No process monitoring. If an aggregate server crashes, subsequent dispatches will fail because the registry returns the dead Subject. Should monitor aggregate server processes and remove on death.
+- **MEDIUM** — `returning` option is defined in `command_context.gleam` (`Returning` type with 5 variants) but never used in the actual dispatch pipeline. `DispatchResult` always returns full state, version, and events. The type exists but the feature is inert.
+- **MEDIUM** — No Task-based isolation. In Commanded, command execution runs in a separate task, so if the aggregate process crashes, the dispatcher isn't killed. In Instructed, `process.call` means the caller is blocked and may be affected by aggregate crashes.
+- **LOW** — No `before_execute` hook. Minor convenience feature — can be replaced by middleware.
+- **LOW** — No retry on process death during dispatch. If the aggregate server dies from a lifespan timeout while a command is in-flight, Instructed will return an error rather than retrying with a fresh process.
 
 ---
 
-## 3. Middleware Pipeline [⚠️]
+## 3. Middleware Pipeline [✅]
 
 ### What Commanded Provides
-- `Commanded.Middleware` behaviour with three callbacks: `before_dispatch/1`, `after_dispatch/1`, `after_failure/1`
-- `Pipeline` struct with fields: application, command, command_uuid, consistency, identity, metadata, assigns, halted, response, plus causation/correlation IDs
-- `Pipeline.chain/3` runs middleware; halting stops `before_dispatch` and `after_dispatch` but NOT `after_failure`
-- `Pipeline.assign/3` for shared data (atom keys, any values)
-- `Pipeline.assign_metadata/3` for event metadata
-- `Pipeline.respond/2` with first-write-wins semantics
-- Built-in middleware: `ExtractAggregateIdentity` (identity extraction + prefix + validation) and `ConsistencyGuarantee` (strong consistency waiting)
-- User middleware runs BEFORE built-in middleware
-- Execution order: user MW1 before → user MW2 before → ExtractIdentity before → ConsistencyGuarantee before → execute → ConsistencyGuarantee after → ExtractIdentity after → user MW2 after → user MW1 after
+- `Commanded.Middleware` behaviour with `before_dispatch/1`, `after_dispatch/1`, `after_failure/1`
+- `Pipeline` struct with command, UUIDs, metadata, assigns, halted flag, response, consistency, identity
+- `halt/1` stops `before_dispatch` and `after_dispatch` chains; `after_failure` always runs all middleware
+- `assign/3` for shared data between middleware stages
+- `assign_metadata/3` for event metadata
+- `respond/2` first-write-wins response setting
+- Built-in: `ExtractAggregateIdentity`, `ConsistencyGuarantee`, `Logger`
+- Middleware order: user middleware first, built-in appended last
+- `after_dispatch` runs in reverse order of `before_dispatch`
 
 ### What Instructed Provides
 - ✅ `Middleware` record with `before_dispatch`, `after_dispatch`, `after_failure` functions
-- ✅ `Pipeline` record with command, command_id, causation_id, correlation_id, metadata, assigns, halted, response, consistency, identity
-- ✅ Halting stops `before_dispatch` and `after_dispatch` but not `after_failure` (matches Commanded)
-- ✅ `assign/3`, `assign_metadata/3`, `halt/1`, `respond/2` (first-write-wins)
-- ⚠️ No built-in middleware — identity extraction and consistency guarantee are handled inline in the router, not as composable middleware
-- ⚠️ `assigns` uses `Dict(String, String)` — Commanded uses atom keys with any values. Gleam's type safety limits this.
-- ⚠️ Middleware execution order is forward-only (fold left) — Commanded reverses for `after_dispatch`/`after_failure`. In Instructed, all three stages use the same order.
+- ✅ `Pipeline` struct with command, UUIDs, metadata, assigns, halted flag, response, consistency, identity
+- ✅ `halt/1` stops `before_dispatch` and `after_dispatch`; `after_failure` always runs
+- ✅ `assign/3`, `assign_metadata/3`, `respond/2`, `with_consistency/2`
+- ✅ `run_before_dispatch`, `run_after_dispatch`, `run_after_failure` properly implement chain semantics
+- 📝 No built-in `ExtractAggregateIdentity` middleware — identity extraction is done directly in `router.gleam`
+- 📝 No built-in `Logger` middleware — user can add their own
+- ⚠️ `after_dispatch`/`after_failure` run in same order as `before_dispatch` (not reversed)
 
 ### Gaps & Issues
-- **LOW**: No built-in `ExtractAggregateIdentity` middleware — 📝 handled inline in router. Functionally equivalent.
-- **LOW**: No built-in `ConsistencyGuarantee` middleware — 📝 handled inline in router dispatch flow.
-- **MEDIUM**: Middleware `after_dispatch`/`after_failure` execution order is not reversed. In Commanded, user MW1's `after_dispatch` runs LAST (onion model). In Instructed, user MW1's `after_dispatch` runs FIRST. This affects middleware that depends on ordering (e.g., timing middleware).
-- **LOW**: `assigns` limited to `Dict(String, String)` — cannot store arbitrary typed values. This is a Gleam type system constraint.
+- **LOW** — Middleware execution order: Commanded runs `after_dispatch` in reverse order (innermost first). Instructed runs all stages in the same order (leftmost first). This is a minor semantic difference that could matter if middleware has ordering dependencies.
+- **LOW** — `assigns` uses `Dict(String, String)` in Instructed vs `%{atom => any}` in Commanded. Less flexible but more type-safe — a design trade-off.
 
 ---
 
 ## 4. Event Handlers [⚠️]
 
 ### What Commanded Provides
-- Event handler is a GenServer wrapping a persistent subscription
-- Config options: `name`, `consistency`, `start_from`, `subscribe_to`, `concurrency`, `batch_size`, `state`
-- Singleton guarantee via event store subscription name uniqueness + registration
-- `handle/2` receives domain event + enriched metadata map (atom keys for system, string keys for user)
+- GenServer-based handler with persistent subscription to event store
+- Configuration: name (required), consistency, start_from, subscribe_to, concurrency, batch_size, state
+- Singleton guarantee via subscription name uniqueness + process registration
+- `handle/2` callback receives event + enriched metadata map (includes handler state under `:state` key)
 - Return values: `:ok`, `{:ok, new_state}`, `{:error, :already_seen_event}`, `{:error, reason}`
-- Catch-all default `handle/2` injected at compile time — unhandled events silently acked
-- Error handling chain: per-handler `error/3` → app-level `on_event_handler_error` → default (stop)
-- `FailureContext` with handler_state, context map (persists across retries), stacktrace
-- Subscription retry with exponential backoff (1s–1min, jitter)
-- `after_start/1` callback for post-subscription initialization
-- `before_reset/0` callback for read model cleanup before replay
-- Mix task `mix commanded.reset` for handler reset
-- Telemetry spans for event handling
-- State is transient (in-process, lost on restart)
+- Default catch-all `handle/2` injected at compile time (unhandled events silently acked)
+- `error/3` callback with `FailureContext` — retry/skip/stop strategies
+- Application-level error handler fallback (`:stop`, `:backoff`, or custom module)
+- Exponential backoff: `failures² × 1000 + jitter` ms, clamped [1s, 24h]
+- `after_start/1` callback (post-subscription initialization)
+- Handler state: transient in-process, passed via metadata, updated via `{:ok, new_state}`
+- Subscription backoff on connection failure (1s min → 1min max, jitter)
+- `last_seen_event` idempotency guard
+- `before_reset/0` + mix task for handler reset
+- Trap exits for graceful shutdown
 
 ### What Instructed Provides
-- ✅ Event handler is an OTP Actor wrapping a persistent subscription
-- ✅ Config: `name`, `consistency`, `start_from`, `stream_id` (AllStreams/SpecificStream), `initial_state`
-- ✅ `handle_event` receives event data, full `RecordedEvent`, and handler state; returns `Result(handler_state, String)`
-- ✅ Idempotency via `last_seen_event` guard (skips already-processed events)
-- ✅ Error handling via optional `on_error` callback with Retry/RetryWithDelay/Skip/Stop strategies
+- ✅ Actor-based handler with persistent subscription (`event_handler.gleam`)
+- ✅ Configuration: name, handle_event, on_error, initial_state, stream_id, start_from, consistency, subscriptions, upcaster
+- ✅ `handle_event` receives event data, RecordedEvent, and handler_state — returns `Result(handler_state, String)`
+- ✅ `last_seen_event` idempotency guard (event_number comparison)
 - ✅ Event acknowledgment after successful processing
-- ✅ Strong consistency acking via subscriptions integration
-- ✅ Upcasting integration
-- ✅ Telemetry events emitted for handle start/stop/exception
+- ✅ Strong consistency acking via subscriptions actor
+- ✅ Telemetry emission (start/stop/exception)
+- ✅ Error handling via `on_error` callback with Retry/RetryWithDelay/Skip/Stop strategies
+- ⚠️ Error handling only retries once — Commanded retries recursively until skip/stop
+- ⚠️ Default error behavior: silently continues (`ack_event` + `actor.continue`) — Commanded stops by default
 - ⚠️ No `after_start` callback
-- ⚠️ No `before_reset` or reset mechanism
-- ⚠️ No subscription retry with backoff — on SubscriptionAlreadyExists, deletes and recreates subscription
-- ⚠️ No `concurrency` option (single handler only)
-- ⚠️ No `batch_size` option (no batch processing)
-- ❌ No `{:error, :already_seen_event}` special return — idempotency only via `last_seen_event` guard
-- ⚠️ Error handling: when `on_error` is `None`, the default behavior acks the event and continues (`handle_error` in `event_handler.gleam` line ~290) — this **silently swallows errors**, losing events. Commanded's default is to STOP the handler.
+- ⚠️ No subscription reconnection backoff
+- ❌ No application-level error handler fallback
+- ❌ No exponential backoff built-in
+- ❌ No handler reset mechanism (no `before_reset`, no mix task equivalent)
+- ❌ No `{:error, :already_seen_event}` return to skip from within handler
 
 ### Gaps & Issues
-- **CRITICAL**: Default error handling silently swallows errors. In `handle_error` when `on_error` is `None`: the handler acks the event and continues (`actor.continue(state)`). The comment says "Default: stop on error (matching Commanded's default)" but the actual code does NOT stop — it continues. Events are acknowledged and lost. Reference: `event_handler.gleam` `handle_error` function, `None ->` branch.
-- **HIGH**: Subscription handling on restart: when SubscriptionAlreadyExists, handler deletes and recreates the subscription. For the in-memory adapter, this loses the subscription position, causing full replay. For production adapters, this could cause duplicate event processing if the adapter doesn't preserve position across delete+recreate.
-- **MEDIUM**: No subscription retry with backoff. Commanded uses exponential backoff (1s–1min with jitter) for subscription failures. Instructed fails immediately on subscription error.
-- **MEDIUM**: No `concurrency` option — only single-handler mode.
-- **MEDIUM**: No `batch_size` / batch processing support.
-- **LOW**: No `after_start` or `before_reset` lifecycle callbacks.
-- **MEDIUM**: Retry logic in error handler only retries ONCE. If Retry or RetryWithDelay fails, the handler acks and continues (silently dropping the error). Commanded's retry is recursive — it keeps retrying as long as the error callback says to retry.
+- **HIGH** — Default error behavior is wrong. In `handle_error` (`event_handler.gleam`), when `on_error` is `None`, the code acks the event and continues: `ack_event(state, recorded_event); actor.continue(state)`. Commanded's default is to **stop** the handler. Silently swallowing errors means events can be lost without any indication. This is in the comment: "Default: stop on error (matching Commanded's default)" but the code does the opposite.
+- **HIGH** — Retry is single-shot only. When `on_error` returns `Retry(new_state)`, the code retries once. If the retry also fails, it acks and continues (swallowing the error). Commanded retries recursively until the error handler returns `:skip` or `{:stop, reason}`.
+- **MEDIUM** — No subscription reconnection backoff. If the event store subscription fails, the handler fails to start. Commanded backs off with jitter (1s→1min) and retries silently.
+- **MEDIUM** — On restart, subscription is deleted and recreated (`SubscriptionAlreadyExists` handler). This loses the subscription position in the in-memory adapter. The comment acknowledges this: "For in-memory adapter, this loses position (acceptable for testing)". For production, the PostgreSQL adapter preserves position via the database, but the delete+recreate pattern is still concerning.
+- **LOW** — No `after_start` callback for post-subscription initialization.
 
 ---
 
 ## 5. Projections [⚠️]
 
 ### What Commanded Provides
-- Projections are event handlers with consistency: :strong for POST/Redirect/GET pattern
-- `commanded_ecto_projections` library provides `project/2` and `project/3` macros wrapping Ecto.Multi for atomic updates
-- Full reset support via Mix task + `before_reset/0` callback to truncate read model tables
-- Projections can be rebuilt by deleting subscription and replaying from origin
-- Strong consistency ensures read model is up-to-date when dispatch returns
+- Projections are event handlers with strong consistency for POST/Redirect/GET pattern
+- `commanded-ecto-projections` library provides `project/2` and `project/3` macros wrapping Ecto.Multi
+- Atomic read model updates within a database transaction
+- `before_reset/0` callback for truncating read model before replay
+- Strong consistency option guarantees read model is up-to-date when dispatch returns
+- Any storage backend can be used
 
 ### What Instructed Provides
-- ✅ Dedicated `projection.gleam` module with `ProjectionConfig` and actor-based lifecycle
-- ✅ `handle_event` callback receives event, recorded_event, and projection state
-- ✅ `get_state` function to query current projection state
-- ✅ Idempotency via `last_seen_event` guard
-- ✅ Error handling via optional `on_error` callback with Skip/Retry/RetryWithDelay/Stop
-- ⚠️ Projections are in-memory only — no integration with database (Ecto/Sqlight/Pog)
-- ⚠️ No `consistency` option — projections cannot be configured for strong consistency
-- ⚠️ No reset mechanism (no `before_reset`, no Mix task equivalent)
-- ⚠️ Subscription handling: on SubscriptionAlreadyExists, deletes and recreates — same issue as event handlers
+- ✅ Dedicated `projection.gleam` module with `ProjectionConfig` and `start/2`
+- ✅ `handle_event` callback receives event, RecordedEvent, and projection state
+- ✅ `get_state` for querying current projection state
+- ✅ `on_error` callback with Skip/Retry/RetryWithDelay/Stop strategies
+- ✅ `last_seen_event` idempotency guard
+- ✅ Event acknowledgment
+- ⚠️ Projections are in-memory state only — no built-in persistence to a database
+- ⚠️ Same delete+recreate subscription issue as event handlers
+- ❌ No Ecto/database integration for atomic read model updates
+- ❌ No `before_reset` callback
+- ❌ No strong consistency integration (projections don't register with subscriptions actor)
 
 ### Gaps & Issues
-- **HIGH**: No strong consistency support for projections. Projections cannot register with the subscriptions actor, so dispatching with `consistency: Strong` does not wait for projections to update. This breaks the POST/Redirect/GET pattern.
-- **MEDIUM**: In-memory projections only — no database persistence integration. State is lost on restart. Production use requires a database-backed projection pattern.
-- **MEDIUM**: No reset/rebuild mechanism for projections.
-- **MEDIUM**: Same subscription delete+recreate issue as event handlers on restart.
-- **MEDIUM**: Error handling on retry failure: same as event handlers — retry only once, then ack and continue on second failure.
+- **MEDIUM** — Projections are in-memory only. The `get_state` function returns in-process state, which is useful for testing but not for production read models that need persistence. Users must implement their own database writes inside `handle_event`.
+- **MEDIUM** — No strong consistency support. Projections don't register with the subscriptions actor, so dispatch with `consistency: Strong` won't wait for projections to complete. Only event handlers and process managers participate in strong consistency.
+- **LOW** — No reset mechanism for rebuilding projections from scratch.
 
 ---
 
 ## 6. Process Managers [⚠️]
 
 ### What Commanded Provides
-- Three-layer architecture: ProcessRouter (GenServer) → DynamicSupervisor → ProcessManagerInstance (GenServer per UUID)
-- `interested?/1,2` with return types: `{:start, uuid}`, `{:start!, uuid}`, `{:continue, uuid}`, `{:continue!, uuid}`, `{:stop, uuid}`, `false`; supports list of UUIDs for multi-instance routing
-- Execution order: handle → dispatch commands → apply → persist snapshot → ack → after_command
-- `handle/2,3`, `apply/2,3`, `after_command/2,3`, `error/3` callbacks
-- Error handling distinguishes event errors vs command dispatch errors with different strategies
-- Command dispatch errors support: `{:continue, commands, context}`, `{:skip, :discard_pending}`, `{:skip, :continue_pending}`
-- State persistence via snapshots after every event; snapshot source_version = event_number (global)
-- Idempotency via last_seen_event from snapshot source_version
-- Event timeout and idle timeout
-- Strict routing validation: `:start!` fails if instance already exists; `:continue!` fails if instance doesn't exist
-- Causation chain: commands dispatched with causation_id = event_id, correlation_id = event's correlation_id
+- Three-layer hierarchy: ProcessRouter → DynamicSupervisor → ProcessManagerInstance
+- `interested?/1,2` with Start/Start!/Continue/Continue!/Stop/false routing
+- Multi-instance routing (list of UUIDs)
+- `handle/2,3` returns commands to dispatch
+- `apply/2,3` mutates state AFTER command dispatch
+- `after_command/2,3` for stopping instance after specific commands
+- `error/3` with event errors vs command dispatch errors (different strategies)
+- Command dispatch errors support `{:continue, commands, context}`, `{:skip, :discard_pending}`, `{:skip, :continue_pending}`
+- State persistence via snapshots (write after every event, read on startup, delete on stop)
+- Idempotency via `last_seen_event` from snapshot `source_version`
+- `event_timeout` for stuck instances
+- `idle_timeout` for inactive instances
+- Acknowledgment tracking: all instances must ack before event is confirmed
+- Strict routing validation (`:start!` checks process doesn't exist, `:continue!` checks it does)
+- Process identity helper (`identity/0` via process dictionary)
 
 ### What Instructed Provides
-- ✅ Single actor manages all instances in a Dict — simplified architecture
-- ✅ `Interest` type with Start/StartStrict/StartMany/Continue/ContinueStrict/ContinueMany/Stop/StopMany/Skip
-- ✅ Correct execution order: handle → dispatch → apply → persist snapshot → ack
-- ✅ `handle` callback receives pm_state, event data, and full RecordedEvent
-- ✅ `apply_event` callback for state mutation after command dispatch
-- ✅ `after_command` callback with AfterContinue/AfterStop actions
-- ✅ Separate error handling for event errors (`on_event_error`) and command errors (`on_command_error`)
-- ✅ Command error strategies: CmdRetry, CmdRetryWithDelay, CmdSkip, CmdDiscardPending, CmdContinueWith, CmdStop
-- ✅ State persistence via snapshots with event_number as source_version
-- ✅ Idempotency via last_seen_event restored from snapshot
-- ✅ Strict routing validation (StartStrict/ContinueStrict)
-- ✅ Causation chain propagation: causation_id = event_id, correlation_id from event
-- ✅ Strong consistency acking via subscriptions integration
-- ✅ Fan-out routing with StartMany/ContinueMany/StopMany
-- ⚠️ Single actor for all instances — no per-instance process isolation
-- ⚠️ No event timeout or idle timeout
-- ⚠️ Strict routing checks memory Dict only, not snapshot store — a restarted PM instance that was loaded from snapshot would not be detected by `instance_exists` until the snapshot is loaded
+- ✅ Single actor managing all instances in a Dict (`process_manager.gleam`)
+- ✅ `interested` with Start/StartStrict/StartMany/Continue/ContinueStrict/ContinueMany/Stop/StopMany/Skip
+- ✅ `handle` returns commands to dispatch
+- ✅ `apply_event` mutates state AFTER command dispatch (correct order)
+- ✅ `after_command` callback with AfterContinue/AfterStop
+- ✅ `on_event_error` with Retry/RetryWithDelay/Skip/Stop strategies
+- ✅ `on_command_error` with CmdRetry/CmdRetryWithDelay/CmdSkip/CmdDiscardPending/CmdContinueWith/CmdStop
+- ✅ State persistence via snapshots (write after every event, read on startup, delete on stop)
+- ✅ Per-instance idempotency via `last_seen_event` from snapshot `source_version`
+- ✅ Causation chain propagation (causation_id = event_id, correlation_id from event)
+- ✅ Strong consistency acking
+- 📝 Single actor instead of three-layer hierarchy — trades per-instance parallelism for simplicity
+- ⚠️ Strict routing uses in-memory `instance_exists` check, not snapshot-based
+- ❌ No `event_timeout` for stuck processing
+- ❌ No `idle_timeout` for inactive instances
+- ❌ No acknowledgment tracking for multi-instance events (all instances processed serially)
+- ❌ No `handle/3` variant with enriched metadata
 
 ### Gaps & Issues
-- **MEDIUM**: Single actor for all instances means a blocked command dispatch in one instance blocks event processing for ALL instances. Commanded's per-instance GenServer isolates this.
-- **MEDIUM**: No event timeout — if a PM instance blocks (e.g., slow command dispatch), there's no mechanism to detect and recover.
-- **MEDIUM**: No idle timeout — PM instances remain in memory forever. Commanded supports idle timeout to free memory.
-- **MEDIUM**: Strict routing (`StartStrict`/`ContinueStrict`) only checks in-memory Dict, not snapshot store. If the PM restarts and instances aren't loaded yet, `StartStrict` would succeed even if the instance previously existed (because it's not in the Dict). Commanded checks `ProcessManagerInstance.new?/1` which looks at `last_seen_event` from the snapshot.
-- **LOW**: No `apply/3` variant — apply only receives state and event, not enriched metadata.
-- **LOW**: `handle_routing_error` function is a no-op for most error actions — Retry, RetryWithDelay, and Stop all just return `state` unchanged without actually performing the action.
+- **MEDIUM** — Strict routing (`StartStrict`/`ContinueStrict`) only checks the in-memory `instances` dict, not the snapshot store. If a PM instance was active in a previous session (snapshot exists) but not loaded in memory, `ContinueStrict` will incorrectly fail. Commanded checks `ProcessManagerInstance.new?/1` which loads state from snapshot.
+- **MEDIUM** — No timeout mechanisms. Both `event_timeout` (for stuck instance processing) and `idle_timeout` (for memory management) are missing. Long-running command dispatches or inactive instances will accumulate without cleanup.
+- **MEDIUM** — Single-actor architecture means all instances are processed serially. If a PM handles high event throughput with many instances, this becomes a bottleneck. Commanded's per-instance GenServer allows parallel processing.
+- **LOW** — No enriched metadata variant for `handle` callback. Commanded's `handle/3` receives a metadata map with system fields. Instructed passes the raw `RecordedEvent` as the third argument, which provides the same data but in a different format.
 
 ---
 
 ## 7. Snapshots [⚠️]
 
 ### What Commanded Provides
-- Per-aggregate snapshot configuration: `snapshot_every: N`, `snapshot_version: N`
-- Snapshots stored via event store adapter (`record_snapshot/2`, `read_snapshot/2`, `delete_snapshot/2`)
-- Version checking: `snapshot_module_version` in snapshot metadata; old snapshots invalidated when version changes
-- Aggregate snapshots: stored after N events, using stream_version as source_version
-- PM snapshots: stored after EVERY event, using event_number as source_version, deleted on stop
-- Snapshot format goes through serializer (JSON by default with `Jason.Encoder`)
-- Interaction with lifespan: snapshot taken before lifespan timeout applied
+- **Aggregate snapshots**: Configurable via `snapshot_every: N` and `snapshot_version: N`
+- Version checking: old snapshots with wrong `snapshot_module_version` are ignored (forces full replay)
+- Snapshot taken asynchronously via self-message after command execution
+- Lifespan timeout deferred during snapshot
+- Serializer integration (JSON by default)
+- **PM snapshots**: Written after every event, read on startup, deleted on stop
+- PM `source_uuid` format: `"\"pm_name\"-\"pm_uuid\""`
+- PM `source_version` = `event_number` (global)
 
 ### What Instructed Provides
 - ✅ `SnapshotConfig` with `snapshot_every` and `snapshot_version` fields
 - ✅ `SnapshotData` record with source_uuid, source_version, source_type, data, created_at
-- ✅ `snapshot_required` function checks threshold
-- ✅ Aggregate snapshots: taken by aggregate_server after configured number of events
-- ✅ PM snapshots: stored after every event with event_number as source_version
-- ✅ PM snapshot deletion on stop
-- ✅ `snapshot.coerce` for type bridging between aggregate state and event store types
-- ⚠️ No snapshot version checking during read — `populate_from_event_store` reads the snapshot but does NOT check `snapshot_version` against the config. Stale snapshots from schema changes would be used silently, potentially causing incorrect state.
-- ⚠️ Snapshot data is typed (`SnapshotData(data)`) with unsafe coercion via `snapshot.coerce` — works at Erlang runtime level but type-unsafe
+- ✅ `snapshot_required` check based on events since last snapshot
+- ✅ Snapshot reading during `populate_from_event_store` with `snapshot.coerce` for type bridging
+- ✅ Snapshot writing in `maybe_take_snapshot` after command execution
+- ✅ PM snapshots: written after every event, read on startup, deleted on stop
+- ✅ PM `source_uuid` format: `"pm-" <> name <> "-" <> uuid`
+- ⚠️ No `snapshot_version` checking — old snapshots are always used regardless of version mismatch
+- ⚠️ Snapshot taken synchronously (not via self-message)
 
 ### Gaps & Issues
-- **HIGH**: No snapshot version validation on read. In `aggregate.gleam` `populate_from_event_store`, the snapshot is read and used without checking if its version matches `snapshot_config.snapshot_version`. If the aggregate schema changes and `snapshot_version` is incremented, old snapshots should be ignored and full replay triggered. Currently, stale snapshots are silently used, potentially producing incorrect aggregate state. Reference: `aggregate.gleam` lines ~105-115.
-- **MEDIUM**: `snapshot.coerce` uses `unsafe_coerce` which bypasses type safety. If the snapshot data doesn't match the expected type, this will cause runtime errors (Erlang pattern match failures) without clear error messages.
-- **LOW**: No serialization integration — snapshots store raw Gleam terms. Production adapters (postgres/sqlite) would need to handle serialization separately.
+- **HIGH** — `snapshot_version` is stored in `SnapshotConfig` but never checked during snapshot reading. In `populate_from_event_store` (`aggregate.gleam`), the snapshot is read and used unconditionally — there's no comparison of `snapshot_version` from config against any field in the stored snapshot. If an aggregate's state type changes and you increment `snapshot_version`, old snapshots will still be loaded, potentially causing type mismatch crashes or silent data corruption.
+- **LOW** — Synchronous snapshot writing. Commanded sends `{:take_snapshot, lifespan_timeout}` to self and takes the snapshot asynchronously, deferring the lifespan timeout. Instructed takes snapshots inline, which blocks the aggregate server briefly. For production workloads this could matter.
 
 ---
 
-## 8. Event Store Interface [⚠️]
+## 8. Event Store Interface [✅]
 
 ### What Commanded Provides
-- `EventStore.Adapter` behaviour with full callback spec
-- `append_to_stream/5` with `expected_version` semantics: `:any_version`, `:no_stream`, `:stream_exists`, non-negative integer
-- `stream_forward/4` returns lazy stream (Enumerable) with batch size
-- `subscribe/2` for transient subscriptions (no ack required)
-- `subscribe_to/6` for persistent subscriptions with concurrency_limit, partition_by options
-- `ack_event/3`, `unsubscribe/2`, `delete_subscription/3`
+- `EventStore.Adapter` behaviour with typed callbacks
+- `append_to_stream/5` with expected_version semantics (any_version, no_stream, stream_exists, exact version)
+- `stream_forward/4` returning lazy Enumerable
+- `subscribe/2` (transient) and `subscribe_to/6` (persistent)
+- `ack_event/3` for backpressure
+- `unsubscribe/2` (pause) and `delete_subscription/3` (delete permanently)
 - `read_snapshot/2`, `record_snapshot/2`, `delete_snapshot/2`
-- In-memory adapter: full OCC, serialization support, persistent subscription with back-pressure, partition routing
-- Expected version: `:any_version`, `:no_stream`, `:stream_exists`, `0`, positive integer N
+- In-memory adapter for testing, PostgreSQL adapter for production (via `commanded-eventstore-adapter`)
 
 ### What Instructed Provides
-- ✅ `EventStore(event)` record of functions — idiomatic Gleam equivalent of the adapter behaviour
-- ✅ `ExpectedVersion`: AnyVersion, NoStream, StreamExists, ExactVersion(Int)
-- ✅ `append_to_stream` with OCC checking
-- ✅ `read_stream_forward` with start version and batch size
-- ✅ `subscribe` / `subscribe_to_stream` for transient subscriptions
-- ✅ `subscribe_persistent` with stream, name, start_from, handler
-- ✅ `ack_event`, `unsubscribe`, `delete_subscription`
+- ✅ `EventStore(event)` record of functions with all core operations
+- ✅ `append_to_stream` with `ExpectedVersion` (AnyVersion, NoStream, StreamExists, ExactVersion)
+- ✅ `read_stream_forward` with batch size
+- ✅ `subscribe` (transient all), `subscribe_to_stream` (transient per-stream)
+- ✅ `subscribe_persistent` with StartFrom (Origin, Current, FromEventNumber)
+- ✅ `ack_event` for backpressure
+- ✅ `unsubscribe` and `delete_subscription`
 - ✅ `read_snapshot`, `record_snapshot`, `delete_snapshot`
-- ✅ `read_all_forward`, `get_latest_event_number` — additional convenience functions
-- ✅ `reset` function for testing
-- ✅ In-memory adapter with full OCC, persistent subscriptions with back-pressure (one-at-a-time delivery)
-- ⚠️ No `concurrency_limit` or `partition_by` on persistent subscriptions
-- ⚠️ No lazy stream — `read_stream_forward` returns a `List` not an Enumerable/Stream
-- ⚠️ In-memory adapter: `subscribe_persistent` handler callback runs in the event store's process context, which could block the store if the handler is slow
+- ✅ `read_all_forward` and `get_latest_event_number` (extra utilities)
+- ✅ `reset` (testing utility)
+- ✅ In-memory adapter (`in_memory_event_store.gleam`) — full implementation
+- ✅ PostgreSQL adapter (`instructed_postgres.gleam`) with transactional OCC, poll-based subscriptions, gap detection
+- ✅ SQLite adapter (`instructed_sqlite.gleam`)
+- 📝 Record-of-functions instead of behaviour — idiomatic Gleam
 
 ### Gaps & Issues
-- **LOW**: No lazy stream for `read_stream_forward` — returns materialized List. For very large streams, this could cause memory issues. The batched reading pattern mitigates this.
-- **LOW**: No `concurrency_limit` / `partition_by` on subscriptions — 📝 these are advanced features, not needed for basic operation.
-- **MEDIUM**: Persistent subscription handler callback runs synchronously in the event store actor's process. If the handler (which sends a message to another actor) is slow or the target actor's mailbox is full, this blocks the event store from processing other requests. Commanded's adapter sends events asynchronously via `send/2`.
-- **LOW**: No serialization support in the in-memory adapter — events stored as raw Gleam terms. This is fine for testing.
+- **LOW** — `read_stream_forward` returns `Result(List(...), ...)` instead of a lazy stream. For very large streams, this loads all events in a batch into memory at once. The batched reading in `aggregate.gleam` mitigates this with the 1,000-event batch size.
+- **LOW** — `subscribe_persistent` takes a callback function rather than delivering `{:events, events}` messages to a PID. Both patterns work, but the callback approach requires the callback to be non-blocking (documented correctly).
 
 ---
 
 ## 9. Optimistic Concurrency Control [✅]
 
 ### What Commanded Provides
-- `append_to_stream` checks `expected_version` against current stream version
-- On `{:error, :wrong_expected_version}`, the aggregate rebuilds state from new events and retries the command
-- Default 10 retry attempts; returns `{:error, :too_many_attempts}` when exhausted
-- Retry reads only events since last known version (incremental, not full replay)
-- OCC is the fundamental consistency mechanism — no distributed locks
+- `expected_version` parameter on `append_to_stream`
+- Returns `{:error, :wrong_expected_version}` on conflict
+- Aggregate GenServer rebuilds state from new events and retries command
+- Default 10 retry attempts
+- Incremental rebuild (read only events since last known version)
 
 ### What Instructed Provides
-- ✅ `ExactVersion(Int)` expected version on `append_to_stream` — in-memory adapter checks `current_version == v`
-- ✅ On `WrongExpectedVersion`, aggregate server rebuilds from current version (incremental) and retries
-- ✅ Default 10 retry attempts; returns `TooManyAttempts` when exhausted
-- ✅ `rebuild_from_current_version` reads only events after current version (not full replay)
-- ✅ Also handles `StreamAlreadyExists` as a version conflict (mapped to `WrongExpectedVersion`)
+- ✅ `ExactVersion(Int)` expected version on append
+- ✅ `VersionConflict` error from event store
+- ✅ `execute_with_retry` in aggregate_server with configurable attempts (default 10)
+- ✅ `rebuild_from_current_version` for incremental rebuild (not full replay)
+- ✅ `WrongExpectedVersion` mapped to `VersionConflict` in `execute_once`
+- ✅ `TooManyAttempts` error after exhausting retries
 
 ### Gaps & Issues
-- No significant gaps. OCC is correctly implemented.
+None. OCC is fully implemented and matches Commanded's behavior.
 
 ---
 
 ## 10. Command Serialization per Aggregate [✅]
 
 ### What Commanded Provides
-- Each aggregate instance is a separate GenServer process
-- GenServer mailbox guarantees FIFO ordering — commands to the same aggregate are serialized
-- Commands to different aggregates execute concurrently (different processes)
-- DynamicSupervisor manages aggregate processes; registration prevents duplicates
+- GenServer process per aggregate instance
+- Commands serialized via GenServer mailbox (one at a time)
+- Different aggregates execute in parallel
 
 ### What Instructed Provides
-- ✅ Each aggregate instance runs as a separate OTP Actor
-- ✅ Actor mailbox guarantees FIFO ordering — commands serialized per instance
-- ✅ Different aggregate instances can run concurrently (separate actors)
-- ✅ Registry actor manages aggregate servers per stream_id, preventing duplicates
-- ⚠️ Registry actor is a single bottleneck for all get-or-start operations (serialized lookups)
+- ✅ OTP Actor per aggregate instance (via registry in `router.gleam`)
+- ✅ Commands serialized via actor mailbox (`process.call` to `ServerMessage.Execute`)
+- ✅ Different aggregates get different server processes (registry keyed by stream_id)
+- ✅ Registry actor manages lifecycle of aggregate servers
 
 ### Gaps & Issues
-- **LOW**: Registry actor serializes all get-or-start operations across all aggregate instances. Under high load, this could become a bottleneck. Commanded uses a DynamicSupervisor with Registration adapter which can be distributed. This is a scalability concern, not a correctness issue.
+None. Command serialization is correctly implemented via the actor model.
 
 ---
 
 ## 11. Event Ordering [⚠️]
 
 ### What Commanded Provides
-- `event_number`: globally unique, monotonically incrementing across ALL streams (gapless)
-- `stream_version`: per-stream sequential version starting at 1
-- Event handlers receive events in `event_number` order via persistent subscription to `:all`
-- Per-stream reads return events in `stream_version` order
-- In-memory adapter: events stored in append order; `event_number` assigned sequentially
+- `event_number`: globally unique, monotonically incrementing (BIGSERIAL in PostgreSQL)
+- `stream_version`: per-stream sequential version
+- Handler delivery in `event_number` order (persistent subscription guarantees)
+- In-memory adapter: events stored in append order, delivered in order
+- Subscription callbacks receive events in order, one at a time (with ack-based backpressure)
 
 ### What Instructed Provides
-- ✅ `event_number`: globally incrementing integer assigned by in-memory adapter
-- ✅ `stream_version`: per-stream sequential version starting at 1
+- ✅ `event_number` and `stream_version` on `RecordedEvent`
 - ✅ In-memory adapter stores events in append order
-- ✅ Persistent subscriptions deliver events in order via one-at-a-time back-pressure model
-- ⚠️ Event handlers and PMs subscribe to "$all" — events delivered in global `event_number` order
+- ✅ Persistent subscriptions deliver one event at a time with ack-based backpressure
+- ✅ PostgreSQL adapter uses poll-based subscriptions with gap detection for correct ordering under concurrent writes
+- ⚠️ In-memory adapter `event_number` assigned in the event store actor — serialized, so always sequential
+- ⚠️ PostgreSQL adapter handles BIGSERIAL gaps from rolled-back transactions (gap_retries mechanism)
 
 ### Gaps & Issues
-- **LOW**: Event ordering is correctly maintained in the in-memory adapter. Production adapters (postgres/sqlite) must maintain this invariant independently — this is an adapter-level concern.
+- **LOW** — PostgreSQL gap detection waits up to 10 retries × poll interval before skipping permanent gaps. This is a reasonable approach but could introduce up to 10 seconds of delivery latency when a transaction rolls back. The max_gap_retries=10 is configurable only at compile time in the poller.
 
 ---
 
 ## 12. Strong vs Eventual Consistency [⚠️]
 
 ### What Commanded Provides
-- Handler-level: `consistency: :eventual` (default) or `consistency: :strong`
-- Dispatch-level: `consistency: :eventual` (default), `:strong`, or `[Module1, "HandlerName"]` (selective)
-- `ConsistencyGuarantee` middleware: blocks dispatch until all strong handlers have acked
-- `Subscriptions` GenServer with ETS tracking: handler name + stream_id → version acked
-- `wait_for/5` blocks caller, receives notification via PubSub broadcast
-- Default timeout: 5 seconds (configurable)
-- Strong consistency + concurrency > 1 → compile error
+- Handler-level: `consistency: :strong` registers handler for consistency tracking
+- Dispatch-level: `consistency: :strong` blocks until all strong handlers ack
+- Selective consistency: `consistency: [Module1, Module2]` waits for specific handlers
+- `ConsistencyGuarantee` middleware handles blocking
+- Default timeout: 5s (configurable via `:dispatch_consistency_timeout`)
 - Dispatcher PID excluded from wait_for to prevent deadlock
-- Ack entries have TTL (1 hour default) with periodic purging
+- ETS-based tracking with TTL purging (1 hour default)
+- PubSub broadcast for cross-process notification
 
 ### What Instructed Provides
-- ✅ `Consistency` type: `Eventual` | `Strong`
-- ✅ Handler-level consistency config via `with_consistency`
-- ✅ Subscriptions actor with registration, ack tracking, and wait_for
-- ✅ Router integrates with subscriptions via `wait_for` after successful dispatch
-- ✅ Event handlers ack subscriptions on successful processing when `consistency: Strong`
-- ✅ Process managers ack subscriptions on successful processing when `consistency: Strong`
-- ✅ `wait_for` blocks until all registered strong handlers have acked >= stream_version
-- ✅ Default timeout matches dispatch_timeout (5000ms)
-- ❌ No selective consistency (`[Module1, "HandlerName"]`) — only `:strong` (all) or `:eventual`
-- ❌ No dispatcher PID exclusion — potential deadlock if a strong-consistency handler dispatches another command with strong consistency
-- ⚠️ No TTL/purging of ack entries — subscriptions actor accumulates entries indefinitely
-- ⚠️ Projections cannot participate in strong consistency (no subscriptions integration in projection.gleam)
+- ✅ `Consistency` type with `Eventual` and `Strong` variants
+- ✅ Handler-level consistency via `with_consistency` configuration
+- ✅ Subscriptions actor for tracking (registers handlers, accepts acks, unblocks waiters)
+- ✅ Router integration: dispatch blocks on `Strong` consistency + subscriptions actor
+- ✅ `wait_for` with timeout → returns `ConsistencyTimeout` error
+- ✅ Handlers ack subscriptions actor after successful processing
+- ⚠️ No selective consistency (can't wait for specific handlers by name/module)
+- ❌ No dispatcher PID exclusion from wait_for (potential deadlock)
+- ❌ No TTL purging of ack entries (memory leak over time)
 
 ### Gaps & Issues
-- **HIGH**: No dispatcher PID exclusion from `wait_for`. If a strong-consistency handler dispatches another command with `consistency: Strong` inside its `handle_event` callback, the inner dispatch will wait for the same handler to ack. But the handler is blocked processing the current event. Result: **deadlock**. Commanded prevents this by storing `dispatcher_pid` in `before_dispatch` and passing `exclude: [dispatcher_pid]` to `wait_for`.
-- **MEDIUM**: No selective consistency — cannot wait for specific handlers by name/module. Must wait for ALL registered strong handlers.
-- **MEDIUM**: No TTL/purging in subscriptions actor — ack entries accumulate indefinitely in the Dict, causing memory growth over time.
-- **MEDIUM**: Projections cannot register as strong-consistency handlers — `projection.gleam` has no `consistency` field or subscriptions integration.
+- **HIGH** — No dispatcher PID exclusion. In Commanded, when a strong-consistency handler dispatches another command inside `handle/2`, the `ConsistencyGuarantee` middleware excludes the dispatching handler's PID from the wait list. Without this, if a strong handler triggers a command that also requires strong consistency, it creates a deadlock — the dispatch waits for the handler, but the handler can't ack until the dispatch completes.
+- **MEDIUM** — No selective consistency. Commanded allows `consistency: [MyProjector, "OtherHandler"]` to wait for specific handlers. Instructed only supports `Strong` (all) or `Eventual` (none).
+- **MEDIUM** — No TTL purging. The subscriptions actor accumulates ack entries in the `acked` dict forever. In a long-running system with many streams, this will grow unbounded. Commanded purges entries older than 1 hour.
 
 ---
 
 ## 13. Error Handling & Retry Strategies [⚠️]
 
 ### What Commanded Provides
-
-#### Event Handlers
-- `error/3` callback with `FailureContext` (handler_state, context map, stacktrace)
-- Return values: `{:retry, context}`, `{:retry, delay, context}`, `:skip`, `{:stop, reason}`
-- Context map persists across retries (user can track failure count)
-- Application-level default: `:stop` (configurable to `:backoff` or custom module)
-- Built-in backoff: `failures² × 1000 + jitter` ms, clamped to [1s, 24h]
-- Recursive retry — keeps retrying as long as error callback returns retry
-
-#### Process Managers
-- Separate error paths for event handling vs command dispatch
-- Event errors: retry/skip/stop
-- Command dispatch errors: retry/skip/continue/stop plus `{:skip, :discard_pending}`, `{:skip, :continue_pending}`, `{:continue, commands, context}`
-- `FailureContext` includes `pending_commands`, `process_manager_state`, `enriched_metadata`
-
-#### Aggregates
-- On wrong expected version: rebuild + retry (up to 10 attempts)
-- On aggregate process death: retry dispatch
-- Exceptions caught, returned as `{:error, error}` to caller
+- **Handler errors**: `error/3` callback with `FailureContext` (includes context map, handler_state, stacktrace, metadata)
+- Retry recursively until skip/stop
+- Application-level fallback: `:stop` (default), `:backoff`, or custom module
+- Built-in exponential backoff: `failures² × 1000 + jitter`, clamped [1s, 24h]
+- `:skip` acknowledges and moves on
+- `{:stop, reason}` stops the handler GenServer
+- Context map persists across retries
+- **PM event errors**: same `error/3` but only retry/skip/stop (no pending command management)
+- **PM command errors**: `error/3` with additional strategies: `{:continue, commands, context}`, `{:skip, :continue_pending}`, `{:skip, :discard_pending}`
+- FailureContext includes `pending_commands` for command errors
 
 ### What Instructed Provides
-- ✅ `ErrorAction` type: Retry(context), RetryWithDelay(delay, context), Skip, Stop(reason)
-- ✅ `PMCommandErrorAction` type: CmdRetry, CmdRetryWithDelay, CmdSkip, CmdDiscardPending, CmdContinueWith, CmdStop
-- ✅ `FailureContext` record with context, handler_state, failure_count, last_error, stacktrace
-- ✅ Aggregate OCC retry with rebuild (up to 10 attempts)
-- ⚠️ Event handler retry only attempts ONCE — if the retry fails, event is acked and lost
-- ⚠️ No recursive retry loop in event handlers — Commanded retries indefinitely until error callback says stop
-- ⚠️ `FailureContext` is defined in `error.gleam` but never actually constructed or passed to error callbacks
-- ❌ No application-level error handler configuration
-- ❌ No built-in backoff strategy (exponential with jitter)
-- ❌ No context map that persists across retries in event handlers — the handler state IS the context
+- ✅ `ErrorAction` type: Retry/RetryWithDelay/Skip/Stop
+- ✅ `FailureContext` type with context, handler_state, failure_count, last_error, stacktrace
+- ✅ Handler `on_error` callback with error strategies
+- ✅ PM `on_event_error` with error strategies
+- ✅ PM `on_command_error` with CmdRetry/CmdRetryWithDelay/CmdSkip/CmdDiscardPending/CmdContinueWith/CmdStop
+- ⚠️ Handler retry is single-shot (retry once, then ack+continue on second failure)
+- ⚠️ Default handler error behavior silently swallows errors (should stop)
+- ❌ No application-level error handler fallback
+- ❌ No built-in exponential backoff
+- ❌ No recursive retry in handlers
+- ❌ No context map that persists across retries (FailureContext exists but isn't threaded through recursive retries)
 
 ### Gaps & Issues
-- **CRITICAL**: Event handler retry is not recursive. In `event_handler.gleam` `handle_error`, when `on_error` returns `Retry(new_state)`, the handler tries once more. If the second attempt fails, the event is acked and the handler continues — **the event is silently lost**. Commanded retries in a recursive loop, calling `error/3` again on each failure, allowing infinite retries with backoff. This is a fundamental correctness issue for production use.
-- **HIGH**: `FailureContext` is defined but never used. Error callbacks receive `(String, RecordedEvent(event), handler_state)` — not a `FailureContext`. There's no way for error handlers to track retry count across attempts or access a persistent context map.
-- **HIGH**: No application-level error handler — every handler must define its own `on_error` or get the broken default (silent swallow).
-- **MEDIUM**: No built-in exponential backoff strategy.
+- **CRITICAL** — Default handler error behavior is wrong. When `on_error` is `None` in `event_handler.gleam`, the handler acks the event and continues (`actor.continue(state)`). This means errors are silently swallowed and events are lost. Commanded's default stops the handler, making the failure visible. See `handle_error` function at line ~262 of `event_handler.gleam`.
+- **HIGH** — Single-shot retry. When retry also fails, the code acks and continues. This means transient failures that need 2+ retries will silently lose events. Commanded retries recursively (limited only by the error handler's decisions).
+- **MEDIUM** — No exponential backoff built-in. Users must implement their own delay calculation in the `on_error` callback. Commanded provides `ErrorHandler.backoff/4` out of the box.
 
 ---
 
 ## 14. Causation & Correlation ID Tracking [✅]
 
 ### What Commanded Provides
-- Every command gets a `command_uuid` (auto-generated)
-- Events created by a command have `causation_id = command_uuid`
+- Command dispatch generates `command_uuid` → becomes `causation_id` on events
 - `correlation_id` propagated from command to events
-- Process managers: commands dispatched with `causation_id = event_id`, `correlation_id = event.correlation_id`
-- Creates traceable chain: command → events → PM command → events → ...
-- Metadata from source event propagated to downstream commands
+- PM command dispatch: `causation_id = event_id`, `correlation_id` from source event
+- Full chain: User command → event (causation=command_uuid) → PM → command (causation=event_id) → event (causation=command_uuid)
 
 ### What Instructed Provides
-- ✅ `dispatch` generates `command_id` via `uuid.v4_string()` and uses it as `causation_id` on events
-- ✅ `correlation_id` generated and propagated through events
-- ✅ Process manager dispatches commands with `causation_id = event_id`, `correlation_id = event.correlation_id`
-- ✅ Full causation chain test (`causation_chain_test.gleam`, 391 lines)
-- ✅ `dispatch_with_context` allows explicit causation/correlation IDs
+- ✅ `dispatch` generates `command_id` and `correlation_id` via `uuid.v4_string()`
+- ✅ `command_id` becomes `causation_id` on events (set in `dispatch_with_context`)
+- ✅ `causation_id` and `correlation_id` flow through pipeline and into `EventData`
+- ✅ PM dispatch propagates: `causation_id = recorded_event.event_id`, `correlation_id = recorded_event.correlation_id`
+- ✅ Tested in `causation_chain_test.gleam` (391 lines of chain validation tests)
 
 ### Gaps & Issues
-- No significant gaps. Causation and correlation tracking is well-implemented and tested.
+None. Causation and correlation chain propagation is correctly implemented and well-tested.
 
 ---
 
 ## 15. Idempotency [⚠️]
 
 ### What Commanded Provides
-- Event handlers: `last_seen_event` guard (in-memory) + durable subscription position (event store checkpoint)
-- `{:error, :already_seen_event}` return from `handle/2` — skip without calling `error/3`
-- Process managers: `last_seen_event` restored from snapshot `source_version` on restart
-- ProcessRouter-level deduplication (filters entire batches before routing to instances)
-- Aggregate self-subscription: validates `stream_version == aggregate_version + 1`
+- Handler: `last_seen_event` field (event_number) — in-memory guard
+- Durable subscription position tracked by event store adapter
+- Handler can return `{:error, :already_seen_event}` for application-level idempotency
+- PM: `last_seen_event` from snapshot's `source_version` (restored on restart)
+- ProcessRouter: own `last_seen_event` for batch-level filtering
+- Subscription ack advances durable checkpoint
 
 ### What Instructed Provides
-- ✅ Event handlers: `last_seen_event` guard skips already-processed events
-- ✅ Process managers: `last_seen_event` restored from snapshot source_version
-- ✅ Per-instance idempotency in PMs (checks before processing)
-- ✅ Aggregate self-subscription: checks `stream_version > aggregate_version`
-- ✅ Projections: `last_seen_event` guard
-- ⚠️ No `{:error, :already_seen_event}` special return — idempotency only via `last_seen_event` guard
-- ⚠️ `last_seen_event` is transient (in-memory) for event handlers — lost on handler restart. Relies entirely on durable subscription checkpoint for restart idempotency
-- ⚠️ Subscription delete+recreate on restart (SubscriptionAlreadyExists handling) may cause position loss in some adapters
+- ✅ Handler: `last_seen_event` in-memory guard (event_number comparison)
+- ✅ PM: per-instance `last_seen_event` from snapshot `source_version`
+- ✅ Subscription ack via `ack_event` on event store
+- ✅ Projection: `last_seen_event` guard
+- ⚠️ Handler `last_seen_event` is only in-memory — lost on restart
+- ❌ No `{:error, :already_seen_event}` return value support from handlers
 
 ### Gaps & Issues
-- **HIGH**: Subscription position can be lost on handler restart. When a handler starts and the subscription already exists, Instructed deletes it and recreates (`event_handler.gleam` start function, `Error(error.SubscriptionAlreadyExists)` branch). For the in-memory adapter, this resets the checkpoint to `start_from`, causing full event replay and potential duplicate processing. For production adapters, behavior depends on whether delete+recreate preserves position.
-- **MEDIUM**: No application-level idempotency guarantee beyond `last_seen_event`. Commanded's `{:error, :already_seen_event}` allows handlers to implement domain-level dedup. Instructed handlers would need to track this manually in handler state.
+- **MEDIUM** — Handler `last_seen_event` is only in-memory. On handler restart, it's reset to `None`. The subscription position (persisted by the event store) provides the durable guard, but in the gap between subscription creation (with `start_from`) and first ack, events could be redelivered. The delete+recreate subscription pattern in the handler's `start` function makes this worse — it resets the subscription position.
+- **LOW** — No `{:error, :already_seen_event}` for application-level idempotency from within the handler callback. Users must handle this entirely within their `handle_event` function.
 
 ---
 
 ## 16. Multi Module [✅]
 
 ### What Commanded Provides
-- `Multi.new(aggregate)` → `Multi.execute(multi, fn)` → `Multi.run(multi)` chain
-- Named steps with 2-arity functions accessing intermediate state snapshots
-- `Multi.reduce(multi, enumerable, fn)` for iterating over collections
-- Nested Multi support (recursive `Multi.run/1`)
-- Returned from `execute/2` — aggregate process detects `%Multi{}` and calls `Multi.run/1`
-- Error in any step short-circuits entire chain via throw/catch
-- On error: no events persisted, aggregate state unchanged
+- `Commanded.Aggregate.Multi` for multi-step command execution
+- `new/1`, `execute/2,3` (with optional named steps), `reduce/3,4`
+- Named steps: 2-arity execute functions receive a map of post-step aggregate states
+- `run/1`: executes all steps, returns `{aggregate_state, events}` or `{:error, reason}`
+- Error short-circuits the chain (via throw/catch)
+- Nested Multi support (recursive `run/1`)
+- Events applied between steps to update aggregate state
 
 ### What Instructed Provides
-- ✅ `multi.new(state)` → `multi.execute(multi, fn)` → `multi.to_result()` chain
-- ✅ `multi.apply(multi, apply_fn)` updates internal state between stages
-- ✅ `multi.reduce(multi, items, execute_fn, apply_fn)` for collections
-- ✅ Error short-circuits chain — on error, all events discarded
-- ✅ `get_state`, `get_events`, `has_error` inspection functions
-- ⚠️ No named steps — cannot access intermediate state by step name
-- ⚠️ No nested Multi support — Multi returns `Result(List(event), String)`, not another Multi
-- 📝 Multi is external to aggregate — used within `execute` via `multi.to_result()`, not returned directly
+- ✅ `Multi(state, event)` opaque type in `multi.gleam`
+- ✅ `new/1`, `execute/2`, `apply/2`, `reduce/4`, `to_result/1`
+- ✅ Error short-circuits (preserved in `Option(String)`)
+- ✅ `apply` folds accumulated events through apply_fn to update state between stages
+- ✅ `get_state/1`, `get_events/1`, `has_error/1` introspection
+- ✅ Well-tested in `multi_test.gleam` (243 lines)
+- 📝 No named steps — Gleam doesn't need them (closures capture variables directly)
+- 📝 Explicit `apply` call between stages instead of automatic — more explicit, arguably better
+- ❌ No nested Multi support (returning a Multi from execute is not handled)
 
 ### Gaps & Issues
-- **LOW**: No named steps — Commanded's named step feature (`Multi.execute(multi, :step_name, fn)`) with 2-arity access to `steps_map` is not available. The `multi.apply` function serves a similar purpose (updating state between stages).
-- **LOW**: No nested Multi — cannot compose Multi chains recursively. Use flat composition instead.
+- **LOW** — No nested Multi support. Commanded allows an execute function to return a `%Multi{}`, which is then recursively executed. This is a niche feature. In Instructed, you'd compose by chaining `execute` calls on the same Multi.
+- **LOW** — No named steps. In Commanded, named steps allow later stages to access the aggregate state at intermediate points via a map. In Gleam, closures can capture variables, making this less necessary.
 
 ---
 
@@ -515,226 +542,227 @@ This review systematically compares every feature, constraint, and guarantee bet
 
 ### What Commanded Provides
 - `AggregateLifespan` behaviour with `after_event/1`, `after_command/1`, `after_error/1`
-- Return types: timeout (integer ms), `:infinity`, `:hibernate`, `:stop`, `{:stop, reason}`
-- `DefaultLifespan`: runs forever except stops on exceptions
-- `after_event/1` called with the LAST event when command produces events
-- `after_command/1` called when command produces NO events
-- Applied via GenServer reply tuples with timeout parameter
-- Invalid lifespan returns logged as warnings, default to `:infinity`
-- Snapshot taken before lifespan timeout applied
+- Return values: timeout integer, `:infinity`, `:hibernate`, `:stop`, `{:stop, reason}`
+- `DefaultLifespan`: `:infinity` always, except stops on exceptions
+- `after_event` called with **last** event when command produces events
+- `after_command` called when command produces **no** events
+- Hibernate: reduces memory via process hibernation
+- Timeout via GenServer `:timeout` mechanism
 
 ### What Instructed Provides
 - ✅ `Lifespan` record with `after_command`, `after_error`, `after_event` functions
-- ✅ `LifespanDecision`: KeepRunning, Stop, StopAfter(ms), Hibernate (falls back to KeepRunning)
+- ✅ `LifespanDecision`: KeepRunning, Stop, StopAfter(ms), Hibernate
 - ✅ `always_running()`, `new_idle(ms)`, `stop_after_command()` convenience constructors
-- ✅ Timer-based idle timeout via `process.send_after` with timer cancellation on new commands
-- ✅ `after_event` called for externally-applied events (self-subscription)
-- ⚠️ `after_command` called regardless of whether events were produced (Commanded distinguishes: `after_event` for events, `after_command` for no events)
-- ⚠️ Hibernate falls back to KeepRunning — Erlang-level hibernation not exposed through Gleam's actor API
-- ⚠️ Snapshot is NOT deferred for lifespan timeout — snapshot taken before lifespan decision. This matches Commanded's behavior.
+- ✅ Timer-based StopAfter with cancellation on new commands
+- ✅ `after_event` for externally applied events
+- ✅ `after_error` called after command errors
+- ✅ Well-tested in `lifespan_test.gleam` (235 lines)
+- ⚠️ `Hibernate` falls back to `KeepRunning` (Gleam actors don't support Erlang hibernation)
+- ⚠️ `after_command` receives `(state, command)` — called after ALL commands, not just no-event commands
+- 📝 `after_event` receives `(state, event)` — slightly different signature from Commanded's `after_event(event)`
 
 ### Gaps & Issues
-- **LOW**: `after_command` vs `after_event` semantics differ slightly. Commanded calls `after_event(last_event)` when events are produced, `after_command(command)` when no events. Instructed calls `after_command(state, command)` always. This is a minor semantic difference.
-- **LOW**: Hibernate not supported — 📝 Gleam's actor abstraction doesn't expose Erlang hibernation. Falls back to KeepRunning.
+- **LOW** — `Hibernate` is a no-op. Documented as falling back to `KeepRunning`. Gleam's actor abstraction doesn't expose Erlang's process hibernation. This is an acceptable design limitation.
+- **LOW** — `after_command` is always called after successful commands (with events). Commanded calls `after_event` when events are produced and `after_command` only when no events are produced. This is a semantic difference but unlikely to cause issues in practice.
 
 ---
 
 ## 18. Composite Router [❌]
 
 ### What Commanded Provides
-- `CompositeRouter` combines multiple routers into one
-- Detects duplicate command registrations across child routers at compile time
-- Dispatches by pattern-matching command struct to originating child router
-- Can nest: composite routers can include other composite routers
-- `Commanded.Application` itself uses `CompositeRouter` internally
+- `CompositeRouter` macro combines multiple routers into one
+- Compile-time duplicate command detection across child routers
+- Supports nesting (composite of composites)
+- Application itself uses CompositeRouter internally
+- Pattern-matched dispatch delegation
 
 ### What Instructed Provides
-- ❌ No composite router concept
-- 📝 Single router per application — runtime configuration rather than compile-time composition
+- ❌ No CompositeRouter equivalent
+- Each Router handles one aggregate type
+- Users must dispatch to the correct router manually
 
 ### Gaps & Issues
-- **LOW**: No composite router — 📝 Gleam doesn't have macros for compile-time routing. The runtime router pattern handles single-aggregate-type routing. For multi-aggregate applications, users would need to build their own dispatch layer or use the Application module with multiple routers. This is a design limitation, not a bug.
+- **LOW** — No CompositeRouter. This is primarily a convenience feature. In Instructed, users can create an application-level dispatch function that pattern-matches commands and delegates to the appropriate router. The lack of compile-time duplicate detection is a minor downside.
 
 ---
 
 ## 19. Application Supervision Tree [⚠️]
 
 ### What Commanded Provides
-- `Application` is an OTP Supervisor starting all infrastructure:
-  - Event store adapter children
-  - PubSub adapter children
-  - Registration adapter children
-  - Task.Supervisor for command dispatch
-  - Aggregates.Supervisor (DynamicSupervisor)
-  - Subscriptions.Registry
-  - Subscriptions GenServer
-- `runtime_config/4` merges compile-time, app env, start_link opts, and `init/1` callback
+- `Commanded.Application` is an OTP Supervisor module
+- Full supervision tree: EventStore adapters, PubSub, Registry, Task.Supervisor, Aggregate.Supervisor, Subscriptions.Registry, Subscriptions
 - Dynamic named applications for multi-tenancy
-- `hibernate_after` option for memory optimization
+- Config priority: compile-time < Application.get_env < start_link opts < init/1 callback
+- All infrastructure started automatically under supervision
 
 ### What Instructed Provides
-- ✅ `Application` struct grouping event store, router, and optional subscriptions
-- ✅ `start` function returns an Application struct
-- ✅ Helper functions: `dispatch`, `start_event_handler`, `start_projection`, `start_process_manager`
-- ✅ Multi-tenancy via separate Application instances with separate event stores
-- 📝 Application is a plain struct, NOT an OTP supervisor — supervision is external
-- ⚠️ No automatic infrastructure startup — event store must be started separately
-- ⚠️ No DynamicSupervisor for aggregates — the router's registry actor manages aggregate servers
-- ⚠️ No supervision of event handlers, projections, or process managers — they are started but not supervised
-- ⚠️ No Task.Supervisor for command dispatch isolation
+- ✅ `Application` module as a plain struct (not an OTP process)
+- ✅ Groups event store, router, and subscriptions actor
+- ✅ Convenience functions: `dispatch`, `start_event_handler`, `start_projection`, `start_process_manager`
+- ✅ Automatic subscriptions actor injection into router and handlers
+- ✅ Multi-tenancy via multiple Application instances with different event stores
+- 📝 User manages supervision externally — documented approach using `gleam/otp/static_supervisor`
+- ⚠️ No automatic supervision tree — user must wire components manually
+- ❌ No Registration adapter abstraction (no LocalRegistry/GlobalRegistry)
+- ❌ No Task.Supervisor for command execution isolation
+- ❌ No DynamicSupervisor for aggregate processes (plain Dict-based registry instead)
 
 ### Gaps & Issues
-- **HIGH**: No supervision tree. Event handlers, projections, and process managers are started as bare actors without supervision. If any crashes, it is not restarted. Commanded supervises all components under `Application.Supervisor` with `one_for_one` strategy. Users must build their own supervision tree using `gleam/otp/static_supervisor`.
-- **HIGH**: Aggregate server processes are not supervised. The registry actor holds references but doesn't monitor them. If an aggregate server crashes, the registry still holds the dead Subject, causing subsequent dispatches to fail with timeout.
-- **MEDIUM**: No automatic infrastructure wiring — users must manually start event store, subscriptions, create router, create application, and start handlers. Commanded does this automatically in the supervision tree.
+- **MEDIUM** — No process registration. Commanded uses Registration adapters (LocalRegistry via Elixir's Registry, GlobalRegistry via `:global`) for singleton guarantee and process lookup. Instructed uses a plain actor-based registry dict. This means: (a) no cluster-wide singleton guarantee for aggregate processes, (b) if the registry actor dies, all aggregate server references are lost.
+- **MEDIUM** — No supervision of aggregate servers. Aggregate server processes are started via the registry actor but not supervised. If an aggregate server crashes, it's silently lost from the registry dict. Commanded uses DynamicSupervisor with `:temporary` restart to at least track child processes.
+- **LOW** — No automatic supervision tree setup. Users must manually start the event store, create routers, start handlers, etc. This is more explicit but more work than Commanded's `use Commanded.Application`.
 
 ---
 
 ## 20. Event Upcasting [✅]
 
 ### What Commanded Provides
-- `Upcaster` protocol with `upcast(event, metadata)` callback
-- Fallback to `Any` implementation (identity, no-op)
-- Applied at read time: aggregate state rebuild, event handler delivery, PM delivery
-- Metadata includes all system fields + user metadata
-- Chaining: manual (call other upcasters inside your implementation)
+- `Upcaster` protocol with `upcast/2` callback (receives event + metadata)
+- Default no-op implementation for `Any`
+- Applied at read time (aggregate rebuild, handler delivery)
+- Supports changing event type (returning a different struct)
+- Manual chaining (no automatic chain-through)
+- Pure functions (no side effects)
 
 ### What Instructed Provides
-- ✅ `Upcaster(event)` record with `upcast` function taking `RecordedEvent(event)` and returning `RecordedEvent(event)`
+- ✅ `Upcaster(event)` record with `upcast` function
 - ✅ `identity()` — no-op upcaster
-- ✅ `apply` and `apply_all` for single/batch upcasting
-- ✅ `chain(first, second)` and `chain_all(list)` for composing upcasters
-- ✅ Applied in aggregate server (state rebuild via `effective_event_store` wrapper)
-- ✅ Applied in event handlers (before delivery via handler callback wrapper)
-- ✅ Applied in process managers (before delivery via handler callback wrapper)
-- ✅ Tests cover basic upcasting, chaining, and identity
+- ✅ `apply/2`, `apply_all/2` for single and list application
+- ✅ `chain/2`, `chain_all/1` for composing upcasters
+- ✅ Applied in aggregate server (wraps event store reads via `apply_upcasting_to_store`)
+- ✅ Applied in event handlers (before delivery via `upcast.apply`)
+- ✅ Applied in process managers (before delivery)
+- ✅ Well-tested in `upcast_test.gleam` (208 lines)
+- 📝 Function-based instead of protocol-based — more explicit composition
 
 ### Gaps & Issues
-- No significant gaps. Upcasting is well-implemented with explicit chaining support (better than Commanded's manual chaining).
+- **LOW** — Upcaster receives `RecordedEvent(event)` instead of `(event, metadata)`. Provides the same information (metadata is in the RecordedEvent) but different API shape.
+- Instructed's `chain/2` is actually an improvement over Commanded, which requires manual chaining.
 
 ---
 
-## 21. Telemetry & Observability [⚠️]
+## 21. Telemetry & Observability [✅]
 
 ### What Commanded Provides
-- Full `:telemetry.span/3` integration with `:start`, `:stop`, `:exception` suffixes
-- Events for: command dispatch, aggregate execute, aggregate populate, event handler, batch handler, process manager, event store operations
-- Rich metadata: application, handler info, events, errors, stacktraces, durations
-- Standard Erlang `:telemetry` library — pluggable handlers, metrics, tracing
+- Erlang `:telemetry` library integration
+- Events: `[:commanded, :aggregate, :execute, :start/:stop/:exception]`
+- Events: `[:commanded, :application, :dispatch, :start/:stop]`
+- Events: `[:commanded, :event, :handle, :start/:stop/:exception]`
+- Events: `[:commanded, :process_manager, :handle, :start/:stop/:exception]`
+- Events: `[:commanded, :event_store, :*, :start/:stop/:exception]` (all store operations)
+- Measurements: system_time, duration
+- Rich metadata: application, handler_name, aggregate_state, recorded_event, etc.
 
 ### What Instructed Provides
-- ✅ `TelemetryEvent` union type for all instrumentation events
-- ✅ Events for: CommandDispatchStart/Stop/Exception, AggregateExecuteStart/Stop/Exception, EventHandleStart/Stop/Exception, ProcessManagerHandleStart/Stop/Exception
-- ✅ Gleam-first handler via `set_handler/1` (registers a callback function)
-- ✅ Optional Erlang `:telemetry` emission via FFI (`instructed_telemetry_ffi`)
-- ✅ Convenience emit helpers for all event types
-- ✅ Duration measurement via monotonic time
-- ⚠️ No aggregate populate telemetry (state rebuild from events)
+- ✅ `TelemetryEvent` sum type with all major event categories
+- ✅ Command dispatch: Start/Stop/Exception
+- ✅ Aggregate execute: Start/Stop/Exception
+- ✅ Event handler: Start/Stop/Exception
+- ✅ Process manager: Start/Stop/Exception
+- ✅ `emit/1` function with Erlang `:telemetry` integration (graceful no-op if not available)
+- ✅ `set_handler/1` for pure-Gleam telemetry consumption
+- ✅ Convenience helpers: `dispatch_start`, `aggregate_start`, `event_handle_start`, `pm_handle_start`, etc.
+- ✅ Well-tested in `telemetry_test.gleam` (332 lines)
 - ⚠️ No event store operation telemetry
-- ⚠️ Less metadata than Commanded — no aggregate_state, handler_state, full event list in telemetry
 
 ### Gaps & Issues
-- **LOW**: No aggregate populate (state rebuild) telemetry — useful for diagnosing slow startups.
-- **LOW**: No event store operation telemetry — useful for diagnosing adapter performance.
-- **LOW**: Telemetry metadata is simpler than Commanded's — missing aggregate state, events list, handler state in event metadata. Sufficient for basic observability.
+- **LOW** — No event store operation telemetry. Commanded wraps every event store call in a telemetry span. Instructed only instruments the higher-level operations (dispatch, aggregate execute, handler, PM).
 
 ---
 
 ## 22. Batch Processing & Concurrency in Handlers [❌]
 
 ### What Commanded Provides
-- `batch_size` option activates batch mode with `handle_batch/1` callback
-- `concurrency` option creates multiple handler processes under a `Handler.Supervisor`
-- `partition_by` callback for consistent event routing to concurrent workers
-- Batch acknowledgment: only last event in batch is acked (implicit ack of all preceding)
-- Compile-time validation: cannot have both `handle/2` and `handle_batch/1`; cannot use `batch_size` with `concurrency`; cannot use `concurrency > 1` with `:strong` consistency
-- Batch error handling: `error/3` with `failed_event: nil`, `:skip` skips entire batch
+- `batch_size: N` → activates `handle_batch/1` callback
+- Receives list of `{event, metadata}` tuples
+- Ack only the last event in batch
+- Mutual exclusion: can't have both `handle/2` and `handle_batch/1`
+- `concurrency: N` → starts N handler processes under a Supervisor
+- `partition_by/2` callback for consistent event routing (`:erlang.phash2`)
+- Constraints: `concurrency + batch_size` not allowed; `concurrency + :strong` not allowed
+- Each concurrent process shares the same subscription name
 
 ### What Instructed Provides
-- ❌ No `batch_size` option or `handle_batch` callback
-- ❌ No `concurrency` option or multi-handler supervisor
+- ❌ No batch processing support
+- ❌ No concurrent handler support
 - ❌ No `partition_by` callback
-- Events processed one at a time only
+- Events are always processed one at a time by a single handler process
 
 ### Gaps & Issues
-- **MEDIUM**: No batch processing — for high-throughput systems, batch processing significantly improves performance by reducing per-event overhead (ack roundtrips, DB transactions).
-- **MEDIUM**: No concurrent handlers — cannot scale event processing across multiple processes for a single handler.
-- **LOW**: No partition_by — 📝 requires concurrency support first.
+- **LOW** — No batch processing. This is a performance optimization for high-throughput scenarios. Single-event processing is correct and sufficient for most use cases.
+- **LOW** — No concurrent handlers. This is an advanced feature for scaling event processing across multiple BEAM processes. The single-handler model is simpler and correct.
+- **LOW** — No partition_by. Without concurrent handlers, partitioning is unnecessary.
 
 ---
-
-# Summary
 
 ## Feature Parity Scorecard
 
 | # | Feature | Status | Severity of Gaps |
 |---|---------|--------|-----------------|
-| 1 | Aggregates | ⚠️ | LOW |
-| 2 | Command Routing & Dispatch | ⚠️ | HIGH (registry cleanup) |
-| 3 | Middleware Pipeline | ⚠️ | MEDIUM (ordering) |
-| 4 | Event Handlers | ⚠️ | CRITICAL (silent error swallow) |
-| 5 | Projections | ⚠️ | HIGH (no strong consistency) |
-| 6 | Process Managers | ⚠️ | MEDIUM (single actor) |
-| 7 | Snapshots | ⚠️ | HIGH (no version check) |
-| 8 | Event Store Interface | ⚠️ | LOW |
+| 1 | Aggregates | ⚠️ | MEDIUM |
+| 2 | Command Routing & Dispatch | ⚠️ | MEDIUM |
+| 3 | Middleware Pipeline | ✅ | LOW |
+| 4 | Event Handlers | ⚠️ | HIGH |
+| 5 | Projections | ⚠️ | MEDIUM |
+| 6 | Process Managers | ⚠️ | MEDIUM |
+| 7 | Snapshots | ⚠️ | HIGH |
+| 8 | Event Store Interface | ✅ | LOW |
 | 9 | Optimistic Concurrency Control | ✅ | — |
-| 10 | Command Serialization per Aggregate | ✅ | LOW |
+| 10 | Command Serialization per Aggregate | ✅ | — |
 | 11 | Event Ordering | ⚠️ | LOW |
-| 12 | Strong vs Eventual Consistency | ⚠️ | HIGH (deadlock risk) |
-| 13 | Error Handling & Retry Strategies | ⚠️ | CRITICAL (single retry) |
+| 12 | Strong vs Eventual Consistency | ⚠️ | HIGH |
+| 13 | Error Handling & Retry Strategies | ⚠️ | CRITICAL |
 | 14 | Causation & Correlation ID Tracking | ✅ | — |
-| 15 | Idempotency | ⚠️ | HIGH (subscription position loss) |
+| 15 | Idempotency | ⚠️ | MEDIUM |
 | 16 | Multi Module | ✅ | LOW |
 | 17 | Aggregate Lifespan Management | ✅ | LOW |
 | 18 | Composite Router | ❌ | LOW |
-| 19 | Application Supervision Tree | ⚠️ | HIGH (no supervision) |
+| 19 | Application Supervision Tree | ⚠️ | MEDIUM |
 | 20 | Event Upcasting | ✅ | — |
-| 21 | Telemetry & Observability | ⚠️ | LOW |
-| 22 | Batch Processing & Concurrency | ❌ | MEDIUM |
+| 21 | Telemetry & Observability | ✅ | LOW |
+| 22 | Batch Processing & Concurrency | ❌ | LOW |
 
-## Critical Issues (Must Fix for Production Use)
+---
 
-### 1. CRITICAL: Event handler default error handling silently swallows errors
-**Location**: `event_handler.gleam`, `handle_error` function, `None ->` branch  
-**Problem**: When no `on_error` callback is configured, the handler acks the event and continues processing. Events that fail are silently lost.  
-**Expected**: Stop the handler (matching Commanded's default `ErrorHandler.stop_on_error`).  
-**Fix**: Change `None -> { ack_event(...); actor.continue(state) }` to `None -> { actor.stop() }` (or at minimum, don't ack the event).
+## Critical Issues
 
-### 2. CRITICAL: Event handler retry is not recursive
-**Location**: `event_handler.gleam`, `handle_error` function, `Retry(new_state) ->` and `RetryWithDelay(delay_ms, new_state) ->` branches  
-**Problem**: On retry failure, the handler acks the event and continues — the event is lost. Should re-call `error/3` (recursive retry loop).  
-**Fix**: Implement recursive retry: on retry failure, call the `on_error` callback again with incremented failure count, allowing the callback to decide whether to retry again, skip, or stop.
+Issues that **must be fixed** before production use:
 
-### 3. HIGH: No snapshot version validation
-**Location**: `aggregate.gleam`, `populate_from_event_store` function  
-**Problem**: Snapshot is read and used without checking `snapshot_version` against config. Schema changes invalidate snapshot data but stale snapshots are used, producing incorrect aggregate state.  
-**Fix**: Compare `snapshot_config.snapshot_version` against stored snapshot metadata, discard if mismatched.
+1. **Default handler error behavior silently swallows errors** (§13, §4)
+   - Location: `event_handler.gleam`, `handle_error` function, `None` branch
+   - Impact: Events are lost without any indication when `on_error` is not configured
+   - Fix: Change default to `actor.stop()` to match Commanded's `:stop` default
+   - Severity: **CRITICAL**
 
-### 4. HIGH: Registry doesn't monitor aggregate server processes
-**Location**: `router.gleam`, `handle_registry_message` function  
-**Problem**: Dead aggregate servers remain in the registry Dict. Subsequent dispatches get a dead Subject and time out.  
-**Fix**: Monitor started aggregate server processes (via `process.monitor`) and remove from Dict on death.
+2. **Single-shot retry in handlers** (§13, §4)
+   - Location: `event_handler.gleam`, `handle_error` function, `Retry(new_state)` and `RetryWithDelay` branches
+   - Impact: If retry also fails, error is silently swallowed (ack + continue)
+   - Fix: Implement recursive retry loop that calls `on_error` again on retry failure
+   - Severity: **HIGH**
 
-### 5. HIGH: Strong consistency deadlock risk
-**Location**: `router.gleam`, `dispatch_through_server` function / `subscriptions.gleam`  
-**Problem**: No dispatcher PID exclusion in `wait_for`. Recursive strong-consistency dispatch from within a handler causes deadlock.  
-**Fix**: Pass the dispatcher PID to `wait_for` and exclude it from the set of handlers being waited on.
+3. **Snapshot version not checked during aggregate state loading** (§7)
+   - Location: `aggregate.gleam`, `populate_from_event_store` function
+   - Impact: Changed aggregate state types will deserialize incorrectly from old snapshots
+   - Fix: Compare `snapshot_config.snapshot_version` against a version field in stored snapshot data
+   - Severity: **HIGH**
 
-### 6. HIGH: Subscription position loss on handler restart
-**Location**: `event_handler.gleam`, `start` function, `Error(error.SubscriptionAlreadyExists)` branch  
-**Problem**: Deletes and recreates subscription on restart, potentially losing checkpoint position.  
-**Fix**: Instead of delete+recreate, reconnect to the existing subscription. The event store adapter should support re-subscribing to an existing persistent subscription.
+4. **No dispatcher PID exclusion in strong consistency wait** (§12)
+   - Location: `subscriptions.gleam`, `is_waiter_satisfied` function
+   - Impact: Deadlock when strong-consistency handler dispatches a strong-consistency command
+   - Fix: Pass dispatcher identity to `wait_for` and exclude from satisfaction check
+   - Severity: **HIGH**
+
+---
 
 ## Recommended Priority Order
 
-1. **Fix #1 and #2** (error handling) — these cause silent data loss in production
-2. **Fix #4** (registry monitoring) — causes cascading failures after any aggregate crash
-3. **Fix #6** (subscription restart) — causes duplicate event processing on handler restart
-4. **Fix #3** (snapshot version) — causes incorrect aggregate state after schema changes
-5. **Fix #5** (deadlock) — affects systems using strong consistency with nested dispatch
-6. Add proper supervision tree support (section 19) — required for production resilience
-7. Add projection strong consistency (section 5) — required for POST/Redirect/GET pattern
-8. Implement recursive retry in error handlers (section 13) — required for production error recovery
-9. Add TTL purging to subscriptions actor (section 12) — prevents memory leaks
-10. Add process monitoring to PM strict routing (section 6) — correctness improvement
-
+1. **Fix default handler error behavior** — Change `None` branch in `handle_error` to stop the handler (CRITICAL, ~5 min fix)
+2. **Implement recursive retry** — Make handler retry call `on_error` again on repeated failure instead of silently continuing (HIGH, ~30 min)
+3. **Add snapshot version checking** — Compare stored snapshot version against config during load (HIGH, ~20 min)
+4. **Add dispatcher exclusion to consistency wait** — Prevent strong-consistency deadlock (HIGH, ~30 min)
+5. **Add TTL purging to subscriptions actor** — Prevent unbounded memory growth (MEDIUM, ~1 hour)
+6. **Fix strict routing in process managers** — Check snapshot store, not just in-memory dict (MEDIUM, ~30 min)
+7. **Add subscription reconnection backoff** — Handle transient event store failures gracefully (MEDIUM, ~1 hour)
+8. **Add selective consistency support** — Wait for specific handlers by name (MEDIUM, ~2 hours)
+9. **Add PM timeout mechanisms** — event_timeout and idle_timeout (MEDIUM, ~2 hours)
+10. **Add process supervision** — Supervise aggregate servers and handle crashes (MEDIUM, ~4 hours)
