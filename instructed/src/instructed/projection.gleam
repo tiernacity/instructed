@@ -43,6 +43,8 @@ import instructed/event.{type RecordedEvent}
 import instructed/event_store.{
   type EventStore, type StartFrom, type Subscription, Origin,
 }
+import instructed/middleware.{type Consistency, Eventual}
+import instructed/subscriptions.{type SubMessage}
 
 /// Configuration for a projection.
 pub type ProjectionConfig(event, projection_state) {
@@ -61,6 +63,14 @@ pub type ProjectionConfig(event, projection_state) {
       fn(String, RecordedEvent(event), projection_state) ->
         error.ErrorAction(projection_state),
     ),
+    /// Consistency level for this projection.
+    /// When Strong, dispatchers using strong consistency will wait for this
+    /// projection to process events before returning.
+    /// Equivalent to Commanded's projections with strong consistency for
+    /// POST/Redirect/GET patterns.
+    consistency: Consistency,
+    /// Optional subscriptions actor for strong consistency tracking.
+    subscriptions: Option(Subject(SubMessage)),
   )
 }
 
@@ -77,6 +87,8 @@ pub fn new(
     handle_event: handle_event,
     start_from: Origin,
     on_error: None,
+    consistency: Eventual,
+    subscriptions: None,
   )
 }
 
@@ -86,6 +98,22 @@ pub fn with_start_from(
   start_from: StartFrom,
 ) -> ProjectionConfig(event, projection_state) {
   ProjectionConfig(..config, start_from: start_from)
+}
+
+/// Set the consistency level and subscriptions actor.
+///
+/// When set to `Strong` (or `Selective`), the projection registers with the
+/// subscriptions actor and acks events after processing. This allows
+/// dispatchers using strong consistency to wait for this projection.
+///
+/// Typical use: POST/Redirect/GET patterns where a command dispatch must
+/// guarantee the read model is updated before redirecting.
+pub fn with_consistency(
+  config: ProjectionConfig(event, projection_state),
+  consistency: Consistency,
+  subs: Subject(SubMessage),
+) -> ProjectionConfig(event, projection_state) {
+  ProjectionConfig(..config, consistency: consistency, subscriptions: Some(subs))
 }
 
 /// Set the error callback.
@@ -105,6 +133,7 @@ type ProjectionActorState(event, projection_state) {
     event_store: Option(EventStore(event)),
     subscription: Option(Subscription),
     last_seen_event: Option(Int),
+    subscriptions_actor: Option(Subject(SubMessage)),
   )
 }
 
@@ -127,6 +156,7 @@ pub fn start(
       event_store: None,
       subscription: None,
       last_seen_event: None,
+      subscriptions_actor: config.subscriptions,
     )
 
   case
@@ -136,6 +166,16 @@ pub fn start(
   {
     Ok(started) -> {
       let subject = started.data
+
+      // Register with the subscriptions actor so strong-consistency waiters
+      // know about this projection. Also register PID for auto-exclusion.
+      case config.subscriptions {
+        Some(subs) -> {
+          subscriptions.register(subs, config.name, config.consistency)
+          subscriptions.register_pid(subs, process.self(), config.name)
+        }
+        None -> Nil
+      }
 
       let handler = fn(event: RecordedEvent(event)) {
         process.send(subject, ProjectionHandleEvent(event))
@@ -358,5 +398,17 @@ fn ack_event(
       Nil
     }
     _, _ -> Nil
+  }
+  // Ack the subscriptions actor for strong consistency tracking.
+  // This unblocks any dispatchers waiting for this projection.
+  case state.subscriptions_actor {
+    Some(subs) ->
+      subscriptions.ack_event(
+        subs,
+        state.config.name,
+        event.stream_id,
+        event.stream_version,
+      )
+    None -> Nil
   }
 }
