@@ -1,6 +1,6 @@
-# Instructed Review Instructions
+# Instructed Feature Comparison Instructions
 
-This document describes how to produce a comprehensive CQRS/ES feature and guarantee review comparing **Instructed** (this Gleam repo) against **Commanded** (the Elixir library it ports: https://github.com/commanded/commanded).
+This document describes how to produce a comprehensive CQRS/ES feature comparison reviewing **Instructed** (this Gleam repo) against **Commanded** (https://github.com/commanded/commanded) and **Commanded EventStore** (https://github.com/commanded/eventstore).
 
 Read this document fully before starting. Follow the phases in order.
 
@@ -8,7 +8,9 @@ Read this document fully before starting. Follow the phases in order.
 
 ## Purpose
 
-Produce a `REVIEW.md` at the repo root that systematically compares every feature, constraint, and guarantee between the two frameworks. The review must cover not just "does the feature exist" but "does it work correctly, with the right guarantees."
+Produce a `REVIEW-feature-comparison.md` at the repo root that systematically compares every feature, constraint, and guarantee between the frameworks. The review must cover not just "does the feature exist" but "does it work correctly, with the right guarantees."
+
+Commanded and its EventStore library work in concert — the correctness guarantees of the framework depend on a well-behaved event store adapter. Instructed has three adapters (in-memory, SQLite, PostgreSQL) which must all be reviewed against the guarantees provided by the Commanded EventStore.
 
 ---
 
@@ -22,6 +24,11 @@ Commanded is the reference implementation. We need deep, exhaustive research —
 # Clone commanded if not already present
 if [ ! -d /tmp/commanded ]; then
   git clone --depth 1 https://github.com/commanded/commanded.git /tmp/commanded
+fi
+
+# Clone commanded eventstore if not already present
+if [ ! -d /tmp/commanded-eventstore ]; then
+  git clone --depth 1 https://github.com/commanded/eventstore.git /tmp/commanded-eventstore
 fi
 ```
 
@@ -67,6 +74,8 @@ Launch via tmux with this prompt:
 >
 > Cover: process manager architecture (three-layer hierarchy: ProcessRouter, DynamicSupervisor, ProcessManagerInstance), callback behaviour (interested?/1,2 with start/start!/continue/continue!/stop/false, multi-instance routing, handle/2,3, apply/2,3, after_command/2,3, error/3), event routing and strict validation, event handling execution order (handle → dispatch commands → apply → persist snapshot → ack → after_command), error handling and failure strategies (FailureContext, event errors vs command dispatch errors, retry/skip/stop/continue strategies, pending commands), state persistence via snapshots (write after each event, read on startup, delete on stop), idempotency (last_seen_event from snapshot), event timeout and idle timeout, ProcessRouter internals (subscription, event pipeline, acknowledgment tracking, event timeout, instance lifecycle), middleware pipeline (behaviour callbacks, Pipeline struct with all fields, chain execution and halting semantics, built-in middleware: ExtractAggregateIdentity, ConsistencyGuarantee, Logger), snapshot operations (aggregate vs PM snapshots, timing, versioning), application supervision tree (full tree structure, adapter initialization, dynamic named applications, config sources and priority), registration adapters (behaviour, LocalRegistry via Elixir Registry, GlobalRegistry via :global, usage patterns), serialization (JsonSerializer, JsonDecoder protocol, custom serializers, configuration), EventStore adapter behaviour (full callback list with types, expected_version semantics, subscription types, snapshot operations), in-memory EventStore implementation (state structure, append with OCC, stream reading, transient/persistent subscriptions, serialization), cross-cutting concerns (event_number vs stream_version, enriched metadata, causation/correlation chain propagation).
 >
+> Also research the **Commanded EventStore** library (`/tmp/commanded-eventstore/`), which provides the PostgreSQL-backed event store that Commanded uses in production. Cover: append atomicity (transaction semantics), stream versioning and OCC, persistent subscription implementation (advisory locks, subscription state machine, ack protocol, checkpoint storage), transient subscriptions, snapshot storage, schema design (streams/events/subscriptions tables), and how it enforces the guarantees that the adapter behaviour requires.
+>
 > Read these files thoroughly:
 > - `/tmp/commanded/guides/Process Managers.md`
 > - `/tmp/commanded/guides/Supervision.md`
@@ -77,6 +86,10 @@ Launch via tmux with this prompt:
 > - `/tmp/commanded/lib/commanded/event_store/adapters/in_memory.ex`
 > - `/tmp/commanded/lib/commanded/registration/*.ex`
 > - `/tmp/commanded/lib/application.ex`
+> - `/tmp/commanded-eventstore/lib/event_store.ex`
+> - `/tmp/commanded-eventstore/lib/event_store/storage/*.ex`
+> - `/tmp/commanded-eventstore/lib/event_store/subscriptions/*.ex`
+> - `/tmp/commanded-eventstore/priv/event_store/migrations/*.sql`
 >
 > Be exhaustive — include code patterns, configuration options, error handling, return types, and edge cases.
 
@@ -122,7 +135,7 @@ Read ALL source files in the instructed repo:
 Also read:
 - `/workspace/README.md`
 - `/workspace/NOTES.md` (if it exists)
-- Any existing `/workspace/REVIEW.md` (for context on previous reviews)
+- Any existing `/workspace/REVIEW-feature-comparison.md` (for context on previous reviews)
 
 ---
 
@@ -141,6 +154,7 @@ Use a Ralph loop to systematically compare each area. **One area per iteration.*
 6. **Process Managers**: interested routing, handle/apply, command dispatch, state persistence, error handling
 7. **Snapshots**: aggregate snapshotting, PM snapshotting, state rebuilding integration
 8. **Event Store Interface**: adapter contract, expected version, subscriptions, snapshot operations
+9a. **Event Store Adapters**: Review all three Instructed adapters (in-memory, SQLite, PostgreSQL) against the guarantees provided by Commanded's EventStore library. Cover: append atomicity, OCC enforcement, persistent subscription correctness (checkpoint durability, ack protocol, resume-from-checkpoint), transient subscriptions, snapshot operations, schema design
 
 #### CQRS/ES Guarantees & Constraints
 9. **Optimistic Concurrency Control**: version checking, retry on conflict, atomicity
@@ -162,7 +176,7 @@ Use a Ralph loop to systematically compare each area. **One area per iteration.*
 
 ### Review Format
 
-For each area, write a section in `REVIEW.md` with this structure:
+For each area, write a section in `REVIEW-feature-comparison.md` with this structure:
 
 ```markdown
 ## N. Feature Name [STATUS]
@@ -200,7 +214,7 @@ After all 22 areas, include:
 ## Phase 4: Commit
 
 ```bash
-cd /workspace && git add REVIEW.md && git commit -m "Update CQRS/ES feature review: Instructed vs Commanded"
+cd /workspace && git add REVIEW-feature-comparison.md && git commit -m "Update CQRS/ES feature comparison: Instructed vs Commanded"
 ```
 
 ---

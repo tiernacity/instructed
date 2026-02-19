@@ -12,7 +12,7 @@ Start a new session and say:
 
 ## Background
 
-Instructed is a Gleam port of Commanded. A comprehensive review (`REVIEW.md`) has identified significant gaps. Rather than starting over, we iterate module-by-module toward parity, with periodic architecture reviews that grow as more modules are completed.
+Instructed is a Gleam port of Commanded. Comprehensive reviews (`REVIEW-feature-comparison.md` and `REVIEW-robustness.md`) have identified significant gaps. Rather than starting over, we iterate module-by-module toward parity, with periodic architecture reviews that grow as more modules are completed.
 
 Previous research documents may exist at `/tmp/research_*.md` — if not, Phase 1 regenerates them.
 
@@ -54,7 +54,7 @@ Check if `/tmp/research_aggregates_commands.md`, `/tmp/research_events_projectio
 
 ### Read Existing Review
 
-Read `/workspace/REVIEW.md` for context on known gaps.
+Read `/workspace/REVIEW-feature-comparison.md` and `/workspace/REVIEW-robustness.md` for context on known gaps.
 
 ### Create/Update Task File
 

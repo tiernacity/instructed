@@ -1,10 +1,12 @@
-# Instructed Review Instructions (v2)
+# Instructed Robustness Review Instructions
 
-This document describes how to produce a deep correctness and feature review of **Instructed** (this Gleam CQRS/ES repo), using **Commanded** (https://github.com/commanded/commanded) as a reference implementation.
+This document describes how to produce a deep correctness and robustness review of **Instructed** (this Gleam CQRS/ES repo), using **Commanded** (https://github.com/commanded/commanded) and **Commanded EventStore** (https://github.com/commanded/eventstore) as reference implementations.
+
+The correctness guarantees of a CQRS/ES framework depend critically on a well-behaved event store. Commanded and its EventStore library work in concert — both must be studied. Instructed has three event store adapters (in-memory, SQLite, PostgreSQL) which must all be reviewed.
 
 Read this document fully before starting. Follow the phases in order.
 
-**Output file: `REVIEW-v2.md`** (not REVIEW.md — preserve the existing review for comparison).
+**Output file: `REVIEW-robustness.md`**
 
 ---
 
@@ -27,6 +29,10 @@ Clone Commanded and launch **two** research sub-agents. We want focused, high-qu
 if [ ! -d /tmp/commanded ]; then
   git clone --depth 1 https://github.com/commanded/commanded.git /tmp/commanded
 fi
+
+if [ ! -d /tmp/commanded-eventstore ]; then
+  git clone --depth 1 https://github.com/commanded/eventstore.git /tmp/commanded-eventstore
+fi
 ```
 
 **Sub-Agent A — Core Guarantees & Invariants:**
@@ -35,9 +41,11 @@ fi
 >
 > For each guarantee, document: (1) what the guarantee is, (2) the mechanism that enforces it, (3) what happens when the mechanism fails, (4) relevant source code locations.
 >
+> Also research the **Commanded EventStore** library (`/tmp/commanded-eventstore/`), which provides the production PostgreSQL-backed event store. The framework's correctness guarantees depend on the event store's behavior — both must be studied together.
+>
 > Guarantees to investigate:
-> - **Event append atomicity**: How does `append_to_stream` ensure events are persisted atomically? What happens on partial failure?
-> - **Optimistic concurrency**: How is `expected_version` checked? What triggers retry? How many retries? What if all retries fail?
+> - **Event append atomicity**: How does `append_to_stream` ensure events are persisted atomically? What happens on partial failure? How does the Commanded EventStore enforce this at the database level?
+> - **Optimistic concurrency**: How is `expected_version` checked? What triggers retry? How many retries? What if all retries fail? How does the EventStore's schema enforce this?
 > - **Command serialization per aggregate**: How does the GenServer model ensure no concurrent command execution? What about Task isolation?
 > - **Event ordering**: Global ordering (event_number) vs per-stream (stream_version). Are there gaps? How are subscriptions ordered?
 > - **At-least-once delivery**: How do persistent subscriptions ensure events are not lost? What is the ack protocol? What happens on handler crash before ack?
@@ -59,6 +67,11 @@ fi
 > - `/tmp/commanded/lib/commanded/subscriptions.ex`
 > - `/tmp/commanded/lib/commanded/event_store/adapters/in_memory.ex`
 > - `/tmp/commanded/lib/commanded/middleware/consistency_guarantee.ex`
+> - `/tmp/commanded-eventstore/lib/event_store.ex`
+> - `/tmp/commanded-eventstore/lib/event_store/storage/appender.ex`
+> - `/tmp/commanded-eventstore/lib/event_store/storage/subscription.ex`
+> - `/tmp/commanded-eventstore/lib/event_store/subscriptions/*.ex`
+> - `/tmp/commanded-eventstore/priv/event_store/migrations/*.sql`
 >
 > Be precise. Quote code where it clarifies behavior.
 
@@ -92,6 +105,8 @@ fi
 > - `/tmp/commanded/lib/commanded/process_managers/process_manager.ex`
 > - `/tmp/commanded/lib/commanded/aggregates/aggregate_lifespan.ex`
 > - `/tmp/commanded/lib/commanded/event_store/adapter.ex`
+> - `/tmp/commanded-eventstore/lib/event_store.ex`
+> - `/tmp/commanded-eventstore/lib/event_store/subscriptions/subscription.ex`
 >
 > Be exhaustive on API surface. Include every configuration option, callback, and return type.
 
@@ -246,17 +261,20 @@ Launch **three** review sub-agents, one per tier:
 > And ALL test files:
 > - `/workspace/instructed/test/*.gleam` (every test file)
 >
-> And the PostgreSQL adapter:
+> And ALL event store adapters:
+> - `/workspace/instructed/src/instructed/in_memory_event_store.gleam`
 > - `/workspace/instructed-postgres/src/instructed_postgres.gleam`
+> - `/workspace/instructed-sqlite/src/instructed_sqlite.gleam`
 >
-> For each of these 6 correctness areas, write a detailed analysis:
+> For each of these 7 correctness areas, write a detailed analysis:
 >
-> 1. **Event append atomicity and OCC**
+> 1. **Event append atomicity and OCC** — review all three adapters (in-memory, SQLite, PostgreSQL) against guarantees from Commanded EventStore
 > 2. **Command serialization per aggregate**
-> 3. **At-least-once delivery and subscription protocol**
+> 3. **At-least-once delivery and subscription protocol** — review persistent subscription implementations in all three adapters
 > 4. **Idempotency**
 > 5. **Error handling and failure recovery**
 > 6. **Process lifecycle and supervision**
+> 7. **Event store adapter correctness** — systematic comparison of all three Instructed adapters against the Commanded EventStore adapter behaviour and the production EventStore library. Cover: append semantics, subscription state machine, checkpoint durability, gap handling, schema constraints
 >
 > For each area use this format:
 >
@@ -403,12 +421,12 @@ done
 
 ## Phase 4: Assemble the Final Review
 
-After all three review sub-agents complete, **read all three review files**, then assemble `REVIEW-v2.md`.
+After all three review sub-agents complete, **read all three review files**, then assemble `REVIEW-robustness.md`.
 
 ### Document Structure
 
 ```markdown
-# CQRS/ES Correctness & Feature Review: Instructed vs Commanded (v2)
+# CQRS/ES Robustness Review: Instructed vs Commanded
 
 > [metadata: date, methodology description]
 
@@ -472,7 +490,7 @@ After all three review sub-agents complete, **read all three review files**, the
 ## Phase 5: Commit
 
 ```bash
-cd /workspace && git add REVIEW-v2.md && git commit -m "Add CQRS/ES correctness & feature review v2"
+cd /workspace && git add REVIEW-robustness.md && git commit -m "Add CQRS/ES robustness review: Instructed vs Commanded"
 ```
 
 ---

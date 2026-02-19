@@ -1,7 +1,7 @@
-# CQRS/ES Correctness & Feature Review: Instructed vs Commanded (v2)
+# CQRS/ES Robustness Review: Instructed vs Commanded
 
 > **Date**: 2026-02-19
-> **Methodology**: Parallel sub-agent research (Commanded source analysis, CQRS/ES theory) followed by parallel tier-based review (correctness invariants, core features, advanced features). All claims cite specific source files and functions. Test coverage is primary evidence.
+> **Methodology**: Parallel sub-agent research (Commanded source analysis, Commanded EventStore analysis, CQRS/ES theory) followed by parallel tier-based review (correctness invariants, core features, advanced features). All claims cite specific source files and functions. Test coverage is primary evidence.
 
 ## Executive Summary
 
