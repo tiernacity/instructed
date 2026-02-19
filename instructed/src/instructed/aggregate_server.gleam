@@ -518,6 +518,8 @@ fn load_state(
 /// Take a snapshot if configured and threshold reached.
 /// Uses snapshot.coerce to bridge the type gap between aggregate state
 /// and the event store's event type parameter.
+/// Stores the snapshot_version from config in source_type so that
+/// version mismatches can be detected on read.
 fn maybe_take_snapshot(
   state: ServerState(state, command, event),
 ) -> ServerState(state, command, event) {
@@ -527,7 +529,10 @@ fn maybe_take_snapshot(
         snapshot.new_snapshot(
           source_uuid: state.config.stream_id,
           source_version: state.aggregate_version,
-          source_type: "aggregate",
+          source_type: snapshot.encode_snapshot_type(
+            "aggregate",
+            state.config.snapshot_config.snapshot_version,
+          ),
           data: state.aggregate_state,
         )
       // Coerce SnapshotData(state) to SnapshotData(event) for the event store

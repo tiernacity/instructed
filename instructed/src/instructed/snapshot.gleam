@@ -34,7 +34,9 @@
 //// let state: MyState = dynamic.unsafe_coerce(snap.data)
 //// ```
 
+import gleam/int
 import gleam/option.{type Option}
+import gleam/string
 
 /// Configuration for aggregate snapshotting.
 ///
@@ -130,6 +132,26 @@ pub fn coerce(snapshot: SnapshotData(a)) -> SnapshotData(b) {
     data: data,
     created_at: snapshot.created_at,
   )
+}
+
+/// Encode a snapshot type string with version info.
+/// Format: "type:vN" where N is the snapshot version.
+/// Used by aggregate_server when recording snapshots.
+pub fn encode_snapshot_type(base_type: String, version: Int) -> String {
+  base_type <> ":v" <> int.to_string(version)
+}
+
+/// Decode a snapshot type string, extracting the version number.
+/// Returns the version if the format matches "type:vN", or None.
+pub fn decode_snapshot_version(source_type: String) -> option.Option(Int) {
+  case string.split(source_type, ":v") {
+    [_, version_str] ->
+      case int.parse(version_str) {
+        Ok(v) -> option.Some(v)
+        Error(_) -> option.None
+      }
+    _ -> option.None
+  }
 }
 
 @external(erlang, "os", "system_time")

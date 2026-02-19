@@ -146,7 +146,7 @@ pub fn populate_from_event_store(
   stream_id: String,
   snapshot_config: SnapshotConfig,
 ) -> Result(PopulatedState(state), String) {
-  // Step 1: Try to read snapshot
+  // Step 1: Try to read snapshot, checking version compatibility
   let #(initial_state, initial_version) = case
     snapshot_config.snapshot_every
   {
@@ -156,11 +156,27 @@ pub fn populate_from_event_store(
     Some(_) ->
       case event_store.read_snapshot(stream_id) {
         Ok(snapshot_data) -> {
-          // Coerce SnapshotData(event) back to SnapshotData(state)
-          let state_snapshot: snapshot.SnapshotData(state) =
-            snapshot.coerce(snapshot_data)
-          // Use snapshot as starting point, replay events from snapshot version
-          #(state_snapshot.data, state_snapshot.source_version)
+          // Check snapshot version matches config (Invariant 14).
+          // Old snapshots with wrong version are ignored, forcing full replay.
+          let version_ok = case
+            snapshot.decode_snapshot_version(snapshot_data.source_type)
+          {
+            option.Some(v) -> v == snapshot_config.snapshot_version
+            // Legacy snapshot without version encoding — accept it
+            option.None -> True
+          }
+          case version_ok {
+            True -> {
+              // Coerce SnapshotData(event) back to SnapshotData(state)
+              let state_snapshot: snapshot.SnapshotData(state) =
+                snapshot.coerce(snapshot_data)
+              // Use snapshot as starting point, replay events from snapshot version
+              #(state_snapshot.data, state_snapshot.source_version)
+            }
+            False ->
+              // Version mismatch — ignore snapshot, full replay
+              #(aggregate.empty_state(), 0)
+          }
         }
         Error(_) ->
           // No snapshot, start from beginning

@@ -1,5 +1,5 @@
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleeunit/should
 import instructed/aggregate
 import instructed/aggregate_server
@@ -182,4 +182,122 @@ pub fn snapshot_taken_after_n_events_test() {
   // Coerce back to verify state
   let state_snap: snapshot.SnapshotData(Task) = snapshot.coerce(snap)
   should.equal(state_snap.data.title, "Snap test 2")
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: Snapshot version checking - matching version uses snapshot
+// ---------------------------------------------------------------------------
+
+pub fn snapshot_version_match_uses_snapshot_test() {
+  let assert Ok(store_subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(store_subject)
+
+  let snap_config =
+    snapshot.SnapshotConfig(snapshot_every: Some(2), snapshot_version: 1)
+
+  let config =
+    aggregate_server.new_config(
+      aggregate: task_aggregate(),
+      event_store: store,
+      stream_id: "task-vcheck-1",
+    )
+    |> aggregate_server.with_snapshot_config(snap_config)
+
+  let assert Ok(server) = aggregate_server.start(config)
+
+  // Create and rename to trigger snapshot (2 events)
+  let assert Ok(_) =
+    aggregate_server.execute(server, CreateTask("v1", "Version test"), 5000)
+  let assert Ok(_) =
+    aggregate_server.execute(server, RenameTask("v1", "Renamed"), 5000)
+
+  // Verify snapshot was taken with version encoding
+  let assert Ok(snap) = store.read_snapshot("task-vcheck-1")
+  should.equal(snap.source_type, "aggregate:v1")
+
+  // Now rebuild from the same config (version 1) — should use snapshot
+  let result =
+    aggregate.populate_from_event_store(
+      task_aggregate(),
+      store,
+      "task-vcheck-1",
+      snap_config,
+    )
+  let assert Ok(populated) = result
+  should.equal(populated.state.title, "Renamed")
+  should.equal(populated.version, 2)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: Snapshot version mismatch forces full replay
+// ---------------------------------------------------------------------------
+
+pub fn snapshot_version_mismatch_forces_replay_test() {
+  let assert Ok(store_subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(store_subject)
+
+  // Write snapshot with version 1
+  let snap_config_v1 =
+    snapshot.SnapshotConfig(snapshot_every: Some(2), snapshot_version: 1)
+
+  let config =
+    aggregate_server.new_config(
+      aggregate: task_aggregate(),
+      event_store: store,
+      stream_id: "task-vcheck-2",
+    )
+    |> aggregate_server.with_snapshot_config(snap_config_v1)
+
+  let assert Ok(server) = aggregate_server.start(config)
+  let assert Ok(_) =
+    aggregate_server.execute(server, CreateTask("v2", "First title"), 5000)
+  let assert Ok(_) =
+    aggregate_server.execute(server, RenameTask("v2", "Second title"), 5000)
+
+  // Snapshot exists at version 1
+  let assert Ok(_snap) = store.read_snapshot("task-vcheck-2")
+
+  // Now try to load with version 2 — snapshot should be IGNORED
+  let snap_config_v2 =
+    snapshot.SnapshotConfig(snapshot_every: Some(2), snapshot_version: 2)
+
+  let result =
+    aggregate.populate_from_event_store(
+      task_aggregate(),
+      store,
+      "task-vcheck-2",
+      snap_config_v2,
+    )
+  let assert Ok(populated) = result
+  // State should still be correct (full replay from events)
+  should.equal(populated.state.title, "Second title")
+  should.equal(populated.version, 2)
+}
+
+// ---------------------------------------------------------------------------
+// Fix 4: Snapshot encode/decode version
+// ---------------------------------------------------------------------------
+
+pub fn snapshot_encode_decode_version_test() {
+  should.equal(
+    snapshot.encode_snapshot_type("aggregate", 1),
+    "aggregate:v1",
+  )
+  should.equal(
+    snapshot.encode_snapshot_type("aggregate", 42),
+    "aggregate:v42",
+  )
+  should.equal(
+    snapshot.decode_snapshot_version("aggregate:v1"),
+    Some(1),
+  )
+  should.equal(
+    snapshot.decode_snapshot_version("aggregate:v42"),
+    Some(42),
+  )
+  // Legacy format without version
+  should.equal(
+    snapshot.decode_snapshot_version("aggregate"),
+    None,
+  )
 }
