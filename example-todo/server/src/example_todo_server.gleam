@@ -74,9 +74,18 @@ fn create_store(name: String) -> EventStore(TodoEvent) {
     "postgres" | "pg" | "postgresql" -> {
       io.println("Using PostgreSQL event store")
       let pool_name = process.new_name("todo_pg_pool")
-      let config =
-        pog.default_config(pool_name)
-        |> pog.database("instructed_todo")
+      let config = case get_env("DATABASE_URL") {
+        Ok(url) -> {
+          io.println("Using DATABASE_URL")
+          let assert Ok(c) = pog.url_config(pool_name, url)
+          c
+        }
+        Error(_) -> {
+          io.println("No DATABASE_URL set, using defaults (localhost/instructed_todo)")
+          pog.default_config(pool_name)
+          |> pog.database("instructed_todo")
+        }
+      }
       let assert Ok(started) = pog.start(config)
       let db = started.data
       let assert Ok(Nil) = instructed_postgres.create_schema(db)
@@ -149,4 +158,7 @@ fn ensure_directory(path: String) -> Nil {
 
 @external(erlang, "file", "make_dir")
 fn make_directory(path: String) -> Result(Nil, dynamic.Dynamic)
+
+@external(erlang, "example_todo_server_ffi", "get_env")
+fn get_env(name: String) -> Result(String, Nil)
 
