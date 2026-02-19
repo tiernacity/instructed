@@ -39,7 +39,6 @@ fn handle_request(
   let path = request.path_segments(req)
   case req.method, path {
     http.Post, ["dispatch"] -> handle_dispatch(req, srv)
-    http.Post, ["reset"] -> handle_reset(srv)
     http.Get, ["todos"] -> handle_get_all(srv)
     http.Get, ["todos", "active"] -> handle_get_active(srv)
     http.Get, ["todos", "completed"] -> handle_get_completed(srv)
@@ -87,17 +86,6 @@ fn handle_dispatch(
       json_response(400, json.object([
         #("ok", json.bool(False)),
         #("error", json.string("Failed to read request body")),
-      ]))
-  }
-}
-
-fn handle_reset(srv: TodoServer) -> Response(mist.ResponseData) {
-  case srv.event_store.reset() {
-    Ok(Nil) -> json_response(200, json.object([#("ok", json.bool(True))]))
-    Error(_) ->
-      json_response(500, json.object([
-        #("ok", json.bool(False)),
-        #("error", json.string("Failed to reset event store")),
       ]))
   }
 }

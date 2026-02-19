@@ -39,7 +39,6 @@ fn run(args: List(String)) -> Promise(Nil) {
     ["list", "overdue"] -> list_overdue()
     ["list", "by-priority"] -> list_by_priority()
     ["list", "by-due-date"] -> list_by_due_date()
-    ["reset"] -> reset_store()
     _ -> {
       print_help()
       promise.resolve(Nil)
@@ -285,17 +284,6 @@ fn list_by_due_date() -> Promise(Nil) {
   })
 }
 
-fn reset_store() -> Promise(Nil) {
-  http.reset(default_port)
-  |> promise.map(fn(result) {
-    case result {
-      Ok(http.DispatchOk) -> io.println("✓ Event store reset")
-      Ok(http.DispatchError(reason)) -> io.println("✗ Failed: " <> reason)
-      Error(reason) -> io.println("✗ " <> reason)
-    }
-  })
-}
-
 // --- Display ---
 
 fn print_todo_view(item: views.TodoView) -> Nil {
@@ -371,7 +359,8 @@ fn print_help() -> Nil {
   io.println(
     "  todo list by-due-date                 Sort by due date",
   )
-  io.println("  todo reset                            Reset event store")
+  io.println("")
+  io.println("Reset the event store by restarting the server with --reset")
   io.println("")
   io.println("Priorities: low, medium, high, critical")
   io.println("Due date format: YYYY-MM-DD")

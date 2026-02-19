@@ -38,22 +38,6 @@ pub fn dispatch(
   })
 }
 
-/// Reset the event store
-pub fn reset(port: Int) -> Promise(Result(DispatchResult, String)) {
-  post(port, "/reset", "")
-  |> promise.map(fn(result) {
-    case result {
-      Ok(resp_body) -> {
-        case codec.decode_dispatch_result(resp_body) {
-          Ok(True) -> Ok(DispatchOk)
-          _ -> Ok(DispatchError("Failed to reset"))
-        }
-      }
-      Error(_) -> Error(connection_error)
-    }
-  })
-}
-
 /// Get all todos
 pub fn get_all_todos(port: Int) -> Promise(Result(List(TodoView), String)) {
   get_todo_list(port, "/todos")

@@ -14,6 +14,8 @@ argv = ">= 1.0.2 and < 2.0.0"
 mist = ">= 5.0.4 and < 6.0.0"
 instructed = { path = "../../instructed" }
 instructed_sqlite = { path = "../../instructed-sqlite" }
+instructed_postgres = { path = "../../instructed-postgres" }
+pog = ">= 4.1.0 and < 5.0.0"
 todo_shared = { path = "../shared" }
 
 [dev-dependencies]

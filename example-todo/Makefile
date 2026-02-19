@@ -26,6 +26,6 @@ test:
 
 ## Remove build artifacts
 clean:
-	rm -rf server/build server/todo_events.db*
+	rm -rf server/build .todo
 	rm -rf client/build
 	rm -rf shared/build

@@ -1,4 +1,4 @@
-//// Todo Server - starts the CQRS infrastructure with SQLite persistence
+//// Todo Server - starts the CQRS infrastructure with a pluggable event store
 
 import gleam/erlang/process.{type Subject}
 import gleam/result
@@ -6,10 +6,8 @@ import instructed/error
 import instructed/event_store.{type EventStore}
 import instructed/projection.{type ProjectionMessage}
 import instructed/router.{type DispatchResult, type Router}
-import instructed_sqlite
 import todo_server/aggregate
 import todo_server/projections.{type AllTodosState}
-import todo_server/serialization
 import todo_shared/domain.{type TodoCommand, type TodoEvent}
 import todo_shared/views.{type ByPriorityState, type TodoView}
 
@@ -27,19 +25,8 @@ pub type TodoServer {
   )
 }
 
-/// Start the todo server with SQLite persistence
-pub fn start(db_path: String) -> Result(TodoServer, String) {
-  let sqlite_config =
-    instructed_sqlite.SqliteConfig(
-      db_path: db_path,
-      serialize: serialization.serialize_event,
-      deserialize: serialization.deserialize_event,
-      event_type: serialization.event_type_name,
-    )
-
-  let assert Ok(sqlite_actor) = instructed_sqlite.start(sqlite_config)
-  let store = instructed_sqlite.to_event_store(sqlite_actor)
-
+/// Start the todo server with the given event store
+pub fn start(store: EventStore(TodoEvent)) -> Result(TodoServer, String) {
   let todo_router =
     router.new(
       aggregate: aggregate.todo_aggregate(),
