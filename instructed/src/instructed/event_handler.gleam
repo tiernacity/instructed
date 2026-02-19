@@ -382,12 +382,10 @@ fn handle_error(
 ) {
   case state.config.on_error {
     None -> {
-      // Default: stop on error (matching Commanded's default)
-      // But since we can't easily stop a Gleam actor with a reason,
-      // we ack the event and continue (preventing blocking).
-      // This will be improved with proper supervision in Module 13.
-      ack_event(state, recorded_event)
-      actor.continue(state)
+      // Default: stop on error (matching Commanded's default).
+      // Do NOT ack the event — stopping without ack ensures the event
+      // will be redelivered when the handler restarts.
+      actor.stop()
     }
     Some(error_fn) -> {
       case error_fn(reason, recorded_event, state.handler_state) {
