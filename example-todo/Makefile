@@ -5,11 +5,11 @@ build: build-server build-client
 
 ## Build the server (Erlang shipment)
 build-server:
-	cd server && gleam export erlang-shipment
+	cd server && gleam build --warnings-as-errors && gleam export erlang-shipment
 
 ## Build the client (Deno/JS)
 build-client:
-	cd client && gleam build
+	cd client && gleam build --warnings-as-errors
 
 ## Run the server (default port 8400)
 run-server:
