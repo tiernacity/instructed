@@ -2,14 +2,16 @@
 
 import gleam/erlang/process.{type Subject}
 import gleam/result
+import instructed/error
 import instructed/event_store.{type EventStore}
 import instructed/projection.{type ProjectionMessage}
 import instructed/router.{type DispatchResult, type Router}
 import instructed_sqlite
-import app/aggregate
-import app/domain.{type TodoCommand, type TodoEvent}
-import app/projections.{type AllTodosState, type ByPriorityState, type TodoView}
-import app/serialization
+import todo_server/aggregate
+import todo_server/projections.{type AllTodosState}
+import todo_server/serialization
+import todo_shared/domain.{type TodoCommand, type TodoEvent}
+import todo_shared/views.{type ByPriorityState, type TodoView}
 
 /// Server state holding all references
 pub type TodoServer {
@@ -27,7 +29,6 @@ pub type TodoServer {
 
 /// Start the todo server with SQLite persistence
 pub fn start(db_path: String) -> Result(TodoServer, String) {
-  // Create SQLite event store config
   let sqlite_config =
     instructed_sqlite.SqliteConfig(
       db_path: db_path,
@@ -36,11 +37,9 @@ pub fn start(db_path: String) -> Result(TodoServer, String) {
       event_type: serialization.event_type_name,
     )
 
-  // Start the SQLite event store actor
   let assert Ok(sqlite_actor) = instructed_sqlite.start(sqlite_config)
   let store = instructed_sqlite.to_event_store(sqlite_actor)
 
-  // Create router
   let todo_router =
     router.new(
       aggregate: aggregate.todo_aggregate(),
@@ -59,7 +58,6 @@ pub fn start(db_path: String) -> Result(TodoServer, String) {
     )
     |> router.with_prefix("todo-")
 
-  // Start projections
   let today = get_today()
 
   use active <- result.try(
@@ -144,5 +142,3 @@ pub fn get_by_due_date(server: TodoServer) -> List(TodoView) {
 fn get_today() -> String {
   "2026-02-17"
 }
-
-import instructed/error

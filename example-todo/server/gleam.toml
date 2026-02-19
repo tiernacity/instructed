@@ -1,6 +1,6 @@
-name = "example_todo"
+name = "example_todo_server"
 version = "1.0.0"
-description = "Example Todo App using Instructed CQRS/ES framework"
+description = "Todo Server - CQRS/ES HTTP server backed by SQLite"
 target = "erlang"
 
 [dependencies]
@@ -9,10 +9,12 @@ gleam_erlang = ">= 1.3.0 and < 2.0.0"
 gleam_otp = ">= 1.2.0 and < 2.0.0"
 gleam_json = ">= 3.1.0 and < 4.0.0"
 gleam_time = ">= 1.7.0 and < 2.0.0"
+gleam_http = ">= 4.3.0 and < 5.0.0"
 argv = ">= 1.0.2 and < 2.0.0"
-youid = ">= 1.5.1 and < 2.0.0"
-instructed = { path = "../instructed" }
-instructed_sqlite = { path = "../instructed-sqlite" }
+mist = ">= 5.0.4 and < 6.0.0"
+instructed = { path = "../../instructed" }
+instructed_sqlite = { path = "../../instructed-sqlite" }
+todo_shared = { path = "../shared" }
 
 [dev-dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

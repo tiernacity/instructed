@@ -1,9 +1,9 @@
-//// JSON serialization for todo events
+//// JSON serialization for todo events (event store persistence)
 
 import gleam/dynamic/decode
 import gleam/json
 import gleam/string
-import app/domain.{
+import todo_shared/domain.{
   type TodoEvent, Critical, DueDateUpdated, DescriptionUpdated, High, Low, Medium,
   PriorityUpdated, TodoCompleted, TodoCreated, TodoDeleted, TodoReopened,
 }

@@ -1,0 +1,3 @@
+#!/bin/sh
+BASE="$(dirname "$0")/client/build/dev/javascript/example_todo_client"
+exec deno run --allow-net --allow-read "$BASE/gleam.main.mjs" "$@"

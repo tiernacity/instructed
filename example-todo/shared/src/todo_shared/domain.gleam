@@ -93,3 +93,13 @@ pub fn status_to_string(s: Status) -> String {
     Deleted -> "deleted"
   }
 }
+
+/// Parse status from string
+pub fn status_from_string(s: String) -> Result(Status, String) {
+  case s {
+    "active" -> Ok(Active)
+    "completed" -> Ok(Completed)
+    "deleted" -> Ok(Deleted)
+    _ -> Error("Invalid status: " <> s)
+  }
+}

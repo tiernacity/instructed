@@ -1,18 +1,31 @@
-.PHONY: build run test clean
+.PHONY: build build-server build-client run-server run-client test clean
 
-## Build the 'todo' binary executable (escript)
-build:
-	gleam export erlang-shipment
-	escript build_escript.erl
+## Build both server and client
+build: build-server build-client
 
-## Run the project via gleam
-run:
-	gleam run
+## Build the server (Erlang shipment)
+build-server:
+	cd server && gleam export erlang-shipment
+
+## Build the client (Deno/JS)
+build-client:
+	cd client && gleam build
+
+## Run the server (default port 8400)
+run-server:
+	./todo-server
+
+## Run the client (pass ARGS, e.g. make run-client ARGS="add 'Buy milk' high")
+run-client:
+	./todo $(ARGS)
 
 ## Run tests
 test:
-	gleam test
+	cd server && gleam test
+	cd client && gleam test
 
-## Remove build artifacts and the binary
+## Remove build artifacts
 clean:
-	rm -rf build todo
+	rm -rf server/build server/todo_events.db*
+	rm -rf client/build
+	rm -rf shared/build

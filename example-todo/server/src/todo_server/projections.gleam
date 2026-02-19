@@ -1,29 +1,17 @@
 //// Projections (read models) for the todo application.
-//// Multiple views built from the same event stream.
 
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/order
 import gleam/string
 import instructed/projection.{type ProjectionConfig}
-import app/domain.{
-  type Priority, type TodoEvent, Active, Completed, Critical,
-  Deleted, DescriptionUpdated, DueDateUpdated, High, Low, Medium,
+import todo_shared/domain.{
+  type TodoEvent, Active, Completed,
+  Deleted, DescriptionUpdated, DueDateUpdated, Medium,
   PriorityUpdated, TodoCompleted, TodoCreated, TodoDeleted, TodoReopened,
 }
-
-/// A read-model todo item (for projections)
-pub type TodoView {
-  TodoView(
-    id: String,
-    description: String,
-    priority: Priority,
-    due_date: String,
-    status: domain.Status,
-    created_at: String,
-    completed_at: String,
-  )
-}
+import todo_shared/views.{type ByPriorityState, type TodoView, ByPriorityState, TodoView}
 
 /// State for the all-todos projection
 pub type AllTodosState =
@@ -50,7 +38,6 @@ pub fn active_todos_projection() -> ProjectionConfig(TodoEvent, AllTodosState) {
           Ok(update_view(state, id, fn(v) { TodoView(..v, due_date: due_date) }))
         TodoCompleted(id, _) -> Ok(dict.delete(state, id))
         TodoReopened(id) -> {
-          // Would need to reconstruct from events; for simplicity, skip
           let _ = id
           Ok(state)
         }
@@ -71,7 +58,6 @@ pub fn completed_todos_projection() -> ProjectionConfig(
     handle_event: fn(event, _recorded, state: AllTodosState) {
       case event {
         TodoCreated(id, desc, priority, due_date, created_at) -> {
-          // Store metadata but don't show until completed
           let view =
             TodoView(id, desc, priority, due_date, Active, created_at, "")
           Ok(dict.insert(state, "pending:" <> id, view))
@@ -184,7 +170,6 @@ pub fn overdue_todos_projection(
                 TodoView(id, desc, priority, due_date, Active, created_at, ""),
               ))
             False -> {
-              // Store for later checking
               Ok(dict.insert(
                 state,
                 "maybe:" <> id,
@@ -226,15 +211,6 @@ pub fn overdue_todos_projection(
 }
 
 /// By priority projection - groups todos by priority level
-pub type ByPriorityState {
-  ByPriorityState(
-    critical: List(TodoView),
-    high: List(TodoView),
-    medium: List(TodoView),
-    low: List(TodoView),
-  )
-}
-
 pub fn by_priority_projection() -> ProjectionConfig(
   TodoEvent,
   ByPriorityState,
@@ -326,11 +302,11 @@ fn is_overdue(due_date: String, today: String) -> Bool {
 
 fn add_to_priority(state: ByPriorityState, view: TodoView) -> ByPriorityState {
   case view.priority {
-    Critical ->
+    domain.Critical ->
       ByPriorityState(..state, critical: [view, ..state.critical])
-    High -> ByPriorityState(..state, high: [view, ..state.high])
-    Medium -> ByPriorityState(..state, medium: [view, ..state.medium])
-    Low -> ByPriorityState(..state, low: [view, ..state.low])
+    domain.High -> ByPriorityState(..state, high: [view, ..state.high])
+    domain.Medium -> ByPriorityState(..state, medium: [view, ..state.medium])
+    domain.Low -> ByPriorityState(..state, low: [view, ..state.low])
   }
 }
 
@@ -350,12 +326,9 @@ fn find_view_in_priorities(
   _state: ByPriorityState,
   _id: String,
 ) -> option.Option(TodoView) {
-  // Simplified - return None as we already removed it
   None
 }
 
 fn sort_by_due_date(todos: List(TodoView)) -> List(TodoView) {
   list.sort(todos, fn(a, b) { string.compare(a.due_date, b.due_date) })
 }
-
-import gleam/order

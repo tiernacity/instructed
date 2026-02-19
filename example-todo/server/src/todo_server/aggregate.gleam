@@ -2,7 +2,7 @@
 
 import gleam/option.{None, Some}
 import instructed/aggregate.{type Aggregate}
-import app/domain.{
+import todo_shared/domain.{
   type Todo, type TodoCommand, type TodoEvent, Active, Completed,
   CompleteTodo, CreateTodo, Deleted, DeleteTodo, DescriptionUpdated,
   DueDateUpdated, PriorityUpdated, ReopenTodo, Todo,
