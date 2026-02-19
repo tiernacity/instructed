@@ -236,105 +236,8 @@ fn handle_projection_message(
               )
             }
             Error(reason) -> {
-              // Handle error via callback or skip
-              case state.config.on_error {
-                None -> {
-                  // Default: skip and continue (projections shouldn't block)
-                  ack_event(state, recorded_event)
-                  actor.continue(
-                    ProjectionActorState(
-                      ..state,
-                      last_seen_event: Some(recorded_event.event_number),
-                    ),
-                  )
-                }
-                Some(error_fn) -> {
-                  case error_fn(reason, recorded_event, state.state) {
-                    error.Skip -> {
-                      ack_event(state, recorded_event)
-                      actor.continue(
-                        ProjectionActorState(
-                          ..state,
-                          last_seen_event: Some(recorded_event.event_number),
-                        ),
-                      )
-                    }
-                    error.Retry(new_state) -> {
-                      case
-                        state.config.handle_event(
-                          recorded_event.data,
-                          recorded_event,
-                          new_state,
-                        )
-                      {
-                        Ok(final_state) -> {
-                          ack_event(state, recorded_event)
-                          actor.continue(
-                            ProjectionActorState(
-                              ..state,
-                              state: final_state,
-                              last_seen_event: Some(
-                                recorded_event.event_number,
-                              ),
-                            ),
-                          )
-                        }
-                        Error(_) -> {
-                          ack_event(state, recorded_event)
-                          actor.continue(
-                            ProjectionActorState(
-                              ..state,
-                              state: new_state,
-                              last_seen_event: Some(
-                                recorded_event.event_number,
-                              ),
-                            ),
-                          )
-                        }
-                      }
-                    }
-                    error.RetryWithDelay(delay_ms, new_state) -> {
-                      process.sleep(delay_ms)
-                      case
-                        state.config.handle_event(
-                          recorded_event.data,
-                          recorded_event,
-                          new_state,
-                        )
-                      {
-                        Ok(final_state) -> {
-                          ack_event(state, recorded_event)
-                          actor.continue(
-                            ProjectionActorState(
-                              ..state,
-                              state: final_state,
-                              last_seen_event: Some(
-                                recorded_event.event_number,
-                              ),
-                            ),
-                          )
-                        }
-                        Error(_) -> {
-                          ack_event(state, recorded_event)
-                          actor.continue(
-                            ProjectionActorState(
-                              ..state,
-                              state: new_state,
-                              last_seen_event: Some(
-                                recorded_event.event_number,
-                              ),
-                            ),
-                          )
-                        }
-                      }
-                    }
-                    error.Stop(_) -> {
-                      ack_event(state, recorded_event)
-                      actor.stop()
-                    }
-                  }
-                }
-              }
+              // Error handling: delegate to handle_projection_error
+              handle_projection_error(state, reason, recorded_event)
             }
           }
         }
@@ -344,6 +247,103 @@ fn handle_projection_message(
     GetState(reply) -> {
       process.send(reply, state.state)
       actor.continue(state)
+    }
+  }
+}
+
+/// Handle a projection event processing error using the configured error callback.
+/// Matches the same semantics as event_handler: stop by default, recursive retry.
+fn handle_projection_error(
+  state: ProjectionActorState(event, projection_state),
+  reason: String,
+  recorded_event: RecordedEvent(event),
+) -> actor.Next(
+  ProjectionActorState(event, projection_state),
+  ProjectionMessage(event, projection_state),
+) {
+  case state.config.on_error {
+    None -> {
+      // Default: stop on error (matching Commanded's default behavior).
+      // Do NOT ack the event so it can be redelivered on restart.
+      actor.stop()
+    }
+    Some(error_fn) -> {
+      case error_fn(reason, recorded_event, state.state) {
+        error.Skip -> {
+          ack_event(state, recorded_event)
+          actor.continue(
+            ProjectionActorState(
+              ..state,
+              last_seen_event: Some(recorded_event.event_number),
+            ),
+          )
+        }
+        error.Retry(new_state) -> {
+          // Retry with updated state. If retry also fails, call on_error
+          // again recursively (matching Commanded's recursive retry).
+          let updated_state =
+            ProjectionActorState(..state, state: new_state)
+          case
+            state.config.handle_event(
+              recorded_event.data,
+              recorded_event,
+              new_state,
+            )
+          {
+            Ok(final_state) -> {
+              ack_event(state, recorded_event)
+              actor.continue(
+                ProjectionActorState(
+                  ..state,
+                  state: final_state,
+                  last_seen_event: Some(recorded_event.event_number),
+                ),
+              )
+            }
+            Error(retry_reason) -> {
+              handle_projection_error(
+                updated_state,
+                retry_reason,
+                recorded_event,
+              )
+            }
+          }
+        }
+        error.RetryWithDelay(delay_ms, new_state) -> {
+          process.sleep(delay_ms)
+          let updated_state =
+            ProjectionActorState(..state, state: new_state)
+          case
+            state.config.handle_event(
+              recorded_event.data,
+              recorded_event,
+              new_state,
+            )
+          {
+            Ok(final_state) -> {
+              ack_event(state, recorded_event)
+              actor.continue(
+                ProjectionActorState(
+                  ..state,
+                  state: final_state,
+                  last_seen_event: Some(recorded_event.event_number),
+                ),
+              )
+            }
+            Error(retry_reason) -> {
+              handle_projection_error(
+                updated_state,
+                retry_reason,
+                recorded_event,
+              )
+            }
+          }
+        }
+        error.Stop(_) -> {
+          ack_event(state, recorded_event)
+          actor.stop()
+        }
+      }
     }
   }
 }
