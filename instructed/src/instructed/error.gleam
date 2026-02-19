@@ -4,6 +4,8 @@
 //// patterns, but using Gleam's type system instead of Erlang's dynamic
 //// error tuples.
 
+import gleam/int
+
 /// Errors that can occur during command dispatch.
 ///
 /// Maps to the various `{:error, reason}` returns from Commanded's
@@ -132,3 +134,59 @@ pub type FailureContext(handler_state) {
     stacktrace: String,
   )
 }
+
+// ---------------------------------------------------------------------------
+// Built-in exponential backoff
+// ---------------------------------------------------------------------------
+
+/// Minimum backoff delay: 1 second (in milliseconds).
+const min_backoff_ms = 1000
+
+/// Maximum backoff delay: 24 hours (in milliseconds).
+const max_backoff_ms = 86_400_000
+
+/// Calculate exponential backoff delay for a given failure count.
+///
+/// Formula: `failures² × 1000` milliseconds, clamped to [1s, 24h].
+///
+/// This matches Commanded's built-in exponential backoff strategy.
+/// Commanded also adds random jitter; use `backoff_with_jitter/1` for that.
+///
+/// ## Examples
+///
+/// ```gleam
+/// backoff(1)  // 1000ms  (1s)
+/// backoff(2)  // 4000ms  (4s)
+/// backoff(3)  // 9000ms  (9s)
+/// backoff(10) // 100000ms (100s)
+/// ```
+pub fn backoff(failure_count: Int) -> Int {
+  let delay = failure_count * failure_count * 1000
+  int.clamp(delay, min_backoff_ms, max_backoff_ms)
+}
+
+/// Calculate exponential backoff delay with random jitter.
+///
+/// Formula: `failures² × 1000 + random(0..1000)` ms, clamped to [1s, 24h].
+///
+/// The jitter prevents thundering herd when multiple handlers retry
+/// simultaneously. Matches Commanded's backoff strategy.
+///
+/// ## Example usage in an error callback
+///
+/// ```gleam
+/// fn on_error(reason, _event, state) {
+///   let failure_count = state.failures + 1
+///   let delay = error.backoff_with_jitter(failure_count)
+///   error.RetryWithDelay(delay, MyState(..state, failures: failure_count))
+/// }
+/// ```
+pub fn backoff_with_jitter(failure_count: Int) -> Int {
+  let base = failure_count * failure_count * 1000
+  let jitter = random_jitter_ms()
+  int.clamp(base + jitter, min_backoff_ms, max_backoff_ms)
+}
+
+/// Random jitter between 0 and 1000 milliseconds.
+@external(erlang, "instructed_error_ffi", "random_jitter_ms")
+fn random_jitter_ms() -> Int
