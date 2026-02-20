@@ -98,6 +98,10 @@ pub type Aggregate(state, command, event) {
     /// This must never fail — events are facts that have already occurred.
     /// Equivalent to Commanded's `apply/2` callback.
     apply_event: fn(state, event) -> state,
+    /// Function to derive a type name string from an event value.
+    /// Used when persisting events to the event store (Fix 5).
+    /// Returns a human-readable, stable string identifying the event type.
+    event_type: fn(event) -> String,
   )
 }
 
@@ -117,7 +121,27 @@ pub fn new(
   execute execute: fn(state, command) -> Result(List(event), String),
   apply_event apply_event: fn(state, event) -> state,
 ) -> Aggregate(state, command, event) {
-  Aggregate(empty_state:, execute:, apply_event:)
+  Aggregate(empty_state:, execute:, apply_event:, event_type: fn(_) { "" })
+}
+
+/// Create a new aggregate definition with a custom event_type function.
+/// The event_type function derives a type name string from each event,
+/// used when persisting events to the event store.
+pub fn new_with_event_type(
+  empty_state empty_state: fn() -> state,
+  execute execute: fn(state, command) -> Result(List(event), String),
+  apply_event apply_event: fn(state, event) -> state,
+  event_type event_type: fn(event) -> String,
+) -> Aggregate(state, command, event) {
+  Aggregate(empty_state:, execute:, apply_event:, event_type:)
+}
+
+/// Set the event_type function on an existing aggregate.
+pub fn with_event_type(
+  aggregate: Aggregate(state, command, event),
+  event_type: fn(event) -> String,
+) -> Aggregate(state, command, event) {
+  Aggregate(..aggregate, event_type: event_type)
 }
 
 /// Rebuild aggregate state from a list of events (pure function).

@@ -182,6 +182,9 @@ pub fn start(
       }
 
       // Try to subscribe (don't delete existing - resume from last position)
+      // Subscribe persistently — idempotent (Fix 3).
+      // If subscription already exists, the adapter reconnects with the
+      // existing checkpoint position, preserving the projection's progress.
       case
         event_store.subscribe_persistent(
           "$all",
@@ -196,26 +199,6 @@ pub fn start(
             SetSubscriptionInfo(event_store, subscription),
           )
           Ok(subject)
-        }
-        Error(error.SubscriptionAlreadyExists) -> {
-          let _ = event_store.delete_subscription("$all", config.name)
-          case
-            event_store.subscribe_persistent(
-              "$all",
-              config.name,
-              config.start_from,
-              handler,
-            )
-          {
-            Ok(subscription) -> {
-              process.send(
-                subject,
-                SetSubscriptionInfo(event_store, subscription),
-              )
-              Ok(subject)
-            }
-            Error(_) -> Error("Failed to create subscription")
-          }
         }
         Error(_) -> Error("Failed to create subscription")
       }

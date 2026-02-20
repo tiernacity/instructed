@@ -46,6 +46,7 @@ import instructed/aggregate_server
 import instructed/dispatch_result
 import instructed/error.{type DispatchError}
 import instructed/event_store.{type EventStore}
+import instructed/lifespan.{type Lifespan}
 import instructed/middleware.{type Middleware, type Pipeline}
 import instructed/snapshot
 import instructed/subscriptions.{type SubMessage}
@@ -70,6 +71,8 @@ pub type Router(state, command, event) {
     retry_attempts: Int,
     /// Optional snapshot configuration
     snapshot_every: Option(Int),
+    /// Optional lifespan configuration for aggregate servers.
+    lifespan: Option(Lifespan(state, command, event)),
     /// Dispatch timeout in milliseconds.
     /// Default: 5000 (matches Commanded, Invariant 17).
     dispatch_timeout: Int,
@@ -107,6 +110,7 @@ pub fn new(
     middleware: [],
     retry_attempts: 10,
     snapshot_every: None,
+    lifespan: None,
     dispatch_timeout: 5000,
     registry: registry,
     subscriptions: None,
@@ -143,6 +147,14 @@ pub fn with_dispatch_timeout(
   timeout: Int,
 ) -> Router(state, command, event) {
   Router(..router, dispatch_timeout: timeout)
+}
+
+/// Set the lifespan configuration for aggregate servers.
+pub fn with_lifespan(
+  router: Router(state, command, event),
+  lifespan: Lifespan(state, command, event),
+) -> Router(state, command, event) {
+  Router(..router, lifespan: Some(lifespan))
 }
 
 /// Set snapshot interval.
@@ -332,6 +344,7 @@ pub opaque type RegistryMessage(state, command, event) {
     event_store: EventStore(event),
     retry_attempts: Int,
     snapshot_every: Option(Int),
+    lifespan: Option(Lifespan(state, command, event)),
     reply: Subject(
       Result(
         Subject(
@@ -373,48 +386,102 @@ fn handle_registry_message(
   RegistryMessage(state, command, event),
 ) {
   case msg {
-    GetOrStart(stream_id, aggregate, event_store, retry_attempts, snapshot_every, reply) -> {
+    GetOrStart(stream_id, aggregate, event_store, retry_attempts, snapshot_every, lifespan, reply) -> {
       case dict.get(state.servers, stream_id) {
         Ok(server) -> {
-          process.send(reply, Ok(server))
-          actor.continue(state)
-        }
-        Error(_) -> {
-          // Start a new aggregate server
-          let snap_config = case snapshot_every {
-            Some(n) ->
-              snapshot.SnapshotConfig(
-                snapshot_every: Some(n),
-                snapshot_version: 1,
-              )
-            None -> snapshot.default_config()
-          }
-
-          let config =
-            aggregate_server.new_config(
-              aggregate: aggregate,
-              event_store: event_store,
-              stream_id: stream_id,
-            )
-            |> aggregate_server.with_retry_attempts(retry_attempts)
-            |> aggregate_server.with_snapshot_config(snap_config)
-
-          case aggregate_server.start(config) {
-            Ok(server) -> {
-              let new_state =
-                RegistryState(
-                  servers: dict.insert(state.servers, stream_id, server),
-                )
-              process.send(reply, Ok(server))
-              actor.continue(new_state)
+          // Check if the server process is still alive.
+          // When an aggregate server stops (lifespan timeout, crash, etc.),
+          // the registry still holds a stale Subject. Without this check,
+          // subsequent commands would hang until timeout on the dead process.
+          case process.subject_owner(server) {
+            Ok(pid) -> {
+              case process.is_alive(pid) {
+                True -> {
+                  process.send(reply, Ok(server))
+                  actor.continue(state)
+                }
+                False -> {
+                  // Server is dead — remove stale entry and start a new one
+                  let cleaned_state =
+                    RegistryState(
+                      servers: dict.delete(state.servers, stream_id),
+                    )
+                  start_new_server(cleaned_state, stream_id, aggregate, event_store, retry_attempts, snapshot_every, lifespan, reply)
+                }
+              }
             }
             Error(_) -> {
-              process.send(reply, Error("Failed to start aggregate server"))
-              actor.continue(state)
+              // Can't determine owner — remove and restart
+              let cleaned_state =
+                RegistryState(
+                  servers: dict.delete(state.servers, stream_id),
+                )
+              start_new_server(cleaned_state, stream_id, aggregate, event_store, retry_attempts, snapshot_every, lifespan, reply)
             }
           }
         }
+        Error(_) -> {
+          start_new_server(state, stream_id, aggregate, event_store, retry_attempts, snapshot_every, lifespan, reply)
+        }
       }
+    }
+  }
+}
+
+/// Start a new aggregate server and register it in the registry state.
+fn start_new_server(
+  state: RegistryState(state, command, event),
+  stream_id: String,
+  aggregate: Aggregate(state, command, event),
+  event_store: EventStore(event),
+  retry_attempts: Int,
+  snapshot_every: Option(Int),
+  lifespan: Option(Lifespan(state, command, event)),
+  reply: Subject(
+    Result(
+      Subject(aggregate_server.ServerMessage(state, command, event)),
+      String,
+    ),
+  ),
+) -> actor.Next(
+  RegistryState(state, command, event),
+  RegistryMessage(state, command, event),
+) {
+  let snap_config = case snapshot_every {
+    Some(n) ->
+      snapshot.SnapshotConfig(
+        snapshot_every: Some(n),
+        snapshot_version: 1,
+      )
+    None -> snapshot.default_config()
+  }
+
+  let config =
+    aggregate_server.new_config(
+      aggregate: aggregate,
+      event_store: event_store,
+      stream_id: stream_id,
+    )
+    |> aggregate_server.with_retry_attempts(retry_attempts)
+    |> aggregate_server.with_snapshot_config(snap_config)
+
+  let config = case lifespan {
+    Some(ls) -> aggregate_server.with_lifespan(config, ls)
+    None -> config
+  }
+
+  case aggregate_server.start(config) {
+    Ok(server) -> {
+      let new_state =
+        RegistryState(
+          servers: dict.insert(state.servers, stream_id, server),
+        )
+      process.send(reply, Ok(server))
+      actor.continue(new_state)
+    }
+    Error(_) -> {
+      process.send(reply, Error("Failed to start aggregate server"))
+      actor.continue(state)
     }
   }
 }
@@ -436,6 +503,7 @@ fn get_or_start_server(
           router.event_store,
           router.retry_attempts,
           router.snapshot_every,
+          router.lifespan,
           reply,
         )
       })

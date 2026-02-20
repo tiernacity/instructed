@@ -7,7 +7,6 @@
 import instructed/conformance/test_event.{type TestEvent, Created, Updated, evt}
 import gleam/erlang/process
 import instructed/conformance/assertions as should
-import instructed/error
 import instructed/event.{type RecordedEvent}
 import instructed/event_store.{
   type EventStore, ExactVersion, NoStream, Origin,
@@ -203,8 +202,10 @@ pub fn test_duplicate_subscription_name(
   let assert Ok(_) =
     store.subscribe_persistent("$all", "dup-sub", Origin, noop)
 
+  // Idempotent reconnect: second subscribe with same name should succeed,
+  // preserving checkpoint position and updating handler (Fix 3).
   let result = store.subscribe_persistent("$all", "dup-sub", Origin, noop)
-  let assert Error(error.SubscriptionAlreadyExists) = result
+  let assert Ok(_) = result
   Nil
 }
 

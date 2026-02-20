@@ -298,9 +298,9 @@ pub fn sqlite_subscription_duplicate_test() {
   let assert Ok(_) =
     store.subscribe_persistent("dup-stream", "dup-sub", Origin, noop)
 
-  // Second subscribe with same name → SubscriptionAlreadyExists
+  // Second subscribe with same name → idempotent reconnect (Fix 3)
   let result = store.subscribe_persistent("dup-stream", "dup-sub", Origin, noop)
-  should.be_error(result)
+  should.be_ok(result)
 }
 
 pub fn sqlite_delete_subscription_test() {

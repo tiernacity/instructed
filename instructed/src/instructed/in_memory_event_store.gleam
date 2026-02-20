@@ -31,7 +31,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import instructed/error.{
   type EventStoreError, SnapshotNotFound, StreamAlreadyExists,
-  StreamNotFound, SubscriptionAlreadyExists, SubscriptionNotFound,
+  StreamNotFound, SubscriptionNotFound,
   VersionConflict,
 }
 import instructed/event.{type EventData, type RecordedEvent, RecordedEvent}
@@ -67,7 +67,13 @@ type StoreState(event) {
 }
 
 type TransientSub(event) {
-  TransientSub(id: String, handler: fn(RecordedEvent(event)) -> Nil)
+  TransientSub(
+    id: String,
+    handler: fn(RecordedEvent(event)) -> Nil,
+    /// Optional PID of the owning process. Used for lazy cleanup
+    /// of dead transient subscribers (Fix 6).
+    owner_pid: Option(process.Pid),
+  )
 }
 
 /// A persistent subscription tracks:
@@ -106,11 +112,13 @@ pub opaque type Message(event) {
   )
   SubscribeAll(
     handler: fn(RecordedEvent(event)) -> Nil,
+    owner_pid: Option(process.Pid),
     reply: Subject(Result(Subscription, EventStoreError)),
   )
   SubscribeStream(
     stream_id: String,
     handler: fn(RecordedEvent(event)) -> Nil,
+    owner_pid: Option(process.Pid),
     reply: Subject(Result(Subscription, EventStoreError)),
   )
   SubscribePersistent(
@@ -177,11 +185,11 @@ fn handle_message(
     ReadAll(start_number, reply) ->
       handle_read_all(state, start_number, reply)
 
-    SubscribeAll(handler, reply) ->
-      handle_subscribe_all(state, handler, reply)
+    SubscribeAll(handler, owner_pid, reply) ->
+      handle_subscribe_all(state, handler, owner_pid, reply)
 
-    SubscribeStream(stream_id, handler, reply) ->
-      handle_subscribe_stream(state, stream_id, handler, reply)
+    SubscribeStream(stream_id, handler, owner_pid, reply) ->
+      handle_subscribe_stream(state, stream_id, handler, owner_pid, reply)
 
     SubscribePersistent(stream, name, start_from, handler, reply) ->
       handle_subscribe_persistent(
@@ -284,16 +292,21 @@ fn handle_append(
         dict.insert(state.streams, stream_id, new_stream_events)
       let new_all = list.append(state.all_events, recorded)
 
-      // Notify transient subscribers (non-blocking callbacks)
-      list.each(state.all_subscribers, fn(sub) {
+      // Notify transient subscribers (non-blocking callbacks).
+      // Lazy cleanup: filter out subscribers whose owner process is dead (Fix 6).
+      let live_all_subs = filter_live_subscribers(state.all_subscribers)
+      list.each(live_all_subs, fn(sub) {
         list.each(recorded, fn(evt) { sub.handler(evt) })
       })
-      case dict.get(state.stream_subscribers, stream_id) {
-        Ok(subs) ->
-          list.each(subs, fn(sub) {
+      let live_stream_subs = case dict.get(state.stream_subscribers, stream_id) {
+        Ok(subs) -> {
+          let live = filter_live_subscribers(subs)
+          list.each(live, fn(sub) {
             list.each(recorded, fn(evt) { sub.handler(evt) })
           })
-        Error(_) -> Nil
+          live
+        }
+        Error(_) -> []
       }
 
       // Queue events for persistent subscribers and deliver if available
@@ -319,6 +332,12 @@ fn handle_append(
           }
         })
 
+      // Update stream_subscribers with cleaned list (Fix 6 lazy cleanup)
+      let new_stream_subscribers = case live_stream_subs {
+        [] -> state.stream_subscribers
+        _ -> dict.insert(state.stream_subscribers, stream_id, live_stream_subs)
+      }
+
       let new_state =
         StoreState(
           ..state,
@@ -326,6 +345,8 @@ fn handle_append(
           streams: new_streams,
           next_event_number: next_num,
           persistent_subs: new_persistent_subs,
+          all_subscribers: live_all_subs,
+          stream_subscribers: new_stream_subscribers,
         )
       process.send(reply, Ok(current_version + list.length(recorded)))
       actor.continue(new_state)
@@ -392,13 +413,28 @@ fn handle_read_all(
 
 // --- Transient Subscriptions ---
 
+/// Lazy cleanup of dead transient subscribers (Fix 6).
+/// Filters out subscribers whose owner process is no longer alive.
+/// Subscribers without an owner_pid are kept (no cleanup possible).
+fn filter_live_subscribers(
+  subs: List(TransientSub(event)),
+) -> List(TransientSub(event)) {
+  list.filter(subs, fn(sub) {
+    case sub.owner_pid {
+      None -> True
+      Some(pid) -> process.is_alive(pid)
+    }
+  })
+}
+
 fn handle_subscribe_all(
   state: StoreState(event),
   handler: fn(RecordedEvent(event)) -> Nil,
+  owner_pid: Option(process.Pid),
   reply: Subject(Result(Subscription, EventStoreError)),
 ) -> actor.Next(StoreState(event), Message(event)) {
   let sub_id = "sub-" <> int.to_string(state.next_sub_id)
-  let sub = TransientSub(id: sub_id, handler: handler)
+  let sub = TransientSub(id: sub_id, handler: handler, owner_pid: owner_pid)
   let new_state =
     StoreState(
       ..state,
@@ -413,10 +449,11 @@ fn handle_subscribe_stream(
   state: StoreState(event),
   stream_id: String,
   handler: fn(RecordedEvent(event)) -> Nil,
+  owner_pid: Option(process.Pid),
   reply: Subject(Result(Subscription, EventStoreError)),
 ) -> actor.Next(StoreState(event), Message(event)) {
   let sub_id = "sub-" <> int.to_string(state.next_sub_id)
-  let sub = TransientSub(id: sub_id, handler: handler)
+  let sub = TransientSub(id: sub_id, handler: handler, owner_pid: owner_pid)
   let existing = case dict.get(state.stream_subscribers, stream_id) {
     Ok(s) -> s
     Error(_) -> []
@@ -448,9 +485,24 @@ fn handle_subscribe_persistent(
 ) -> actor.Next(StoreState(event), Message(event)) {
   let key = stream <> ":" <> name
   case dict.get(state.persistent_subs, key) {
-    Ok(_) -> {
-      process.send(reply, Error(SubscriptionAlreadyExists))
-      actor.continue(state)
+    Ok(existing) -> {
+      // Idempotent reconnect: update the handler callback but preserve
+      // the checkpoint position. This allows handlers/PMs to restart
+      // and re-attach without losing their position (Fix 3).
+      let reconnected =
+        PersistentSub(
+          ..existing,
+          handler: handler,
+        )
+      // Deliver any pending events with the new handler
+      let reconnected = maybe_deliver_next(reconnected)
+      let new_state =
+        StoreState(
+          ..state,
+          persistent_subs: dict.insert(state.persistent_subs, key, reconnected),
+        )
+      process.send(reply, Ok(Subscription(id: key)))
+      actor.continue(new_state)
     }
     Error(_) -> {
       let checkpoint = case start_from {
@@ -754,13 +806,15 @@ pub fn to_event_store(
       })
     },
     subscribe: fn(handler) {
+      let caller_pid = process.self()
       process.call(subject, call_timeout, fn(reply) {
-        SubscribeAll(handler, reply)
+        SubscribeAll(handler, Some(caller_pid), reply)
       })
     },
     subscribe_to_stream: fn(stream_id, handler) {
+      let caller_pid = process.self()
       process.call(subject, call_timeout, fn(reply) {
-        SubscribeStream(stream_id, handler, reply)
+        SubscribeStream(stream_id, handler, Some(caller_pid), reply)
       })
     },
     subscribe_persistent: fn(stream, name, start_from, handler) {

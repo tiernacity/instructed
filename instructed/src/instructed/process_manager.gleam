@@ -305,13 +305,11 @@ pub fn start(
 
       // Register with the subscriptions actor so strong-consistency waiters
       // know about this process manager (Invariant 11).
-      // Also register the PM's PID for automatic dispatcher exclusion:
-      // if this PM dispatches a command with strong consistency,
-      // it will be excluded from the wait to prevent deadlock.
+      // Note: register_pid is done inside the actor (SetSubscriptionInfo handler)
+      // to capture the actor's own PID, not the spawning process's PID (Fix 2).
       case config.subscriptions {
         Some(subs) -> {
           subscriptions.register(subs, config.name, config.consistency)
-          subscriptions.register_pid(subs, process.self(), config.name)
         }
         None -> Nil
       }
@@ -325,8 +323,9 @@ pub fn start(
         process.send(subject, PMHandleEvent(ev))
       }
 
-      // Subscribe persistently — do NOT delete existing subscription on restart.
-      // If subscription already exists, it resumes from last ack'd position.
+      // Subscribe persistently — idempotent (Fix 3).
+      // If subscription already exists, the adapter reconnects with the
+      // existing checkpoint position, preserving the PM's progress.
       case
         event_store.subscribe_persistent(
           "$all",
@@ -336,33 +335,17 @@ pub fn start(
         )
       {
         Ok(subscription) -> {
+          // RACE CONDITION NOTE (Fix 7): Same race as in event_handler.gleam.
+          // SetSubscriptionInfo is sent asynchronously after actor start.
+          // If an event arrives before processing, event_store/subscription
+          // will be None and ack_event is a no-op (event redelivered on restart).
+          // Extremely unlikely in practice due to Erlang mailbox ordering.
+          // See event_handler.gleam for detailed analysis.
           process.send(
             subject,
             SetSubscriptionInfo(event_store, subscription),
           )
           Ok(subject)
-        }
-        Error(error.SubscriptionAlreadyExists) -> {
-          // Subscription exists — delete and recreate (in-memory adapter only).
-          // In production adapters, position is preserved by the adapter itself.
-          let _ = event_store.delete_subscription("$all", config.name)
-          case
-            event_store.subscribe_persistent(
-              "$all",
-              config.name,
-              Origin,
-              handler,
-            )
-          {
-            Ok(subscription) -> {
-              process.send(
-                subject,
-                SetSubscriptionInfo(event_store, subscription),
-              )
-              Ok(subject)
-            }
-            Error(_) -> Error("Failed to create subscription after delete")
-          }
         }
         Error(_) -> Error("Failed to start process manager")
       }
@@ -380,10 +363,18 @@ fn handle_pm_message(
   msg: PMMessage(event),
 ) -> actor.Next(PMRouterState(event, command, pm_state), PMMessage(event)) {
   case msg {
-    SetSubscriptionInfo(es, sub) ->
+    SetSubscriptionInfo(es, sub) -> {
+      // Register the actor's PID (not the spawner's PID) for automatic
+      // dispatcher exclusion in strong-consistency waits (Fix 2).
+      case state.config.subscriptions {
+        Some(subs) ->
+          subscriptions.register_pid(subs, process.self(), state.config.name)
+        None -> Nil
+      }
       actor.continue(
         PMRouterState(..state, event_store: Some(es), subscription: Some(sub)),
       )
+    }
 
     PMHandleEvent(recorded_event) -> {
       let new_state = route_event(state, recorded_event)
@@ -421,9 +412,8 @@ fn route_event(
     }
 
     Start(uuid) -> {
-      let new_state = start_or_continue_instance(state, uuid, recorded_event, False)
-      ack_event(new_state, recorded_event)
-      new_state
+      let result = start_or_continue_instance(state, uuid, recorded_event, False)
+      ack_if_ok(result, recorded_event)
     }
 
     StartStrict(uuid) -> {
@@ -440,9 +430,8 @@ fn route_event(
           new_state
         }
         False -> {
-          let new_state = start_or_continue_instance(state, uuid, recorded_event, False)
-          ack_event(new_state, recorded_event)
-          new_state
+          let result = start_or_continue_instance(state, uuid, recorded_event, False)
+          ack_if_ok(result, recorded_event)
         }
       }
     }
@@ -450,16 +439,14 @@ fn route_event(
     StartMany(uuids) -> {
       let new_state =
         list.fold(uuids, state, fn(acc, uuid) {
-          start_or_continue_instance(acc, uuid, recorded_event, False)
+          ack_if_ok(start_or_continue_instance(acc, uuid, recorded_event, False), recorded_event)
         })
-      ack_event(new_state, recorded_event)
       new_state
     }
 
     Continue(uuid) -> {
-      let new_state = start_or_continue_instance(state, uuid, recorded_event, False)
-      ack_event(new_state, recorded_event)
-      new_state
+      let result = start_or_continue_instance(state, uuid, recorded_event, False)
+      ack_if_ok(result, recorded_event)
     }
 
     ContinueStrict(uuid) -> {
@@ -476,9 +463,8 @@ fn route_event(
           new_state
         }
         True -> {
-          let new_state = start_or_continue_instance(state, uuid, recorded_event, False)
-          ack_event(new_state, recorded_event)
-          new_state
+          let result = start_or_continue_instance(state, uuid, recorded_event, False)
+          ack_if_ok(result, recorded_event)
         }
       }
     }
@@ -486,9 +472,8 @@ fn route_event(
     ContinueMany(uuids) -> {
       let new_state =
         list.fold(uuids, state, fn(acc, uuid) {
-          start_or_continue_instance(acc, uuid, recorded_event, False)
+          ack_if_ok(start_or_continue_instance(acc, uuid, recorded_event, False), recorded_event)
         })
-      ack_event(new_state, recorded_event)
       new_state
     }
 
@@ -600,6 +585,7 @@ fn get_or_load_instance(
 }
 
 /// Start or continue processing an event for a given instance UUID.
+/// Returns Ok(new_state) if the event should be acked, Error(new_state) if not.
 ///
 /// Process order (matching Commanded):
 ///   1. handle (get commands)
@@ -611,14 +597,14 @@ fn start_or_continue_instance(
   uuid: String,
   recorded_event: RecordedEvent(event),
   _is_stop: Bool,
-) -> PMRouterState(event, command, pm_state) {
+) -> Result(PMRouterState(event, command, pm_state), PMRouterState(event, command, pm_state)) {
   let instance = get_or_load_instance(state, uuid)
 
   // Per-instance idempotency guard (Invariant 20)
   case instance.last_seen_event {
     Some(last) if recorded_event.event_number <= last -> {
-      // Already processed by this instance — skip
-      state
+      // Already processed by this instance — skip (ack ok)
+      Ok(state)
     }
     _ -> {
       process_instance_event(state, uuid, instance, recorded_event)
@@ -627,17 +613,18 @@ fn start_or_continue_instance(
 }
 
 /// Process an event for a specific instance: handle → dispatch → apply → persist.
+/// Returns Ok(new_state) if the event should be acked, Error(new_state) if not.
 fn process_instance_event(
   state: PMRouterState(event, command, pm_state),
   uuid: String,
   instance: PMInstance(pm_state),
   recorded_event: RecordedEvent(event),
-) -> PMRouterState(event, command, pm_state) {
+) -> Result(PMRouterState(event, command, pm_state), PMRouterState(event, command, pm_state)) {
   case
     state.config.handle(instance.state, recorded_event.data, recorded_event)
   {
     Error(reason) -> {
-      // Event handling error
+      // Event handling error — propagate ack/no-ack decision
       handle_event_error(state, uuid, instance, reason, recorded_event)
     }
 
@@ -672,28 +659,27 @@ fn process_instance_event(
             True -> {
               // after_command requested instance stop
               delete_pm_snapshot(state, uuid)
-              PMRouterState(
+              Ok(PMRouterState(
                 ..state,
                 instances: dict.delete(state.instances, uuid),
-              )
+              ))
             }
             False -> {
               // Save snapshot with event_number as source_version (Invariant 9)
               save_pm_snapshot(state, uuid, new_pm_state, recorded_event)
-              PMRouterState(
+              Ok(PMRouterState(
                 ..state,
                 instances: dict.insert(state.instances, uuid, new_instance),
-              )
+              ))
             }
           }
         }
 
-        // Command dispatch returned a hard stop
+        // Command dispatch returned a hard stop — don't ack
         Error(reason) -> {
           // on_command_error already handled this as CmdStop
-          // Just log and leave state unchanged
           let _ = reason
-          state
+          Error(state)
         }
       }
     }
@@ -856,23 +842,31 @@ fn handle_command_dispatch_error(
 // ---------------------------------------------------------------------------
 
 /// Handle an event handling error using on_event_error callback.
+/// Returns Ok(new_state) if the event should be acked, or Error(new_state)
+/// if the event should NOT be acked (e.g., instance stopped on error).
 fn handle_event_error(
   state: PMRouterState(event, command, pm_state),
   uuid: String,
   instance: PMInstance(pm_state),
   reason: String,
   recorded_event: RecordedEvent(event),
-) -> PMRouterState(event, command, pm_state) {
+) -> Result(PMRouterState(event, command, pm_state), PMRouterState(event, command, pm_state)) {
   case state.config.on_event_error {
-    None ->
-      // Default: skip the event (log and continue)
-      state
+    None -> {
+      // Default: stop the instance on error (matching Commanded's default, Fix 4).
+      // Do NOT ack the event so it can be redelivered if the PM restarts.
+      delete_pm_snapshot(state, uuid)
+      Error(PMRouterState(
+        ..state,
+        instances: dict.delete(state.instances, uuid),
+      ))
+    }
 
     Some(error_fn) -> {
       case error_fn(reason, recorded_event, instance.state) {
         error.Skip -> {
-          // Skip the failed event; don't update state
-          state
+          // Skip the failed event; don't update state but DO ack
+          Ok(state)
         }
 
         error.Retry(new_pm_state) -> {
@@ -888,12 +882,12 @@ fn handle_event_error(
         }
 
         error.Stop(_stop_reason) -> {
-          // Stop this instance — delete its state
+          // Stop this instance — delete its state. Don't ack.
           delete_pm_snapshot(state, uuid)
-          PMRouterState(
+          Error(PMRouterState(
             ..state,
             instances: dict.delete(state.instances, uuid),
-          )
+          ))
         }
       }
     }
@@ -1009,6 +1003,24 @@ fn delete_pm_snapshot(
 // ---------------------------------------------------------------------------
 // Event acknowledgment
 // ---------------------------------------------------------------------------
+
+/// Extract state from a Result and ack the event only on Ok.
+/// On Error, the event is NOT acked (will be redelivered on restart).
+fn ack_if_ok(
+  result: Result(PMRouterState(event, command, pm_state), PMRouterState(event, command, pm_state)),
+  recorded_event: RecordedEvent(event),
+) -> PMRouterState(event, command, pm_state) {
+  case result {
+    Ok(new_state) -> {
+      ack_event(new_state, recorded_event)
+      new_state
+    }
+    Error(new_state) -> {
+      // Don't ack — event will be redelivered
+      new_state
+    }
+  }
+}
 
 fn ack_event(
   state: PMRouterState(event, command, pm_state),

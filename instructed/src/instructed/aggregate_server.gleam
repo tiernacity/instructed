@@ -186,7 +186,13 @@ pub fn start(
     Ok(started) -> {
       let subject = started.data
 
-      // Send self-subject so the actor can schedule lifespan timers
+      // Send self-subject so the actor can schedule lifespan timers.
+      // RACE CONDITION NOTE (Fix 7): SetSelf is sent asynchronously after actor start.
+      // If a command arrives before SetSelf is processed, self_subject will be None
+      // and lifespan timers won't be scheduled for that first command. This is benign:
+      // the next command will have self_subject set and schedule timers normally.
+      // The aggregate functions correctly regardless; only the idle timeout for the
+      // very first command may be missed (extremely unlikely in practice).
       process.send(subject, SetSelf(subject))
 
       // Subscribe to the aggregate's own stream to catch external events.
@@ -394,7 +400,7 @@ fn execute_once(
         list.map(events, fn(evt) {
           EventData(
             data: evt,
-            event_type: "",
+            event_type: state.config.aggregate.event_type(evt),
             causation_id: causation_id,
             correlation_id: correlation_id,
             metadata: metadata,

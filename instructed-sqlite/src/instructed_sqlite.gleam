@@ -33,7 +33,7 @@ import gleam/otp/actor
 import gleam/string
 import instructed/error.{
   type EventStoreError, SnapshotNotFound, StorageError, StreamNotFound,
-  SubscriptionAlreadyExists, SubscriptionNotFound, VersionConflict,
+  SubscriptionNotFound, VersionConflict,
 }
 import instructed/event.{type EventData, type RecordedEvent, RecordedEvent}
 import instructed/event_store.{
@@ -738,8 +738,31 @@ fn handle_subscribe_persistent(
     )
   {
     Ok([_]) -> {
-      process.send(reply, Error(SubscriptionAlreadyExists))
-      state
+      // Idempotent reconnect: update the handler callback but preserve
+      // the checkpoint position (Fix 3).
+      let tsub =
+        TransientSub(id: sub_id, stream: stream, handler: handler)
+      process.send(reply, Ok(Subscription(id: sub_id)))
+
+      // Replace the existing transient subscriber entry with the new handler
+      let filtered_all =
+        list.filter(state.all_subscribers, fn(s) { s.id != sub_id })
+      let filtered_stream =
+        list.filter(state.stream_subscribers, fn(s) { s.id != sub_id })
+      case stream {
+        "$all" ->
+          StoreState(
+            ..state,
+            all_subscribers: [tsub, ..filtered_all],
+            stream_subscribers: filtered_stream,
+          )
+        _ ->
+          StoreState(
+            ..state,
+            all_subscribers: filtered_all,
+            stream_subscribers: [tsub, ..filtered_stream],
+          )
+      }
     }
     _ -> {
       let last_seen = case start_from {

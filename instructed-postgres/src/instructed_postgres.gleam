@@ -36,7 +36,7 @@ import gleam/otp/actor
 import gleam/string
 import instructed/error.{
   type EventStoreError, SnapshotNotFound, StorageError, StreamNotFound,
-  SubscriptionAlreadyExists, SubscriptionNotFound, VersionConflict,
+  SubscriptionNotFound, VersionConflict,
 }
 import instructed/event.{type EventData, type RecordedEvent, RecordedEvent}
 import instructed/event_store.{
@@ -791,7 +791,31 @@ fn subscribe_persistent(
   {
     Ok(response) -> {
       case response.rows {
-        [_] -> Error(SubscriptionAlreadyExists)
+        [_] -> {
+          // Idempotent reconnect: read the existing checkpoint and start
+          // a new poller with the updated handler (Fix 3).
+          let last_seen_sql =
+            "SELECT last_seen_event_number FROM event_store_subscriptions WHERE stream_id = $1 AND subscription_name = $2"
+          let last_seen = case
+            pog.query(last_seen_sql)
+            |> pog.parameter(pog.text(stream))
+            |> pog.parameter(pog.text(name))
+            |> pog.returning(decode.at([0], decode.int))
+            |> pog.execute(config.db)
+          {
+            Ok(response) -> case response.rows {
+              [n] -> n
+              _ -> 0
+            }
+            Error(_) -> 0
+          }
+
+          // Start a new poller with the existing checkpoint
+          case start_poller(config, sub_id, stream, last_seen, handler, notifier) {
+            Ok(_) -> Ok(Subscription(id: sub_id))
+            Error(e) -> Error(StorageError(string.inspect(e)))
+          }
+        }
         _ -> {
           let last_seen = case start_from {
             Origin -> 0

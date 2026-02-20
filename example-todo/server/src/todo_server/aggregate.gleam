@@ -27,6 +27,17 @@ pub fn todo_aggregate() -> Aggregate(Todo, TodoCommand, TodoEvent) {
     execute: execute_command,
     apply_event: apply_event,
   )
+  |> aggregate.with_event_type(fn(event) {
+    case event {
+      TodoCreated(..) -> "TodoCreated"
+      DescriptionUpdated(..) -> "DescriptionUpdated"
+      PriorityUpdated(..) -> "PriorityUpdated"
+      DueDateUpdated(..) -> "DueDateUpdated"
+      TodoCompleted(..) -> "TodoCompleted"
+      TodoReopened(..) -> "TodoReopened"
+      TodoDeleted(..) -> "TodoDeleted"
+    }
+  })
 }
 
 fn execute_command(

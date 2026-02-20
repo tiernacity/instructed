@@ -455,18 +455,18 @@ pub fn persistent_subscription_from_current_test() {
   let assert Ok(Nil) = store.ack_event(subscription, evt)
 }
 
-pub fn persistent_subscription_already_exists_test() {
+pub fn persistent_subscription_idempotent_reconnect_test() {
   let store = start_store()
   let handler = fn(_event: event.RecordedEvent(TestEvent)) { Nil }
 
   let assert Ok(_) =
     store.subscribe_persistent("$all", "dup-sub", Origin, handler)
 
-  // Second subscription with same name should fail
+  // Second subscription with same name should succeed (idempotent reconnect, Fix 3).
+  // The adapter preserves the checkpoint position and updates the handler.
   let result =
     store.subscribe_persistent("$all", "dup-sub", Origin, handler)
-  should.be_error(result)
-  let assert Error(error.SubscriptionAlreadyExists) = result
+  should.be_ok(result)
 }
 
 pub fn delete_subscription_test() {

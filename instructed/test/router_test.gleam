@@ -160,6 +160,74 @@ pub fn dispatch_domain_error_test() {
   should.be_error(result)
 }
 
+pub fn registry_cleanup_after_lifespan_stop_test() {
+  // Fix 1: After an aggregate server stops (lifespan), the registry should
+  // detect the dead process and start a new server on next dispatch.
+  let assert Ok(subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(subject)
+
+  let r =
+    router.new(
+      aggregate: counter_aggregate(),
+      event_store: store,
+      identity: fn(cmd) {
+        case cmd {
+          CreateCounter(id) -> id
+          IncrementCounter(id) -> id
+          DecrementCounter(id) -> id
+          AddToCounter(id, _) -> id
+        }
+      },
+    )
+    |> router.with_lifespan(lifespan.stop_after_command())
+
+  // First dispatch: creates aggregate, server stops after command
+  let assert Ok(result) = router.dispatch(r, CreateCounter("cleanup1"))
+  should.equal(result.aggregate_version, 1)
+
+  // Wait for the server to stop
+  process.sleep(100)
+
+  // Second dispatch: should succeed — registry detects dead server, starts new one
+  // The new server loads state from event store
+  let assert Ok(result2) = router.dispatch(r, IncrementCounter("cleanup1"))
+  should.equal(result2.aggregate_version, 2)
+  should.equal(result2.aggregate_state.count, 1)
+}
+
+pub fn registry_cleanup_idle_timeout_test() {
+  // Fix 1: After an aggregate server stops due to idle timeout,
+  // the registry should restart it on next dispatch.
+  let assert Ok(subject) = in_memory_event_store.start()
+  let store = in_memory_event_store.to_event_store(subject)
+
+  let r =
+    router.new(
+      aggregate: counter_aggregate(),
+      event_store: store,
+      identity: fn(cmd) {
+        case cmd {
+          CreateCounter(id) -> id
+          IncrementCounter(id) -> id
+          DecrementCounter(id) -> id
+          AddToCounter(id, _) -> id
+        }
+      },
+    )
+    |> router.with_lifespan(lifespan.new_idle(10))
+
+  // Dispatch a command
+  let assert Ok(_) = router.dispatch(r, CreateCounter("idle1"))
+
+  // Wait for idle timeout + buffer
+  process.sleep(100)
+
+  // Next dispatch should succeed (new server started)
+  let assert Ok(result) = router.dispatch(r, IncrementCounter("idle1"))
+  should.equal(result.aggregate_version, 2)
+  should.equal(result.aggregate_state.count, 1)
+}
+
 pub fn middleware_test() {
   let assert Ok(subject) = in_memory_event_store.start()
   let store = in_memory_event_store.to_event_store(subject)
@@ -199,4 +267,6 @@ pub fn middleware_test() {
   should.be_error(result)
 }
 
+import gleam/erlang/process
 import gleam/list
+import instructed/lifespan

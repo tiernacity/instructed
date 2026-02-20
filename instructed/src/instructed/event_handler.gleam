@@ -215,13 +215,11 @@ pub fn start(
 
       // Register with the subscriptions actor so strong-consistency waiters
       // know about this handler (Invariant 11).
-      // Also register the handler's PID for automatic dispatcher exclusion:
-      // if this handler dispatches a command with strong consistency,
-      // it will be excluded from the wait to prevent deadlock.
+      // Note: register_pid is done inside the actor (SetSubscriptionInfo handler)
+      // to capture the actor's own PID, not the spawning process's PID (Fix 2).
       case config.subscriptions {
         Some(subs) -> {
           subscriptions.register(subs, config.name, config.consistency)
-          subscriptions.register_pid(subs, process.self(), config.name)
         }
         None -> Nil
       }
@@ -241,8 +239,9 @@ pub fn start(
         SpecificStream(s) -> s
       }
 
-      // Subscribe persistently — do NOT delete existing subscription.
-      // If subscription already exists, it resumes from last ack'd position.
+      // Subscribe persistently — idempotent (Fix 3).
+      // If subscription already exists, the adapter reconnects with the
+      // existing checkpoint position, preserving the handler's progress.
       // If it doesn't exist, it's created with start_from.
       case
         event_store.subscribe_persistent(
@@ -253,34 +252,22 @@ pub fn start(
         )
       {
         Ok(subscription) -> {
+          // RACE CONDITION NOTE (Fix 7): SetSubscriptionInfo is sent asynchronously
+          // after the actor starts and the subscription is created. If an event
+          // arrives before this message is processed, event_store/subscription will
+          // be None and ack_event will be a no-op (event not acked, redelivered on
+          // restart). In practice this is extremely unlikely: the subscription
+          // callback is registered during subscribe_persistent, which returns before
+          // we send SetSubscriptionInfo. Since Erlang mailboxes are ordered per
+          // sender, SetSubscriptionInfo arrives before any HandleEvent from the same
+          // flow. The only risk is if events are appended concurrently by another
+          // process between subscribe_persistent returning and SetSubscriptionInfo
+          // being processed — a vanishingly small window.
           process.send(
             subject,
             SetSubscriptionInfo(event_store, subscription),
           )
           Ok(subject)
-        }
-        Error(error.SubscriptionAlreadyExists) -> {
-          // Subscription exists — delete and recreate to re-register handler.
-          // Position is preserved if the adapter supports it.
-          // For in-memory adapter, this loses position (acceptable for testing).
-          let _ = event_store.delete_subscription(stream, config.name)
-          case
-            event_store.subscribe_persistent(
-              stream,
-              config.name,
-              config.start_from,
-              handler,
-            )
-          {
-            Ok(subscription) -> {
-              process.send(
-                subject,
-                SetSubscriptionInfo(event_store, subscription),
-              )
-              Ok(subject)
-            }
-            Error(_) -> Error("Failed to create subscription after delete")
-          }
         }
         Error(_) -> Error("Failed to create subscription")
       }
@@ -298,6 +285,13 @@ fn handle_actor_message(
 ) {
   case msg {
     SetSubscriptionInfo(es, sub) -> {
+      // Register the actor's PID (not the spawner's PID) for automatic
+      // dispatcher exclusion in strong-consistency waits (Fix 2).
+      case state.config.subscriptions {
+        Some(subs) ->
+          subscriptions.register_pid(subs, process.self(), state.config.name)
+        None -> Nil
+      }
       actor.continue(
         HandlerActorState(
           ..state,
