@@ -143,10 +143,14 @@ Launch a **third** sub-agent for framework-independent CQRS/ES theory:
 
 ### Launching and Waiting
 
+**IMPORTANT: Launch sub-agents sequentially, not simultaneously.** Pi acquires a file lock on `~/.pi/agent/settings.json` during startup. Simultaneous launches cause `ELOCKED` errors ("Lock file is already being held"). Wait ~5 seconds between each launch.
+
 ```bash
-tmux new-window -n agent_a "pi -p '<prompt_a>' 2>&1; sleep 5"
-tmux new-window -n agent_b "pi -p '<prompt_b>' 2>&1; sleep 5"
-tmux new-window -n agent_c "pi -p '<prompt_c>' 2>&1; sleep 5"
+tmux new-window -n agent_a "cat /tmp/prompt_a.md | pi -p 2>&1 | tee /tmp/agent_a.log; sleep 5"
+sleep 5  # wait for pi to finish startup before launching next agent
+tmux new-window -n agent_b "cat /tmp/prompt_b.md | pi -p 2>&1 | tee /tmp/agent_b.log; sleep 5"
+sleep 5
+tmux new-window -n agent_c "cat /tmp/prompt_c.md | pi -p 2>&1 | tee /tmp/agent_c.log; sleep 5"
 ```
 
 **Wait for ALL THREE to complete before proceeding:**
@@ -399,10 +403,14 @@ Launch **three** review sub-agents, one per tier:
 
 ### Launching and Waiting
 
+**IMPORTANT: Launch sequentially with delays (see Phase 1 note about lock contention).**
+
 ```bash
-tmux new-window -n review1 "pi -p '<review_prompt_1>' 2>&1; sleep 5"
-tmux new-window -n review2 "pi -p '<review_prompt_2>' 2>&1; sleep 5"
-tmux new-window -n review3 "pi -p '<review_prompt_3>' 2>&1; sleep 5"
+tmux new-window -n review1 "cat /tmp/prompt_review_1.md | pi -p 2>&1 | tee /tmp/review1.log; sleep 5"
+sleep 5
+tmux new-window -n review2 "cat /tmp/prompt_review_2.md | pi -p 2>&1 | tee /tmp/review2.log; sleep 5"
+sleep 5
+tmux new-window -n review3 "cat /tmp/prompt_review_3.md | pi -p 2>&1 | tee /tmp/review3.log; sleep 5"
 ```
 
 ```bash
