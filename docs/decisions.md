@@ -12,6 +12,89 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0005 — Per-aggregate command serialisation via optimistic-lock retry, not advisory locks
+
+**Date:** 2026-05-17
+
+**Context:** Commanded serialises concurrent commands targeting the
+same aggregate via the GenServer mailbox (AGG-011, classed as a BEAM
+mechanism). `instructed` has no per-aggregate process to inherit this
+from. Two realisations are available in Postgres:
+
+1. **Optimistic locking + retry.** Each command does its own
+   load-execute-append. Concurrent commands on the same aggregate race
+   at append; INV-APPEND-013 guarantees that at most one succeeds for
+   a given expected_version, and AGG-010 mandates that the loser
+   re-loads (cheaply, picking up the winner's events) and re-evaluates.
+2. **Per-aggregate advisory lock** for the duration of
+   load-execute-append. Two commands on the same aggregate then queue
+   on the lock; neither ever fails its append.
+
+**Decision:** v1 uses optimistic-lock retry (option 1). Advisory locks
+are not used to serialise commands.
+
+**Rationale:** option 1 keeps `append_to_stream` the only place that
+holds a lock, which keeps lock ordering trivial. Optimistic retry
+composes with the snapshot-based hydration path without needing extra
+state to be released on connection death. Advisory locks tied to a
+session leak responsibility into connection-pool behaviour, which is
+the class of bug we are trying to avoid.
+
+**Implications:**
+
+- Hot aggregates with many concurrent commands will retry. The retry
+  budget (`AGG-010`, configurable) becomes a real tuning knob.
+- The SDK's load-execute-append loop must be cheap enough that retry
+  is a viable strategy. This is the same property that makes D-0004
+  acceptable.
+- An advisory-lock variant can be added later as an opt-in
+  optimisation for write-hot aggregates without changing the SQL
+  contract; tracked informally for now (no ML- entry yet — revisit
+  in Phase 8 if benchmarking demands it).
+
+---
+
+## D-0004 — No in-memory aggregate cache; rehydrate on every command
+
+**Date:** 2026-05-17
+
+**Context:** Commanded keeps each active aggregate as a long-lived
+GenServer holding its current state (AGG-004). Subsequent commands
+skip the load step. This is classified BEAM-mechanism in
+`guarantees.md` — it is an optimisation, not a semantic guarantee.
+The same mechanism props up AGG-011 (mailbox serialisation),
+AGG-025 (self-subscription to catch external writes), and AGG-030
+(lifespan).
+
+**Decision:** `instructed` does not cache aggregate state between
+commands. Every command runs a fresh load (snapshot + events since)
+→ execute → append. There is no in-process registry of running
+aggregates and no `aggregate_lifespan` concept.
+
+**Rationale:** the core hypothesis is that a thin SDK over Postgres
+is enough. An in-memory cache reintroduces the registry/coordination
+problems we set out to avoid (who owns the cache? what happens on
+node failure? how do two SDK instances see consistent state?).
+Snapshotting (Part D of `invariants.md`) is the load-cost mitigation;
+it is more honest than caching because it does not require coherence
+across processes.
+
+**Implications:**
+
+- AGG-004, AGG-011, AGG-025, AGG-030 disappear as mechanisms. The
+  *semantics* they backed are either intrinsic (AGG-011 → see D-0005)
+  or not needed (AGG-025 is unnecessary without a cache; AGG-030
+  vanishes with the cache).
+- Aggregate load cost becomes the dominant per-command cost. The
+  snapshot policy (SNAP-001..002) and its tuning matter more than
+  they do in Commanded.
+- An SDK-level cache can be added later as a pure performance
+  optimisation if a single SDK process owns a hot aggregate, but it
+  must not become a correctness boundary. Not tracked as ML- yet;
+  revisit if Phase 8 benchmarks justify it.
+
+---
+
 ## D-0003 — Polling only; no `LISTEN`/`NOTIFY` in the contract
 
 **Date:** 2026-05-17
