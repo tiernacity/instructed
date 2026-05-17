@@ -25,8 +25,8 @@ shot, so the reader can review the reasoning incrementally.
 | Pass | Scope | Status |
 |------|-------|--------|
 | 1 | Append (Part B), Read (Part C), cross-cutting Streams/Meta (Part F), Aggregate execution (AGG-*) | done |
-| 2 | Snapshots (Part D + SNAP-*), Event handler / subscriber (Part E transient & persistent + HND-*) | **this commit** |
-| 3 | Process managers (PM-*), Strong consistency (CON-*), Dispatch (DSP-*) | pending |
+| 2 | Snapshots (Part D + SNAP-*), Event handler / subscriber (Part E transient & persistent + HND-*) | done |
+| 3 | Process managers (PM-*), Strong consistency (CON-*), Dispatch (DSP-*) | **this commit** |
 
 Items in later passes are listed at the bottom under "Deferred to a
 later pass" with one-line placeholders so the reader can see the full
@@ -862,23 +862,319 @@ This is the consequential one.
 
 ---
 
-## Deferred to a later pass
+## Pass 3 — Process managers, strong consistency, dispatch
 
-The following IDs from `guarantees.md` are not yet mapped. Each
-will get its own section in Pass 3.
+### PM-* — Process managers
 
-### Pass 3 — process managers, consistency, dispatch
+Process managers reuse three primitives already mapped: persistent
+subscriptions (Pass 2), snapshots (Pass 2), and the dispatch helper
+(below). There is no new schema. The PM loop is an SDK construct on
+top of those.
 
-- **PM-001..040 (`guarantees.md`)** — routing,
-  handle/dispatch/apply/ack ordering, snapshot-as-state model,
-  compensation (cross-references D-0001 / Phase 6).
-- **CON-001..013 (`guarantees.md`)** — strong-consistency-on-
-  dispatch. The realisation is sketched at the bottom of Part E in
-  `guarantees.md`: poll subscription cursors until each is past the
-  appended events' `(stream_id, stream_version)`. Mapping that to
-  concrete schema/SDK calls is Pass 3 work.
-- **DSP-001..005 (`guarantees.md`)** — dispatch surface,
-  `returning:`, `before_execute:`, middleware.
+#### PM-001 — `interested?` routing
+
+- **Commanded:** `interested?/1` (or `/2`) returns `false`,
+  `{:start, uuid}`, `{:continue, uuid}`, `{:stop, uuid}`, the
+  `!`-variants, or a list of those.
+- **`instructed`:** SDK convention. The PM worker loop reads an
+  event from its subscription, calls the application's
+  `interested?`, and dispatches to per-instance handling. Returning
+  `false` means "advance the cursor past this event without doing
+  anything". The store has no routing logic.
+- **Verdict:** **equivalent** (pure SDK feature).
+
+#### PM-002 — `:start!` and `:continue!` strictness
+
+- **Commanded:** `:start!` fails if the instance already exists;
+  `:continue!` fails if it doesn't.
+- **`instructed`:** existence is determined by
+  `read_snapshot("<pm_name>-<process_uuid>")` returning success vs
+  `:snapshot_not_found`. The SDK does the check before calling
+  `handle/3`; on a violation the SDK routes to the application's
+  `error/3` per PM-013.
+- **Verdict:** **equivalent**.
+
+#### PM-010 — `handle(state, event, metadata)` returns commands
+
+- **Commanded:** the PM instance's handler returns zero or more
+  commands; the framework dispatches them.
+- **`instructed`:** SDK convention. The PM worker calls
+  `handle/3`, collects the command list, and iterates the dispatch
+  helper over it.
+- **Verdict:** **equivalent**.
+
+#### PM-011 — Ordering: handle → dispatch → apply → persist → ack
+
+This is the load-bearing ordering rule. Commanded's sequence:
+
+1. Read event from subscription.
+2. `handle(state, event, metadata)` → commands.
+3. Dispatch each command (separate aggregate transactions).
+4. `apply(state, event)` → new state.
+5. Persist new state (snapshot upsert).
+6. Ack event (cursor advance).
+
+- **Commanded:** each step is its own transaction; ordering is
+  enforced by the PM GenServer.
+- **`instructed`:** the SDK preserves the same ordering. Step 3's
+  dispatches each run their own load-execute-append cycle
+  (separate transactions, by necessity — they touch different
+  streams with their own optimistic-locking dance). Steps 5 and 6
+  collapse into **one transaction** per D-0008: the SDK opens a
+  transaction, calls `record_snapshot` for the PM state, then
+  `advance_subscription` for the PM's subscription, then commits.
+- **Verdict:** **equivalent on the cross-aggregate dispatch step**
+  (still at-least-once because dispatching is its own transaction
+  per command), **tighter on the persist-then-ack pair** (snapshot
+  and cursor advance commit together; PM-024's redelivery-
+  detection becomes a backup rather than the primary path).
+
+#### PM-012 — Causation/correlation inherit from the triggering event
+
+- **Commanded:** dispatched commands inherit
+  `causation_id = event.event_id` and
+  `correlation_id = event.correlation_id`.
+- **`instructed`:** SDK convention. The PM worker passes the
+  triggering event's IDs into the dispatch helper's options
+  (DSP-002). The dispatch helper then propagates them onto every
+  event the command produces (AGG-020/021).
+- **Verdict:** **equivalent**. End-to-end traceability through the
+  causation chain is preserved.
+
+#### PM-013 — Error vocabulary plus PM-specific options
+
+- **Commanded:** `error/3` accepts the HND-020 vocabulary plus
+  `{:continue, commands, context}` (replace pending command list)
+  and `{:skip, :discard_pending | :continue_pending}` (drop the
+  failing command and choose what to do with the rest).
+- **`instructed`:** SDK convention. The PM worker offers the same
+  vocabulary as return shapes from the handler. The store is
+  uninvolved.
+- **Verdict:** **equivalent** (SDK ergonomics).
+
+#### PM-014 — `apply(state, event)` cannot fail
+
+- **Commanded:** convention; mirrors AGG-002.
+- **`instructed`:** same convention.
+- **Verdict:** **equivalent**.
+
+#### PM-020 — State persisted as a snapshot keyed by `"<pm_name>-<process_uuid>"`
+
+- **Commanded:** reuses the event store's snapshots table; the
+  `source_uuid` namespacing convention prevents collision with
+  aggregate snapshots.
+- **`instructed`:** **identical**. We reuse the Pass-2 snapshots
+  table verbatim. `source_type` records the PM module name;
+  `data` holds the serialised state.
+- **Verdict:** **equivalent**. (This is the cleanest example of
+  the Phase-3 insight that PM state is just a snapshot.)
+
+#### PM-021 — State recovered from snapshot on startup
+
+- **Commanded:** PM GenServer initialises by reading its snapshot.
+- **`instructed`:** SDK PM worker reads the snapshot on every
+  event iteration (per D-0004: no in-memory cache). If absent, the
+  state defaults from `new()`. Read cost is one indexed lookup per
+  event handled; snapshot upserts keep it warm.
+- **Verdict:** **equivalent on semantics**, **looser on per-event
+  cost** (one extra snapshot read per event vs. one read per PM
+  startup). Acceptable given the rest of D-0004's logic.
+
+#### PM-022 — `:stop` deletes the snapshot
+
+- **Commanded:** `delete_snapshot("<pm_name>-<process_uuid>")`.
+- **`instructed`:** identical call. INV-SNAP-004 makes this
+  idempotent.
+- **Verdict:** **equivalent**.
+
+#### PM-023 — Persist before ack
+
+- **Commanded:** snapshot write commits, then a separate cursor-
+  advance call. If the ack fails or the process crashes between,
+  PM-024 absorbs the duplicate.
+- **`instructed`:** snapshot upsert and cursor advance commit
+  **together** per D-0008. The window in which PM-024 absorption
+  is needed shrinks to "cross-aggregate dispatches partially
+  succeeded before the snapshot+ack transaction committed".
+- **Verdict:** **tighter** on the persist-ack ordering window.
+
+#### PM-024 — `source_version` doubles as `last_seen_event_number`
+
+- **Commanded:** the snapshot's `source_version` field stores the
+  `event_number` of the last successfully handled event; on
+  redelivery the PM checks `event.event_number <=
+  source_version` and silently re-acks.
+- **`instructed`:** identical convention. With co-transactional
+  advance (D-0008) the *primary* redelivery-detection is the
+  subscription cursor itself (which won't redeliver events <=
+  `last_seen`). PM-024's snapshot-version check remains a backup
+  for the narrower window where dispatches partially succeeded
+  before the persist-and-advance transaction committed.
+- **Verdict:** **equivalent on semantics**, **tighter on the
+  effective duplicate window**.
+
+#### PM-030 — Compensation
+
+- **Commanded:** not first-class; whatever commands the PM
+  dispatches in response to failure events.
+- **`instructed`:** **deferred to Phase 6** per D-0001. Pass 3
+  records no mapping decision here — the mechanism is open.
+- **Verdict:** **TBD**. Phase 6 produces `sagas.md`; this section
+  will be revisited.
+
+#### PM-031 — Command failure surfaces to `error/3`
+
+- **Commanded:** a failed dispatch is surfaced with the command-
+  specific response variants in PM-013.
+- **`instructed`:** SDK convention. The dispatch helper returns an
+  error; the PM worker routes it through `error/3` with the same
+  vocabulary as PM-013.
+- **Verdict:** **equivalent**.
+
+#### PM-040 — Per-instance GenServer *[BEAM-mechanism]*
+
+- **Commanded:** each process instance is a long-lived GenServer.
+- **`instructed`:** **dropped** per D-0004. The PM worker is a
+  single subscription consumer that loads instance state per
+  event from the snapshot. There is no per-instance process and
+  no `idle_timeout`.
+- **Verdict:** **dropped**, no semantic loss.
+
+---
+
+### CON-* — Strong consistency on dispatch
+
+#### CON-001 — Per-handler consistency declaration
+
+- **Commanded:** `consistency: :strong | :eventual` (default
+  `:eventual`) at handler config time.
+- **`instructed`:** SDK config. Has no store-side effect; in
+  `instructed` the *only* asymmetry between strong and eventual
+  handlers is whether their cursor is one that callers ever poll
+  for catch-up.
+- **Verdict:** **equivalent on the declaration shape**, though
+  the mechanism it triggers is wholly different.
+
+#### CON-002, CON-003 — Handler self-registration and ack pubsub *[BEAM-mechanism]*
+
+- **Commanded:** the handler registers with the
+  `Commanded.Subscriptions` GenServer at startup; on every ack it
+  publishes `{:ack_event, name, stream_id, stream_version}`; the
+  registry holds an ETS table of positions.
+- **`instructed`:** **dropped wholesale**. There is no in-store
+  position registry. Every handler's position is already
+  durably stored as its subscription cursor (`subscriptions.last_seen`).
+  No pubsub, no ETS.
+- **Verdict:** **dropped**, semantics replaced by direct cursor
+  read (CON-010).
+
+#### CON-010 — Wait-on-dispatch for handler catchup
+
+- **Commanded:** after a successful append, the dispatching
+  process consults the registry and `receive`s ack-broadcasts
+  until every relevant handler is past the appended events'
+  position.
+- **`instructed`:** per D-0003, polling. After append the SDK
+  knows the appended events' `(stream_id, stream_version)` and
+  `event_number` range. For each subscription name passed in
+  `consistency: [...]` (per D-0010), the SDK calls
+  `read_subscription_position(stream, name)` on a poll interval
+  until each returned `last_seen` is `>=` the appended event's
+  position, or `consistency_timeout` elapses.
+  For single-stream subscriptions the position compared is
+  `stream_version`; for `$all` subscriptions it is `event_number`.
+- **Verdict:** **equivalent on semantics, looser on latency**.
+  Polling-interval latency floor is the price of D-0003.
+
+#### CON-011 — `consistency: list_or_:strong`
+
+- **Commanded:** `consistency: [HandlerA, "HandlerB"]` waits for
+  the listed handlers only; `consistency: :strong` waits for all
+  strongly-consistent handlers in the application.
+- **`instructed`:** per D-0010, **only the explicit list form is
+  supported**. `consistency: :strong` (no list) is not part of
+  the v1 contract. The SDK MAY offer an in-process convenience
+  that auto-collects names when the dispatcher and handlers run
+  in the same SDK instance, but the SQL contract takes only an
+  explicit name list.
+- **Verdict:** **looser ergonomic default**, **equivalent
+  semantic core**.
+
+#### CON-012 — `consistency_timeout` and `{:error, :consistency_timeout}`
+
+- **Commanded:** dispatch returns the timeout error after the
+  configurable bound; events remain durably appended.
+- **`instructed`:** identical. The polling loop respects the
+  same bound and returns the same error shape; the append has
+  already committed regardless.
+- **Verdict:** **equivalent**.
+
+#### CON-013 — Mechanism is entirely in-VM *[BEAM-mechanism]*
+
+- **Commanded:** pubsub broadcast + ETS table + `receive`-block.
+- **`instructed`:** **dropped**. Polling against the
+  subscriptions table is the mechanism.
+- **Verdict:** **dropped**, no semantic loss given CON-010.
+
+---
+
+### DSP-* — Dispatch surface
+
+The dispatch helper is almost entirely SDK ergonomics. The store
+sees only the `append_to_stream` call at the end of a successful
+command. This section is brief because the underlying mechanics
+are already mapped in Pass 1 (AGG-*).
+
+#### DSP-001 — Route command → aggregate, hydrate, execute
+
+- **Commanded:** router resolves `aggregate_uuid` from the
+  command; routes to the aggregate process (starting it if
+  needed); the process runs handle/execute.
+- **`instructed`:** the SDK's dispatch helper takes the command,
+  resolves `aggregate_uuid` via an application-supplied
+  `identity/1` function, runs the load-execute-append loop
+  (Pass-1 AGG-001..010), returns. There is no process to start;
+  no registry; no "already running" check.
+- **Verdict:** **equivalent on semantics**, **dropped mechanism
+  (process registry)** per D-0004.
+
+#### DSP-002 — Dispatch options
+
+- **Commanded:** `correlation_id`, `causation_id`, `metadata`,
+  `timeout`, `consistency`, `consistency_timeout`, `returning`,
+  `retry_attempts`.
+- **`instructed`:** the SDK helper accepts the same option set.
+  `consistency` is the explicit-list form per D-0010. `timeout`
+  is the SDK's command-level deadline; not a store concern.
+  `retry_attempts` defaults to a small positive value per
+  AGG-010 commentary in Pass 1.
+- **Verdict:** **equivalent on the option vocabulary**, **looser
+  on `consistency`** (no `:strong` shorthand).
+
+#### DSP-003 — `returning:` reply shape
+
+- **Commanded:** `false | :aggregate_state | :aggregate_version
+  | :events | :execution_result`.
+- **`instructed`:** same shapes. With no aggregate cache the SDK
+  already holds the post-fold state in memory for the duration
+  of the command; returning any of the variants is a local
+  projection of that state plus the appended events.
+- **Verdict:** **equivalent**.
+
+#### DSP-004 — `before_execute:` hook
+
+- **Commanded:** function invoked after hydration, before the
+  command handler; can short-circuit with `{:error, reason}`.
+- **`instructed`:** SDK convention. Same shape.
+- **Verdict:** **equivalent**.
+
+#### DSP-005 — Middleware
+
+- **Commanded:** `pipeline_before`, `pipeline_after`,
+  `pipeline_after_failure`. Class-C convenience.
+- **`instructed`:** SDK-level decoration of the dispatch helper.
+  Not a store concern.
+- **Verdict:** **equivalent** as an SDK feature.
 
 ---
 
@@ -908,4 +1204,31 @@ will get its own section in Pass 3.
 - **OQ-0003** — Selector evaluation locus (SDK-side vs
   server-side).
 
-No new `maybe-later.md` entries needed in Passes 1 or 2.
+### Pass 3
+
+- **D-0010** — Strong-consistency-on-dispatch waits on an
+  explicit subscription list; no in-store registry. The
+  `consistency: :strong` shorthand is not supported.
+- **PM-030 cross-references D-0001 / Phase 6** — compensation
+  mechanism is deliberately deferred; PM-030 in the mapping has
+  no Pass-3 verdict.
+- The PM section reuses the snapshot primitive from Pass 2 and
+  the subscription primitives from Pass 2. No new schema is
+  introduced in Pass 3.
+
+No new `maybe-later.md` entries in Pass 3.
+
+---
+
+## Phase 4 status
+
+All Phase-2 invariants and all Phase-3 guarantees now have a
+mapping entry, with the single deliberate exception of **PM-030
+(compensation)** which is deferred to Phase 6 per D-0001.
+
+The roadmap's Phase 4 "done when" criterion ("every Commanded
+invariant/guarantee has either a proposed realisation or an
+explicit decision to drop it") is met. Phase 5 (non-goals)
+follows: Pass-1..3 produced enough "we deliberately don't do X"
+entries that the non-goals document is now mostly a
+reorganisation exercise.

@@ -12,6 +12,67 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0010 — Strong-consistency-on-dispatch waits on an explicit subscription list
+
+**Date:** 2026-05-17
+
+**Context:** Commanded's strong-consistency-on-dispatch (CON-001..013)
+lets a caller pass `consistency: :strong` to `Application.dispatch/2`
+and have the call block until every strongly-consistent handler in
+the application has acked at least up to the appended events. The
+mechanism is a `Commanded.Subscriptions` GenServer holding an ETS
+table of `(handler_name, position)`, fed by pubsub from each
+handler on every successful ack. `consistency: :strong` (no list)
+works because the registry knows which handlers to wait for.
+
+D-0003 already commits us to polling, not pubsub. The remaining
+question is: how does the dispatcher know *which* subscription
+cursors to poll?
+
+Three shapes:
+
+1. A persistent `consistency_groups` table populated by handler
+   registrations on startup; dispatch reads from it. Reintroduces a
+   piece of coordinated state across SDK processes.
+2. SDK-process-local registry: the SDK process running handlers
+   tracks them in-memory. Works only when the dispatcher and the
+   handlers share an SDK process. Fragile across deployment
+   topologies.
+3. **Explicit list at dispatch time.** The caller passes
+   `consistency: ["AccountBalanceProjector",
+   "OrderPositionsProjector"]`. The SDK polls the named
+   subscriptions' cursors. No registry.
+
+**Decision:** v1 supports only the explicit-list form. The SDK
+MAY offer an in-process convenience that auto-collects names from
+handlers registered in the same SDK instance, but the contract is
+the explicit list. `consistency: :strong` (no list) is not
+supported.
+
+**Rationale:** the explicit list is the only shape that needs no
+cross-process coordination and no extra schema. It is also the
+most honest: "which handlers do you care about catching up?" is a
+real question the caller usually has an answer to. Implicit `:strong`
+in Commanded papers over the fact that not every strongly-
+consistent handler is interesting to every caller — commonly the
+caller only cares about one or two specific projections.
+
+**Implications:**
+
+- The store exposes `read_subscription_position(stream, name) ::
+  bigint` returning `last_seen`. The dispatch helper polls this
+  for each named subscription until each is `>= the appended
+  event's position`, or until `consistency_timeout` elapses
+  (`{:error, :consistency_timeout}`).
+- Latency is bounded below by the polling interval (per D-0003).
+- The SDK has freedom to layer an auto-collection convenience over
+  the explicit-list primitive; the SQL contract stays minimal.
+- Conformance harness: the `consistency: :strong` shorthand test
+  case is skipped or rewritten to use the list form; documented in
+  `non-goals.md`.
+
+---
+
 ## D-0009 — `delete_subscription` on a missing subscription is an error
 
 **Date:** 2026-05-17
