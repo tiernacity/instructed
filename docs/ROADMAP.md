@@ -133,7 +133,20 @@ optimisation specific to BEAM/OTP, or (c) ergonomic convenience.
 
 ---
 
-## Phase 4 — Postgres-native realisation of each invariant
+## Phase 4 — Postgres-native realisation of each invariant — **done**
+
+Produced `docs/mapping.md` in three review passes (append/read/aggregate;
+snapshots/subscriptions/handlers; PMs/consistency/dispatch). Every
+Commanded invariant and guarantee has a verdict with the single
+deliberate exception of **PM-030 (compensation)**, which is parked
+for Phase 6 per D-0001. Ten new design decisions (D-0004..D-0010
+plus three from earlier phases) and three open questions
+(OQ-0001..OQ-0003) were recorded along the way. The principal
+tightenings over Commanded are co-transactional cursor advance
+(D-0008) and schema-enforced reservations; the principal
+loosenings are no in-memory aggregate cache, no transient
+subscriptions, polling-floor on strong-consistency, and no
+`consistency: :strong` shorthand.
 
 **Goal:** for every entry in `invariants.md` and `guarantees.md`, propose
 how `instructed` realises it (or deliberately drops it).
@@ -157,7 +170,16 @@ realisation or an explicit decision to drop it.
 
 ---
 
-## Phase 5 — Non-goals, made explicit
+## Phase 5 — Non-goals, made explicit — **done**
+
+Produced `docs/non-goals.md`. Fourteen non-goals (NG-0001..NG-0014)
+consolidated from Phase 4 mapping work, organised by concern
+(coordination, delivery, strong consistency, data model,
+convenience). The document includes a cross-reference table back to
+`mapping.md` so every "dropped" / "looser by elimination" verdict
+there is accounted for, and an explicit "what is *not* a non-goal"
+section distinguishing non-goals from `maybe-later.md` entries and
+from open questions.
 
 **Goal:** write down what `instructed` does *not* do. Things like:
 
