@@ -9,7 +9,10 @@ Each phase produces one or more documents under `docs/`. Decisions made
 along the way are recorded in [`decisions.md`](decisions.md) as short
 ADR-style entries. Open questions surfaced but not yet resolved are
 tracked in [`open-questions.md`](open-questions.md) (created when the
-first question lands).
+first question lands). Capabilities deliberately deferred — things we
+likely *will* want eventually but are out of scope for v1 — are
+recorded in [`maybe-later.md`](maybe-later.md), each with the
+forward-compatibility constraints they impose on v1 design.
 
 ## Guiding principles (recap)
 

@@ -7,7 +7,8 @@ context, not just the conclusion.
 
 Open questions that have not yet been decided live in
 [`open-questions.md`](open-questions.md) (created when the first one is
-recorded).
+recorded). Capabilities deliberately deferred to a later version are
+tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
@@ -23,7 +24,8 @@ or by listening on a Postgres notification channel emitted at append time.
 **Decision:** the SQL contract does *not* require or use `pg_notify`.
 SDKs poll. `LISTEN`/`NOTIFY` may be added later as a transparent
 latency optimisation, but is not part of the v1 contract and no
-correctness property may depend on it.
+correctness property may depend on it. Tracked as ML-0002 in
+[`maybe-later.md`](maybe-later.md).
 
 **Implications:**
 
@@ -49,7 +51,8 @@ demonstrate the core hypothesis.
 
 **Decision:** in v1, a subscription has exactly one cursor advanced
 atomically with the consumer's work, and at most one worker holds the
-lease at any time. Concurrent partitioned consumption is deferred.
+lease at any time. Concurrent partitioned consumption is deferred and
+tracked as ML-0001 in [`maybe-later.md`](maybe-later.md).
 
 **Implications:**
 
