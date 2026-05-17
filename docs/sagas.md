@@ -622,3 +622,97 @@ No new entries in `open-questions.md`. The PM-instance ↔ absurd-task
 linkage question raised in Pass 2 is *deliberately* not surfaced as
 an OQ; promoting it now would be the first step toward accidentally
 building candidate 2.
+
+---
+
+## Appendix — Developer-facing framing
+
+The rest of this document is design-rationale voice ("why is the
+system shaped this way"). This appendix is the user-guide voice
+("what do I do on Monday morning"), preserved here so the eventual
+user docs — likely written alongside the Phase 8 SDK or after
+Phase 9 — don't have to rediscover it from scratch. The framing
+crystallises something about candidate 3 that the design voice
+doesn't quite carry: the absence of a saga DSL feels like a loss
+until you see it reframed as "the PM contract is already enough".
+
+### The opening
+
+> You don't add sagas. You add a process manager.
+
+### The three things you write
+
+A PM module is three callbacks:
+
+1. **`interested?(event)`** — pattern-match on event types to say
+   "this event starts a new instance / continues this instance /
+   stops this instance / ignore". Identity is the business key
+   that ties the workflow together (`orderId`, `bookingId`).
+2. **`handle(state, event, metadata)`** — for each event the
+   instance receives, return a list of commands to dispatch.
+   Forward-progress events return forward commands; failure
+   events return compensating commands. Both are just
+   `dispatch X(...)` calls.
+3. **`apply(state, event)`** — fold the event into the instance's
+   state (typically a `phase` enum plus the relevant intermediate
+   IDs).
+
+That's the whole shape. No saga DSL, no step pairing, no
+`compensate` keyword.
+
+### What you have to design
+
+Two modelling disciplines, neither framework-enforced:
+
+- **Failure events must exist.** If `BookFlight` can permanently
+  fail in a way the saga needs to react to, the `Flight`
+  aggregate must emit `FlightBookingFailed` — not just return an
+  error to its dispatcher. The PM can only react to events that
+  exist in the store.
+- **The state machine shape lives in your snapshot data.** Since
+  the framework doesn't track "saga is at step 3 of 5", you
+  encode that yourself — typically a `phase` enum.
+
+### Side effects (Stripe, email, third-party APIs)
+
+You don't make those calls from the PM. The PM dispatches a
+command that emits a `PaymentRequested` event. You write an
+**absurd task** subscribed to that event; it does the durable
+external call with checkpoints and retries, and at the end it
+`append_to_stream`s a `PaymentProcessed` or `PaymentFailed` event
+back. The PM picks that up on a later iteration like any other
+event.
+
+One rule for the absurd task: derive the returning event's
+`event_id` deterministically from `(task_id, step_name)` so a
+retried emission gets `:duplicate_event` (treated as success)
+rather than double-appending.
+
+### What you get for free
+
+- Durable state across worker crashes (snapshots co-transactional
+  with cursor advance, per D-0008).
+- Ordered, at-least-once event delivery.
+- `causation_id` chains the entire flow end-to-end — forward and
+  compensation — through the events table. Traceability without a
+  saga-log table.
+- The compensation path is the same code shape as the forward
+  path; one set of mechanics, used twice.
+
+### What you don't get
+
+- A tooling view that says "saga is at step 3 of 5". Tooling sees
+  whatever your snapshot `data` field contains.
+- Any framework opinion about which of your `handle/3` clauses
+  are "compensating". A reader of the PM module recognises that
+  from the pattern-matches on failure event types.
+
+### Mental shift from other systems
+
+- **From Commanded:** same model, with stronger durability under
+  D-0008. No surprise.
+- **From step-and-compensate DSLs (Temporal sagas, Camunda,
+  MassTransit):** you express the same workflow as a reactive
+  state machine instead of a step list. Linear workflows feel
+  slightly more verbose; reactive / fan-in-fan-out workflows
+  feel substantially more natural.
