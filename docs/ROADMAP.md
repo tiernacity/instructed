@@ -143,7 +143,11 @@ for Phase 6 per D-0001. Ten new design decisions (D-0004..D-0010
 plus three from earlier phases) and three open questions
 (OQ-0001..OQ-0003) were recorded along the way. The principal
 tightenings over Commanded are co-transactional cursor advance
-(D-0008) and schema-enforced reservations; the principal
+(D-0008, later **superseded by D-0016 in Phase 8** — the
+user-handler is now opaque to the SDK and idempotency is the
+application's concern, matching Commanded's contract; only the
+SDK-internal snapshot+ack pair for PMs remains co-transactional)
+and schema-enforced reservations; the principal
 loosenings are no in-memory aggregate cache, no transient
 subscriptions, polling-floor on strong-consistency, and no
 `consistency: :strong` shorthand.

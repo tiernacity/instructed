@@ -12,6 +12,337 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0016 — Handlers are opaque to the SDK; cursor advance is independent; idempotency is the application's concern (supersedes D-0008)
+
+**Date:** 2026-05-17
+
+**Context:** D-0008 committed the SDK to a co-transactional
+persist-and-ack pattern: the worker opens a transaction, fetches
+a batch, runs the handler (which writes to its projection tables
+in the same transaction), then calls `advance_subscription`
+before commit. Projection writes and cursor advance commit
+together. This bought exactly-once-at-the-transaction-level for
+projections, removing the idempotency burden on a class of
+applications.
+
+The Phase 8 SDK design review surfaced the implicit assumption
+in D-0008: **the projection target is Postgres**. Real
+projections target Elasticsearch, ClickHouse, Redis, BigQuery,
+an external HTTP API, an in-memory cache, a different database,
+or any combination. None of these can share a Postgres
+transaction. The plumbing required to keep D-0008's property
+for the Postgres case — a registration-time `withTx` mapper
+building an ORM-agnostic wrapper around the SDK's pg
+connection, exposed as `ctx.tx` to handlers — was real surface
+area (`sdk-design.md` §11.1 in its first form) and provided
+zero value to non-Postgres projections.
+
+**Decision:** reverse D-0008. The handler is **opaque to the
+SDK**. The worker loop is:
+
+```
+loop:
+  events = read_subscription_batch(...)        -- short tx, lock released
+  for e in events:
+    await handler(event, ctx)                  -- no SDK transaction
+  advance_subscription(..., last_position)     -- short tx, separate from the handler
+```
+
+Handler returns successfully → SDK advances the cursor. Handler
+throws → SDK does not advance; event redelivers next iteration.
+There is no SDK-owned transaction wrapping the handler call.
+The handler receives the event and an opaque context
+(`workerId`, `position`); it does not receive a Postgres
+connection, an ORM handle, or any other SDK-owned resource.
+
+Idempotency becomes the application's responsibility, matching
+Commanded's contract (HND-031) exactly. Applications that
+project into Postgres typically use an idempotent UPSERT or a
+`processed_events` side table; applications that project
+elsewhere use whatever their target's idempotency story is.
+
+**Rationale:**
+
+- **Projection targets are application-domain.** D-0008's
+  property only existed for Postgres-targeted projections. The
+  cost (forcing every handler to receive a database handle,
+  forcing every user to either use raw `pg` or supply a
+  per-registration ORM mapper) is paid by all users; the
+  benefit was reaped only by Postgres-targeted projections that
+  happened to write to the same database the event store sits
+  in. Inverted bargain.
+- **The handler signature collapses to its simplest possible
+  shape:** `(event, ctx) => Promise<void>`. No `tx`, no
+  `pgClient`, no `withTx`, no ORM-agnostic mapper, no
+  per-registration adapter. Matches absurd's task-handler shape
+  (`(params, ctx) => Promise<R>`) and Commanded's event-handler
+  shape almost exactly.
+- **The strong-consistency-on-dispatch story is unchanged.**
+  `waitForProjection` still polls `read_subscription_position`;
+  "caught up" still means "handler returned and SDK acked".
+  Small extra latency window between handler-return and
+  ack-commit (one round-trip), inconsequential.
+- **Lock-set disjointness (D-0011/D-0012) still holds.** PM
+  persist-and-ack tx now writes only snapshots and subscriptions
+  (no user tables); dispatch still uses a separate connection.
+  Internal SDK plumbing; user does not see it.
+- **Commanded contract parity** simplifies the Phase 9
+  conformance harness mapping.
+
+**Implications:**
+
+- **D-0008 is superseded** but its entry remains in this log
+  for the audit trail, with a forward pointer to D-0016 added
+  in-place.
+- **D-0014's motivation weakens but the decision survives in
+  spirit.** The original D-0014 reasoning included "share a tx
+  with the application's own writes" — that motivation is gone.
+  `Client.withTransaction` is dropped entirely (no remaining
+  use case in v1; `runCommand` opens its own tx, worker loops
+  open their own short txs). The D-0014 entry is updated with
+  a note.
+- **`docs/sdk-design.md` §11.1** (ORM-agnostic Tx surface)
+  collapses to one sentence: handler is opaque to the SDK.
+- **`docs/sdk-design.md` §11.6** (`withTransaction` nesting)
+  is removed; `Client.withTransaction` no longer exists.
+- **`docs/mapping.md` HND-031** changes verdict from "tighter
+  on the recommended pattern" to "equivalent to Commanded";
+  related entries (HND-012, HND-023, PM-024, etc.) lose their
+  D-0008 cross-references and are simplified accordingly.
+- **`docs/sql-contract.md`** subscription-worker recommended
+  call pattern flips from "BEGIN; read_batch; handler;
+  advance; COMMIT" to two independent short transactions
+  bracketing the handler. The SQL contract itself does not
+  change — `advance_subscription` is still callable inside any
+  well-formed transaction; the SDK simply chooses not to use
+  that capability.
+- **`docs/non-goals.md` gains NG-0015**: "co-transactional
+  persist-and-ack is not a v1 guarantee; handlers are responsible
+  for their own idempotency".
+- A future SDK feature for the narrow Postgres-projecting-into-
+  same-database case (an opt-in `coTransactional: true` flag
+  that re-enables the D-0008 path) is not precluded but is not
+  in v1. Not tracked as `ML-` unless a real workload demands it.
+
+---
+
+## D-0015 — Reference SDK public API shape
+
+**Date:** 2026-05-17
+
+**Context:** the design pass for the TypeScript SDK
+(`docs/sdk-design.md`) and the consumer-facing walkthrough
+(`docs/sdk-usage-sketch.md`) went through three review rounds.
+The first draft proposed a layered building-block API only
+(`Client`, `runCommand`, `startSubscriptionWorker`,
+`startProcessManager`, `waitForProjection`). Review surfaced
+that the absurd `Absurd` class sets the abstraction bar a `pi`-
+ecosystem consumer expects, and that several names and signatures
+in the first draft diverged from Commanded in ways that would
+leak SDK plumbing into application code. This decision
+consolidates the shape that emerged.
+
+**Decision:** v1 SDK ships **layered building blocks + a
+top-level `Instructed` facade** (Option B from
+`sdk-usage-sketch.md` §3). The facade is a pure composition of
+the lower layers; nothing in the SQL contract changes; no prior
+decision is revisited. The public surface is fixed as follows:
+
+1. **Aggregate callbacks use Commanded's names: `execute` and
+   `apply`.** `execute(state, command)` may return a single
+   event, an array, `undefined`, or `[]` (the no-op forms
+   mirror Commanded's `:ok | {:ok, []} | nil | []`).
+
+2. **`apply` takes the domain event payload `E`, not
+   `RecordedEvent<E>`.** The SDK tracks aggregate version itself
+   by counting events folded from the stream; user code never
+   reads or writes `stream_version`. Aggregate state is
+   domain-only.
+
+3. **`initialState()` is required on `AggregateDefinition`.** A
+   TypeScript concession — Elixir's `defstruct` default mechanism
+   has no clean TS analogue. The factory is called once per
+   aggregate load; the SDK fills version tracking around it.
+
+4. **Three exported definition types, symmetric:**
+   `AggregateDefinition<S, C, E>`,
+   `ProjectionDefinition<E>`,
+   `ProcessManagerDefinition<S, E>`. Each is the portable,
+   declarative description of what the thing IS; per-process
+   tuning (batch size, lease seconds, error handler) lives in a
+   separate `RegistrationOptions` / `*WorkerOptions` shape so
+   the definition can be defined once and run in different
+   processes with different operational knobs.
+
+5. **PM routing is a declarative `routes` map keyed by event
+   type**, not a switch-on-`event_type` function. Each entry is
+   `(event) => string | {kind, processId} | null`. Absent keys
+   mean "not interested". Mirrors Commanded's `interested?/1`
+   callback semantics in a TS-shaped, declarative form.
+
+6. **Facade has `register*` + `startWorker()`, mirroring
+   absurd's `registerTask` + `startWorker`.** Three register
+   methods (`registerAggregate`, `registerProjection`,
+   `registerProcessManager`); one start method. Application
+   controls deployment topology by choosing which subset of
+   `register*` calls each process makes. `startWorker()` fans
+   out into one internal subscription loop per registered
+   projection / PM and returns a single handle; the N-cursors
+   fan-out is hidden because the user already chose the N via
+   register calls.
+
+7. **Layered API is the foundation, not a private layer.**
+   `Client`, `runCommand`, `startProjection`,
+   `startProcessManager`, `waitForProjection` remain exported.
+   The facade is built on them; advanced users (tests, unusual
+   deployment topologies, applications composing `instructed`
+   with non-`instructed` Postgres writes) drop down when
+   needed.
+
+**Rationale:** the facade closes the abstraction gap with
+absurd (`docs/sdk-usage-sketch.md` §2c table), while the
+layered API preserves every property the prior decisions buy.
+Commanded-aligned names reduce the friction for users coming
+from that ecosystem (the conformance harness in Phase 9 will
+also be cleaner to map). Domain-only `apply` and declarative
+`routes` keep SDK plumbing out of application code — the
+repeated principle in `ROADMAP.md`'s guiding principles ("SDKs
+are thin; they encode the call sequence; they never hold
+invariant-bearing state") cuts both ways: the SDK should not
+leak its bookkeeping into application code either.
+
+**Implications:**
+
+- `docs/sdk-design.md` is authoritative for type signatures and
+  the worker-loop body; `docs/sdk-usage-sketch.md` is the
+  consumer-facing walkthrough that demonstrates the resulting
+  ergonomics in the bank-account demo.
+- Implementation sequencing in `docs/sdk-design.md` §10:
+  layer-0 client → layer-1 aggregate runner → layer-2 projection
+  worker → layer-3 PM worker → layer-4 consistency wait →
+  layer-5 facade → bank-account example.
+- The `Instructed` facade's `registerAggregate(def)` keys the
+  registry by `def.type` (the same string used for snapshot
+  `source_type`); `dispatch(aggregateType, ...)` looks up by
+  that key. No separate name is needed.
+- The `consistency: ["BalancesProjector"]` sugar on
+  `app.dispatch` resolves bare strings to `{stream: "$all",
+  name}` pairs; explicit `{stream, name}` form is the escape
+  hatch for non-`$all` projections. The list remains explicit
+  per D-0010; no `:strong` shorthand is reintroduced.
+- Future API additions (e.g. server-side selectors per
+  ML-0003, partitioned consumers per ML-0001) are additive on
+  the registration options and worker-options shapes; the
+  facade signatures above do not need to change.
+- A handful of small specification details — `tx` parameter
+  exact type, `NewEvent.event_id` defaulting, `start` vs
+  `start!` PM routing strictness, handler-throws semantics,
+  `withTransaction` nesting policy, PM-internal dispatch
+  shape, exact apply-event stripping rule — are deferred to a
+  final design closing pass (or to the implementation pass
+  with per-question D- entries as they land). Listed for the
+  next pass; not blocking on this entry.
+
+---
+
+## D-0014 — Subscription handlers see the SDK-opened transaction; high-level workers wrap it; low-level callers may open their own
+
+**Note (added 2026-05-17, post-D-0016):** D-0016 supersedes
+D-0008, removing the co-transactional persist-and-ack pattern
+entirely. The motivation for this decision — "share a tx with
+the application's own writes" — is gone, and `Client.withTransaction`
+has been dropped from the SDK. The entry is kept in the log for
+the audit trail; it no longer reflects the current design.
+
+**Date:** 2026-05-17
+
+**Context:** OQ-0002 asked where `BEGIN`/`COMMIT` live for the
+co-transactional persist-and-ack pattern D-0008 mandates. Three
+shapes were on the table: (1) SDK exposes individual procedures,
+caller opens the transaction; (2) SDK exposes a `process_batch`
+helper that opens the transaction internally; (3) two-phase
+commit with a `pending_ack` column.
+
+**Decision:** v1 ships **both (1) and (2)** as layered APIs:
+
+- `Client.withTransaction(fn)` is the only place in the SDK that
+  issues `BEGIN`/`COMMIT`. Low-level callers use it directly when
+  they want to share a transaction between subscription handlers
+  and their own application writes.
+- `startSubscriptionWorker` and `startProcessManager` call
+  `withTransaction` internally and pass the bound `Client` to the
+  user handler via `HandlerContext.tx`. The handler may use it
+  for its own writes (which then commit atomically with
+  `advance_subscription`) or ignore it entirely.
+- The handler **MUST NOT** issue `BEGIN`/`COMMIT`/`ROLLBACK`
+  through `ctx.tx`. Documented in the SDK reference; not enforced
+  at runtime in v1 (would require tagging `Client` instances with
+  their transaction state — acceptable cost, but deferred).
+
+Candidate (3) is rejected: it defeats the simplicity D-0008 was
+buying and reintroduces the at-least-once-pair semantics we
+specifically tightened.
+
+**Rationale:** the two shapes serve disjoint audiences. Beginners
+and the bank-account example get (2) — they never see a
+transaction handle. Applications composing `instructed` with
+other Postgres writes get (1) — they own the boundary. The SQL
+contract supports both with no change; `advance_subscription` is
+already safe inside any well-formed transaction (D-0008 Phase 7
+constraint).
+
+**Implications:**
+
+- One sanctioned `BEGIN`/`COMMIT` path means one place to reason
+  about lock acquisition for the persist-and-ack tx, matching the
+  D-0011/D-0012 lock-set disjointness story.
+- The PM dispatch helper requires a *second* `Client` bound to a
+  separate connection so dispatch happens in its own transaction
+  per the lock-set disjointness story. The SDK takes this as a
+  constructor parameter; documentation-enforced.
+- Future runtime check ("is this client in a transaction?") is a
+  pure SDK-internal addition; the public API does not change.
+
+OQ-0002 is now removed from `open-questions.md`.
+
+---
+
+## D-0013 — Reference SDK is TypeScript on `pg` 8.x
+
+**Date:** 2026-05-17
+
+**Context:** Phase 8 needed a language for the first SDK. The
+ROADMAP narrowed it to "TypeScript or Python, to match absurd's
+existing stack". Absurd ships three SDKs (`sdks/{go,python,typescript}`);
+the TypeScript one is the most complete (≈1.6 kloc, working
+worker loop, error-code translation, examples).
+
+**Decision:** the first `instructed` SDK is TypeScript on Node
+18+, using `pg` 8.x as a peer dependency, with the same
+`Queryable = pg.Client | pg.PoolClient | pg.Pool` shape absurd
+uses.
+
+**Rationale:** matching absurd's most-developed SDK lets the
+D-0011 absurd-bridge pattern be demonstrated end-to-end in the
+same process, with the same driver and the same pool conventions.
+It also imports a worked operational baseline for the worker
+loop (heartbeat / lease / graceful shutdown) we can adapt rather
+than invent.
+
+**Implications:**
+
+- Dual ESM/CJS build mirroring absurd's `tsconfig.build.json` +
+  `tsconfig.cjs.json` layout.
+- `node --test` against the Phase 7 Docker compose service
+  (`instructed_test`); no extra harness in v1.
+- Python and Go ports are out of scope for Phase 8 and are
+  carried under ROADMAP "Beyond" without further commitment.
+- The conformance harness (Phase 9) is intended to be language-
+  agnostic in its assertions; the TypeScript SDK's tests should
+  not bake in invariants only checkable from JS.
+
+---
+
 ## D-0012 — Global ordering via `$all`-as-stream with row-level lock
 
 **Date:** 2026-05-17
@@ -320,7 +651,19 @@ lenient behaviour out of a strict contract — is impossible.
 
 ---
 
-## D-0008 — Cursor advance is co-transactional with handler writes
+## D-0008 — Cursor advance is co-transactional with handler writes [SUPERSEDED BY D-0016]
+
+**Superseded 2026-05-17 by D-0016.** D-0016 reverses this
+decision: the projection target is application-domain (often
+not Postgres at all), so the co-transactional property could
+not be provided uniformly and the API plumbing required to
+provide it for the Postgres case was paid by every user.
+Handlers are now opaque to the SDK; cursor advance happens in
+its own short transaction after the handler returns. See D-0016
+for full context. The entry below is preserved for the audit
+trail.
+
+## D-0008 — Cursor advance is co-transactional with handler writes (original)
 
 **Date:** 2026-05-17
 

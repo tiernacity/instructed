@@ -62,7 +62,7 @@ raises it. SDKs that see it have bypassed the contract.
 | `extend_subscription_claim`     | `(claim_expires_at)`     | Heartbeat |
 | `release_subscription`          | `void`                   | Clean release; cursor preserved |
 | `read_subscription_batch`       | `setof recorded_event`   | Lock + read batch from cursor; does NOT advance |
-| `advance_subscription`          | `(last_seen)`            | Monotone cursor advance; co-transactional with handler writes (D-0008) |
+| `advance_subscription`          | `(last_seen)`            | Monotone cursor advance; called in SDK's own short tx after the handler returns (D-0016) |
 | `read_subscription_position`    | `(last_seen)`            | Read cursor for strong-consistency-on-dispatch polling (D-0010) |
 | `delete_subscription`           | `void`                   | Removes row; raises `IS020` on missing (D-0009) |
 
@@ -167,53 +167,75 @@ append:
 Per D-0005, retry on `IS001` is the per-aggregate serialisation
 mechanism; there is no advisory lock.
 
-### Subscription worker — co-transactional persist-and-ack (D-0008)
+### Subscription worker (D-0016, supersedes D-0008)
+
+The handler is opaque to the SDK; it runs outside any SDK
+transaction. The SDK opens two short transactions per batch —
+one to read, one to advance — with the handler call between
+them:
 
 ```text
 claim_subscription(stream, name, worker_id, lease_secs)
 loop:
-  BEGIN
+  BEGIN  -- short read tx
     events = read_subscription_batch(stream, name, worker_id, batch_size)
-    if events empty: COMMIT; sleep poll_interval; continue
-    for e in events: handler(e)         -- projection writes share the tx
+  COMMIT
+  if events empty: sleep poll_interval; continue
+  for e in events: handler(e)              -- NO SDK transaction
+  BEGIN  -- short ack tx
     advance_subscription(stream, name, worker_id, last_position)
   COMMIT
   -- heartbeat in parallel:
-  extend_subscription_claim(...)        -- on IS022: stop the worker
+  extend_subscription_claim(...)           -- on IS022: stop the worker
 on graceful shutdown:
   release_subscription(stream, name, worker_id)
 ```
 
 The `subscriptions` row lock acquired by `read_subscription_batch` is
-held until commit; `advance_subscription` in the same transaction
-re-uses it without re-acquiring.
+released when the read tx commits; `advance_subscription` re-acquires
+it briefly in the ack tx. The handler runs with no row lock held, so
+it cannot contend with another worker that has taken over the lease
+(though such a worker will observe a different `last_seen` and the
+old worker's eventual `advance_subscription` call will raise IS022).
 
-### Process manager worker (PM-020..024, D-0011)
+The handler is application-domain; it may write to Postgres,
+Elasticsearch, Redis, an external API, or anywhere else. The SDK does
+not pass it a connection. Idempotency on redelivery is the handler's
+concern (NG-0015). An SDK that genuinely wants the historical
+D-0008 co-transactional pattern — same Postgres database, projection
+write atomic with cursor advance — may still call
+`advance_subscription` inside its own transaction; the SQL contract
+supports it. v1 SDKs do not exercise that capability.
 
-Identical in shape to the subscription worker, with `record_snapshot`
-on the PM's `source_uuid` ("<pm_name>-<process_uuid>") replacing the
-projection write, and a dispatch loop in between that emits commands
-through `append_to_stream` (which opens its own transaction in a
-separate session, per the lock-set disjointness above):
+### Process manager worker (PM-020..024, D-0011, D-0016)
+
+Same shape as the subscription worker, but the SDK runs an
+additional persist-and-ack pair (snapshot + cursor advance) in
+the ack tx after the user's `handle` returns. The PM snapshot is
+SDK-owned bookkeeping (PM-024 absorption depends on it staying
+consistent with `last_seen`), so it stays inside the SDK's ack tx
+alongside `advance_subscription`. Dispatch happens in a separate
+session via `append_to_stream` per the lock-set disjointness above.
 
 ```text
 claim_subscription($all, pm_name, worker_id, lease_secs)
 loop:
-  BEGIN  -- persist-and-ack tx (snapshots + subscriptions)
-    events = read_subscription_batch($all, pm_name, worker_id, batch_size)
-    state  = read_snapshot(pm_source_uuid)  -- (or empty)
-    for e in events:
-      (state, commands) = pm_handle(state, e)
-      for c in commands: dispatch(c)        -- separate session
-    record_snapshot(pm_source_uuid, pm_type, e.event_number, state)
-    advance_subscription($all, pm_name, worker_id, last_event_number)
-  COMMIT
+  BEGIN; events = read_subscription_batch(...); COMMIT  -- short read tx
+  if events empty: sleep poll_interval; continue
+  for e in events:
+    state = read_snapshot(pm_source_uuid)  -- or empty
+    (state, commands) = pm_handle(state, e)              -- NO SDK transaction
+    for c in commands: dispatch(c)                       -- separate session
+    BEGIN  -- short snapshot+ack tx, SDK-internal
+      record_snapshot(pm_source_uuid, pm_type, e.event_number, state)
+      advance_subscription($all, pm_name, worker_id, e.event_number)
+    COMMIT
 ```
 
 `dispatch(c)` is whatever the SDK exposes to call `append_to_stream`
 on the target aggregate. It opens its own connection (and thus its own
-transaction); the PM's persist-and-ack transaction does not nest
-inside it. This is the lock-set disjointness D-0011 Phase 7 input #6
+transaction); the PM's snapshot+ack transaction does not nest inside
+it. This is the lock-set disjointness D-0011 Phase 7 input #6
 relies on.
 
 ### Strong-consistency-on-dispatch wait (D-0010)
@@ -277,7 +299,7 @@ will be cut alongside the first tagged release.
 - [`docs/mapping.md`](mapping.md) — every Commanded invariant's
   realisation; the entries cite the SQL artifact that implements them.
 - [`docs/decisions.md`](decisions.md) — D-0005 (OCC retry), D-0006
-  (leased subscriptions), D-0008 (co-transactional advance), D-0009
+  (leased subscriptions), D-0016 (handler-opaque ack; supersedes D-0008), D-0009
   (strict delete), D-0010 (explicit consistency list), D-0011
   (saga = PM + commands), D-0012 (`$all`-as-stream lock).
 - [`docs/non-goals.md`](non-goals.md) — NG-0008 (no row-level

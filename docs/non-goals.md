@@ -263,6 +263,45 @@ value). With NG-0002 there is no process to hibernate or stop.
 called out separately because Commanded users may look for the
 knob.
 
+### NG-0015 — No co-transactional persist-and-ack; handlers own idempotency
+
+**Source:** D-0016 (supersedes D-0008).
+
+**What we are not doing:** the SDK does not run projection /
+process-manager handlers inside a transaction that also advances
+the subscription cursor. The handler receives the event and
+returns; the SDK advances the cursor in a separate short
+transaction after the handler returns successfully. There is no
+transaction, connection, or any other SDK-owned resource passed
+to the handler.
+
+**Why:** the projection target is application-domain. Real
+projections target Elasticsearch, ClickHouse, Redis, BigQuery,
+an external HTTP API, an in-memory cache, a different database,
+or any combination. None of these can share a Postgres
+transaction with `instructed`. The plumbing required to keep the
+co-transactional property for the Postgres case was paid by
+every user and reaped only by Postgres-targeted projections that
+happened to write to the same database the event store sits in.
+Inverted bargain; reversed.
+
+**Consequences:** delivery is at-least-once. A worker that
+crashes between handler-return and cursor-advance will
+redeliver the event on next claim. Applications are responsible
+for handler idempotency — typically via an idempotent UPSERT
+(Postgres), an `_id` keyed on `event_id` (Elasticsearch),
+`SETNX` (Redis), or whatever the target's idempotency story is.
+This is the same contract Commanded provides.
+
+**Future variant not precluded:** an opt-in flag that re-enables
+co-transactional persist-and-ack for the narrow case of
+projecting into the same Postgres database is a plausible v2
+feature. The SQL contract already supports it (`advance_subscription`
+is callable inside any well-formed transaction). Not tracked as
+an `ML-` entry until a real workload demands it.
+
+---
+
 ### NG-0014 — `delete_subscription` on a missing subscription returns an error
 
 Not a positioning statement on its own, but a contract-level

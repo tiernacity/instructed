@@ -12,6 +12,50 @@ Maybe-laters are things we likely *will* do, just not now.
 
 ---
 
+## ML-0003 — Server-side selector evaluation for persistent subscriptions
+
+**Deferred at:** Phase 8 SDK design (OQ-0003 resolution).
+
+**What:** allow `read_subscription_batch` to accept a `selector`
+key in its `p_options jsonb` argument (a JSONB-path expression or
+a SQL predicate fragment over `data` / `metadata` / `event_type`)
+and filter events server-side before returning. Reduces bandwidth
+for sparse selectors (1–5% match rate) at the cost of restricting
+the selector vocabulary to whatever the server's predicate
+language supports.
+
+**Why deferred:**
+
+- v1 ships SDK-side selectors only: the SDK reads a batch, runs
+  the application's predicate locally, calls the handler only on
+  matches, and advances the cursor to the last *fetched*
+  event_number (INV-SUB-P-050). This is the simplest and most
+  expressive option — the predicate is arbitrary application
+  code.
+- Adding server-side filtering is purely additive once we know
+  what vocabulary the workloads actually need. The bank-account
+  example (Phase 8 done-criterion) is unlikely to stress
+  bandwidth at all; a real test case would be a single subscription
+  feeding many handlers each interested in a small slice of
+  event types.
+
+**Forward compatibility constraints:**
+
+- `read_subscription_batch.p_options` is already documented to
+  accept a future `selector` key. Adding it MUST NOT change the
+  v1 default semantics (no selector key → all events returned).
+- The SDK's `selector?: (e) => boolean` field on the subscription
+  worker stays for arbitrary predicates; a future API addition
+  accepts a server-evaluable predicate alongside it. The two are
+  not mutually exclusive (a workload could pre-filter
+  server-side and then refine SDK-side).
+- Cursor-advance semantics do not change: the highest delivered-
+  or-skipped event_number is what the SDK passes to
+  `advance_subscription`, whether the skip happened server-side
+  or client-side.
+
+---
+
 ## ML-0002 — Push via `LISTEN`/`NOTIFY` as a latency optimisation
 
 **Deferred at:** D-0003.

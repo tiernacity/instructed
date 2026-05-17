@@ -1,5 +1,18 @@
 # Sagas / Process Managers — Phase 6
 
+> **Phase 8 review note (2026-05-17):** D-0016 supersedes D-0008.
+> The references to D-0008 in this document are accurate for the
+> **SDK-internal snapshot+ack pair** (the PM's snapshot upsert
+> and its cursor advance still commit together in one short
+> SDK-owned transaction). They are no longer accurate for the
+> user's `handle` callback, which under D-0016 runs **outside**
+> any SDK transaction; idempotency of the user's PM logic on
+> redelivery is the application's concern (per the patterns
+> documented in `sdk-design.md` §3 layer 3). The substance of
+> this document's reasoning — PMs as the saga primitive,
+> compensation as a command, the dispatch → snapshot → ack
+> ordering — is unchanged.
+
 The purpose of this document is to settle the one open mapping
 entry left after Phase 4: **PM-030 (compensation)**. D-0001 already
 committed `instructed` to treating compensation as a first-class

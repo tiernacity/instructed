@@ -668,13 +668,13 @@ the primitives; the SDK provides the orchestration.
   than the current cursor is a no-op (the `max` makes ack
   effectively monotonic, satisfying INV-SUB-P-032's "all events
   up to and including N" rule).
-  Per D-0008, the SDK is expected to call `advance_subscription`
-  inside the same transaction as its projection write — yielding
-  a stronger projection-and-cursor atomicity than Commanded's
-  reference adapter (see HND-031 below).
-- **Verdict:** **equivalent on the per-event ack contract**,
-  **tighter on projection atomicity** (the optional co-
-  transactional pattern is unique to `instructed`).
+  Per D-0016, the SDK calls `advance_subscription` in its own
+  short transaction after the user's handler returns; the
+  handler is opaque to the SDK and runs outside any SDK
+  transaction (see HND-031 below).
+- **Verdict:** **equivalent on the per-event ack contract**
+  (D-0016 collapses to Commanded's contract: at-least-once
+  delivery, handler-driven idempotency).
 
 #### INV-SUB-P-034 — Out-of-order ack behaviour unspecified
 
@@ -764,29 +764,27 @@ into "the SDK loop does this", it is noted briefly.
 
 #### HND-011, HND-031 — Ack on success; projection-cursor atomicity
 
-This is the consequential one.
-
 - **Commanded:** the handler returns; the framework calls
   `ack_event` as a separate SQL statement. The projection write
   (in the handler's own transaction) and the cursor advance are
   *not* atomic. Commanded papers over this with at-least-once
   delivery + application-side idempotency, or with strong-
   consistency-on-dispatch (Part E of `guarantees.md`).
-- **`instructed`:** **tighter, per D-0008**. The SDK opens a
-  transaction, fetches the batch, runs the handler (which writes
-  to its projection tables in the same transaction), and calls
-  `advance_subscription` before commit. The cursor advance and
-  the projection write commit or roll back together. An
-  application that uses this pattern gets exactly-once *between*
-  projection writes and cursor advances; redelivery becomes a
-  transaction-level concern rather than a (write, advance)-pair
-  concern.
-  The legacy non-atomic pattern is still supported: an SDK can
-  call `advance_subscription` after the handler's own transaction
-  commits, accepting the same idempotency burden Commanded has.
-  OQ-0002 records the SDK-API shape question.
-- **Verdict:** **tighter on the recommended pattern**,
-  **equivalent on the loose pattern**.
+- **`instructed`:** **equivalent**, per D-0016 (which supersedes
+  the earlier D-0008 attempt at co-transactional persist-and-ack).
+  The handler is opaque to the SDK; the SDK advances the cursor
+  in its own short transaction after the handler returns. The
+  projection target is application-domain (often not Postgres at
+  all — Elasticsearch, Redis, an external API, etc.); the SDK
+  cannot uniformly provide transactional atomicity across
+  unrelated technologies, so it does not try. Idempotency is the
+  handler's concern, with whatever mechanism fits the target.
+  The SQL contract still permits an SDK to call
+  `advance_subscription` inside its own transaction — a future
+  opt-in flag could re-enable the co-transactional pattern for
+  the narrow same-Postgres case — but v1 does not exercise that
+  capability.
+- **Verdict:** **equivalent** (per D-0016 / NG-0015).
 
 #### HND-012 — Monotonic ack; `last_seen_event` absorbs duplicates
 
@@ -794,13 +792,14 @@ This is the consequential one.
   events with `event_number <= last_seen_event` are silently
   re-acked without `handle/2`.
 - **`instructed`:** the `max(last_seen, up_to_position)` rule in
-  `advance_subscription` (INV-SUB-P-032) already gives the store
-  side. On the SDK side, with co-transactional advance there is
-  generally no redelivery to absorb — the transaction either
-  committed (cursor moved) or rolled back (no projection write,
-  no advance, redelivery is welcome). With non-co-transactional
-  advance the SDK MAY track `last_seen_event` to skip the handler
-  call on duplicates.
+  `advance_subscription` (INV-SUB-P-032) gives the store side.
+  On the SDK side, per D-0016 the cursor advance happens in its
+  own short transaction after the handler returns; a crash
+  between handler-return and ack-commit causes redelivery, and
+  the handler is responsible for absorbing duplicates
+  idempotently. The SDK MAY additionally track `last_seen_event`
+  in worker memory to skip the handler call on duplicates within
+  the lifetime of a single worker.
 - **Verdict:** **equivalent** (mechanism shifts; semantics
   preserved).
 
@@ -831,12 +830,10 @@ This is the consequential one.
 #### HND-023 — At-least-once is intrinsic
 
 - **Commanded:** documented requirement.
-- **`instructed`:** same. Even with D-0008's co-transactional
-  pattern, a worker that crashes *between commit and the SDK
-  acknowledging the commit to the application code* still
-  produces at-most-an-already-committed-effect; in the strict
-  CAP sense, delivery is still at-least-once because the worker
-  may not have observed its own commit. Applications building on
+- **`instructed`:** same. Per D-0016, the cursor advance is a
+  separate short transaction after the handler returns; a
+  worker that crashes between handler-return and ack-commit
+  will redeliver the event on next claim. Applications building on
   this remain responsible for idempotency when they care about
   side effects, not just database state.
 - **Verdict:** **equivalent**.
@@ -920,15 +917,21 @@ This is the load-bearing ordering rule. Commanded's sequence:
 - **`instructed`:** the SDK preserves the same ordering. Step 3's
   dispatches each run their own load-execute-append cycle
   (separate transactions, by necessity — they touch different
-  streams with their own optimistic-locking dance). Steps 5 and 6
-  collapse into **one transaction** per D-0008: the SDK opens a
-  transaction, calls `record_snapshot` for the PM state, then
-  `advance_subscription` for the PM's subscription, then commits.
+  streams with their own optimistic-locking dance). Per D-0016,
+  the PM `handle` callback itself runs outside any SDK
+  transaction; steps 5 and 6 (snapshot upsert + cursor advance)
+  run together in one short SDK-internal transaction *after*
+  the handler returns. The snapshot is SDK-owned bookkeeping
+  (PM-024 absorption depends on it staying consistent with
+  `last_seen`), so co-transactional persist+ack still applies
+  to this pair — D-0016's "handlers are opaque" reasoning does
+  not apply to the SDK's own state.
 - **Verdict:** **equivalent on the cross-aggregate dispatch step**
   (still at-least-once because dispatching is its own transaction
-  per command), **tighter on the persist-then-ack pair** (snapshot
-  and cursor advance commit together; PM-024's redelivery-
-  detection becomes a backup rather than the primary path).
+  per command), **tighter on the snapshot-then-ack pair** (snapshot
+  and cursor advance commit together in the SDK-internal
+  persist-and-ack tx; PM-024's redelivery-detection becomes a
+  backup rather than the primary path).
 
 #### PM-012 — Causation/correlation inherit from the triggering event
 
@@ -994,9 +997,13 @@ This is the load-bearing ordering rule. Commanded's sequence:
   advance call. If the ack fails or the process crashes between,
   PM-024 absorbs the duplicate.
 - **`instructed`:** snapshot upsert and cursor advance commit
-  **together** per D-0008. The window in which PM-024 absorption
-  is needed shrinks to "cross-aggregate dispatches partially
-  succeeded before the snapshot+ack transaction committed".
+  **together** in the SDK-internal persist-and-ack transaction
+  that runs after the user's `handle` returns. (Per D-0016, the
+  user's handler runs outside any SDK transaction; only this
+  SDK-internal snapshot+advance pair shares one.) The window in
+  which PM-024 absorption is needed shrinks to "cross-aggregate
+  dispatches partially succeeded before the snapshot+ack
+  transaction committed".
 - **Verdict:** **tighter** on the persist-ack ordering window.
 
 #### PM-024 — `source_version` doubles as `last_seen_event_number`
@@ -1005,12 +1012,13 @@ This is the load-bearing ordering rule. Commanded's sequence:
   `event_number` of the last successfully handled event; on
   redelivery the PM checks `event.event_number <=
   source_version` and silently re-acks.
-- **`instructed`:** identical convention. With co-transactional
-  advance (D-0008) the *primary* redelivery-detection is the
-  subscription cursor itself (which won't redeliver events <=
-  `last_seen`). PM-024's snapshot-version check remains a backup
-  for the narrower window where dispatches partially succeeded
-  before the persist-and-advance transaction committed.
+- **`instructed`:** identical convention. Because the
+  SDK-internal snapshot+advance pair commits together (see
+  PM-023), the primary redelivery-detection is the subscription
+  cursor itself (which won't redeliver events <= `last_seen`).
+  PM-024's snapshot-version check remains a backup for the
+  narrower window where dispatches partially succeeded before
+  the snapshot+advance transaction committed.
 - **Verdict:** **equivalent on semantics**, **tighter on the
   effective duplicate window**.
 
@@ -1033,7 +1041,8 @@ This is the load-bearing ordering rule. Commanded's sequence:
   on shape**. Commanded calls compensation "not first-class";
   `instructed` calls the same mechanism first-class because the
   PM primitives (snapshot-backed state, co-transactional
-  persist-and-ack per D-0008, ordered at-least-once delivery)
+  snapshot+ack on the SDK-internal bookkeeping per D-0016
+  building on D-0008's predecessor, ordered at-least-once delivery)
   carry the durability and recovery guarantees that make
   compensating-command flows reliable without application-side
   re-implementation. The semantic shape — compensation is a
@@ -1213,7 +1222,11 @@ are already mapped in Pass 1 (AGG-*).
 - **D-0007** — Transient subscriptions dropped from v1.
 - **D-0008** — Cursor advance is callable inside the SDK's
   projection transaction; co-transactional advance is the
-  recommended pattern.
+  recommended pattern. **Superseded by D-0016** (Phase 8 SDK
+  design review): the projection target is application-domain;
+  the handler is opaque to the SDK; cursor advance is in its
+  own short transaction. HND-031 / PM-023 / PM-024 verdicts
+  above have been updated.
 - **D-0009** — `delete_subscription` on missing is an error
   (follows the abstract contract; tighter than the reference
   adapter's silent `:ok`).
