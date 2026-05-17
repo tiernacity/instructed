@@ -85,7 +85,26 @@ without producing new questions.
 
 ---
 
-## Phase 3 — Guarantees of the layers above the event store
+## Phase 3 — Guarantees of the layers above the event store — **done**
+
+Produced `docs/guarantees.md`. Classified each guarantee as intrinsic
+(I), BEAM-mechanism (B), or convenience (C) — the basis for Phase 4
+mapping decisions. The most important findings:
+
+- Per-aggregate command serialisation is a BEAM mechanism (AGG-011);
+  `instructed` gets it from optimistic-lock retry or an advisory lock,
+  not from a registered process.
+- Process manager state is persisted **as a snapshot** in the
+  event store (PM-020..024), keyed by
+  `"<pm_name>-<process_uuid>"`. The snapshot's `source_version`
+  doubles as the per-instance `last_seen_event`. We can reuse the
+  same trick.
+- Strong-consistency-on-dispatch (CON-001..013) is semantically
+  intrinsic but mechanism-BEAM (in-VM pubsub + ETS). Our polling
+  variant is semantically equivalent but higher-latency.
+- Compensation in Commanded is *not* first-class (PM-030) — it is
+  whatever commands a PM dispatches. D-0001 already commits us to
+  doing better.
 
 **Goal:** the adapter contract is necessary but not sufficient. Commanded
 adds guarantees on top of it — per-aggregate command serialization, retry
