@@ -241,7 +241,19 @@ implications for the schema and SDK are written into `mapping.md`.
 
 ---
 
-## Phase 7 — First-cut SQL contract
+## Phase 7 — First-cut SQL contract — **done**
+
+Produced `sql/instructed.sql` (schema + 12 plpgsql procedures with
+full docstrings and working bodies), `docs/sql-contract.md` (human-
+oriented reference: error-code catalogue, lock-ordering summary,
+recommended call patterns), and `sql/migrations/` (absurd-style
+directory; empty until first tag). Resolved OQ-0001 via D-0012
+(`$all`-as-stream with row-level lock); no new decisions or open
+questions in Pass 3. Validated against a live Postgres: clean
+install into an empty schema, every error SQLSTATE in the closed
+catalogue (`IS001..IS006, IS010, IS020, IS022, 22023`) triggered
+and caught, and two-session concurrent `any_version` appends
+serialised correctly through the `$all` row lock.
 
 **Goal:** the SQL file is the spec. Before any SDK code, produce a
 schema and a set of stored procedure signatures with their pre/post

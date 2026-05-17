@@ -442,9 +442,207 @@ create or replace function instructed.append_to_stream (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_n          integer;
+  v_stream_id  bigint;
+  v_base_sv    bigint;  -- per-stream version before this batch
+  v_base_en    bigint;  -- global event_number before this batch
+  v_current    bigint;
+  v_constraint text;
 begin
-  raise exception 'instructed.append_to_stream: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  -- ----- input validation -----------------------------------------------
+  if p_stream_uuid is null then
+    raise exception 'append_to_stream: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_stream_uuid = '$all' then
+    raise exception 'append_to_stream: stream_uuid ''$all'' is reserved'
+      using errcode = 'IS005';
+  end if;
+  if p_expected_version_type is null
+     or p_expected_version_type not in ('any','no_stream','stream_exists','exact')
+  then
+    raise exception 'append_to_stream: invalid p_expected_version_type: %',
+      coalesce(p_expected_version_type, '<null>')
+      using errcode = '22023';
+  end if;
+  if p_expected_version_type = 'exact'
+     and (p_expected_version is null or p_expected_version < 0)
+  then
+    raise exception 'append_to_stream: p_expected_version must be a non-negative integer for ''exact'''
+      using errcode = '22023';
+  end if;
+  if p_events is null
+     or jsonb_typeof(p_events) <> 'array'
+     or jsonb_array_length(p_events) = 0
+  then
+    raise exception 'append_to_stream: p_events must be a non-empty JSON array'
+      using errcode = '22023';
+  end if;
+  v_n := jsonb_array_length(p_events);
+
+  -- Per-event shape check. Each element must have event_id (uuid),
+  -- event_type (text), data (jsonb of any type). causation_id /
+  -- correlation_id may be present-and-uuid or absent/null.
+  if exists (
+    select 1
+    from jsonb_array_elements(p_events) as evt
+    where not (evt ? 'event_id')
+       or not (evt ? 'event_type')
+       or not (evt ? 'data')
+       or jsonb_typeof(evt->'event_type') <> 'string'
+       or jsonb_typeof(evt->'event_id')   <> 'string'
+  ) then
+    raise exception 'append_to_stream: each event must have event_id, event_type, data'
+      using errcode = '22023';
+  end if;
+  begin
+    perform (evt->>'event_id')::uuid
+      from jsonb_array_elements(p_events) as evt;
+  exception when invalid_text_representation then
+    raise exception 'append_to_stream: malformed event_id (must be UUID)'
+      using errcode = '22023';
+  end;
+
+  -- ----- (1) resolve / lock the target stream's row ---------------------
+  case p_expected_version_type
+    when 'any' then
+      -- Upsert: create the stream on first append, otherwise bump version.
+      -- The ON CONFLICT path takes a row-level lock on the existing row
+      -- (per D-0005); the INSERT path takes a lock on the new row.
+      insert into instructed.streams as s (stream_uuid, stream_version)
+      values (p_stream_uuid, v_n)
+      on conflict (stream_uuid) do update
+        set stream_version = s.stream_version + v_n
+      returning s.stream_id, s.stream_version - v_n
+        into v_stream_id, v_base_sv;
+
+    when 'no_stream' then
+      begin
+        insert into instructed.streams (stream_uuid, stream_version)
+        values (p_stream_uuid, v_n)
+        returning stream_id, 0::bigint
+          into v_stream_id, v_base_sv;
+      exception when unique_violation then
+        raise exception 'append_to_stream: stream % already exists', p_stream_uuid
+          using errcode = 'IS002';
+      end;
+
+    when 'stream_exists' then
+      update instructed.streams s
+         set stream_version = s.stream_version + v_n
+       where s.stream_uuid = p_stream_uuid
+      returning s.stream_id, s.stream_version - v_n
+        into v_stream_id, v_base_sv;
+      if not found then
+        raise exception 'append_to_stream: stream % does not exist', p_stream_uuid
+          using errcode = 'IS003';
+      end if;
+
+    when 'exact' then
+      select stream_id, stream_version
+        into v_stream_id, v_current
+        from instructed.streams
+       where stream_uuid = p_stream_uuid
+       for update;
+      if not found then
+        if p_expected_version = 0 then
+          -- INV-APPEND-014: V=0 against a missing stream creates it.
+          insert into instructed.streams (stream_uuid, stream_version)
+          values (p_stream_uuid, v_n)
+          returning stream_id, 0::bigint
+            into v_stream_id, v_base_sv;
+        else
+          raise exception 'append_to_stream: stream % does not exist (expected version %)',
+            p_stream_uuid, p_expected_version
+            using errcode = 'IS001';
+        end if;
+      else
+        if v_current <> p_expected_version then
+          raise exception 'append_to_stream: wrong expected version: actual %, expected %',
+            v_current, p_expected_version
+            using errcode = 'IS001';
+        end if;
+        update instructed.streams s
+           set stream_version = s.stream_version + v_n
+         where s.stream_id = v_stream_id
+        returning s.stream_version - v_n into v_base_sv;
+      end if;
+  end case;
+
+  -- ----- (2) lock and bump the $all row ---------------------------------
+  -- D-0012: the row lock taken here is the global serialisation point
+  -- that gives INV-APPEND-003 its gaplessness.
+  update instructed.streams s
+     set stream_version = s.stream_version + v_n
+   where s.stream_id = 0
+  returning s.stream_version - v_n into v_base_en;
+
+  -- ----- (3) insert events and (4) link into origin + $all --------------
+  -- A single CTE chain so the exception block can distinguish events_pkey
+  -- (IS004) from stream_events_stream_id_stream_version_key (IS001).
+  begin
+    return query
+    with
+      new_events as (
+        select
+          (evt->>'event_id')::uuid                       as event_id,
+          (evt->>'event_type')::text                     as event_type,
+          nullif(evt->>'causation_id','')::uuid          as causation_id,
+          nullif(evt->>'correlation_id','')::uuid        as correlation_id,
+          coalesce(evt->'data', 'null'::jsonb)           as data,
+          evt->'metadata'                                as metadata,
+          idx                                            as idx,
+          (v_base_sv + idx)::bigint                      as sv,
+          (v_base_en + idx)::bigint                      as en
+        from jsonb_array_elements(p_events) with ordinality as t(evt, idx)
+      ),
+      ins_events as (
+        insert into instructed.events
+          (event_id, event_type, causation_id, correlation_id, data, metadata)
+        select event_id, event_type, causation_id, correlation_id, data, metadata
+          from new_events
+        returning event_id, created_at
+      ),
+      ins_origin as (
+        insert into instructed.stream_events
+          (event_id, stream_id, stream_version,
+           original_stream_id, original_stream_version)
+        select event_id, v_stream_id, sv, v_stream_id, sv from new_events
+        returning 1
+      ),
+      ins_all as (
+        insert into instructed.stream_events
+          (event_id, stream_id, stream_version,
+           original_stream_id, original_stream_version)
+        select event_id, 0::bigint, en, v_stream_id, sv from new_events
+        returning 1
+      )
+    select n.event_id, n.sv, n.en, i.created_at
+      from new_events n
+      join ins_events i using (event_id)
+      -- force the linking CTEs to materialise
+     where (select count(*) from ins_origin) is not null
+       and (select count(*) from ins_all)    is not null
+     order by n.idx;
+  exception when unique_violation then
+    get stacked diagnostics v_constraint = constraint_name;
+    if v_constraint in ('events_pkey', 'stream_events_pkey') then
+      -- events_pkey: duplicate event_id reached the events table.
+      -- stream_events_pkey (event_id, stream_id): duplicate event_id
+      -- reached the $all link (or the origin link). In a multi-CTE
+      -- statement these fire in undefined order; both signal the same
+      -- semantic condition -- a caller re-used an event_id.
+      raise exception 'append_to_stream: duplicate event_id'
+        using errcode = 'IS004';
+    elsif v_constraint = 'stream_events_stream_id_stream_version_key' then
+      raise exception 'append_to_stream: wrong expected version (concurrent append)'
+        using errcode = 'IS001';
+    else
+      raise;
+    end if;
+  end;
 end;
 $$;
 
@@ -513,9 +711,56 @@ create or replace function instructed.read_stream (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
 begin
-  raise exception 'instructed.read_stream: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'read_stream: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_stream_uuid = '$all' then
+    raise exception 'read_stream: stream_uuid ''$all'' is reserved; use read_all'
+      using errcode = 'IS005';
+  end if;
+  if p_from_stream_version is null or p_from_stream_version < 0 then
+    raise exception 'read_stream: p_from_stream_version must be a non-negative integer'
+      using errcode = '22023';
+  end if;
+  if p_qty is null or p_qty <= 0 then
+    raise exception 'read_stream: p_qty must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'read_stream: stream % not found', p_stream_uuid
+      using errcode = 'IS003';
+  end if;
+
+  return query
+  select
+    e.event_id,
+    all_se.stream_version           as event_number,
+    p_stream_uuid                   as stream_uuid,
+    se.stream_version               as stream_version,
+    e.event_type,
+    e.causation_id,
+    e.correlation_id,
+    e.data,
+    e.metadata,
+    e.created_at
+  from instructed.stream_events se
+  join instructed.events e
+    on e.event_id = se.event_id
+  join instructed.stream_events all_se
+    on all_se.event_id = se.event_id and all_se.stream_id = 0
+  where se.stream_id = v_stream_id
+    and se.stream_version >= p_from_stream_version
+  order by se.stream_version
+  limit p_qty;
 end;
 $$;
 
@@ -574,9 +819,38 @@ create or replace function instructed.read_all (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
 begin
-  raise exception 'instructed.read_all: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_from_event_number is null or p_from_event_number < 0 then
+    raise exception 'read_all: p_from_event_number must be a non-negative integer'
+      using errcode = '22023';
+  end if;
+  if p_qty is null or p_qty <= 0 then
+    raise exception 'read_all: p_qty must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  return query
+  select
+    e.event_id,
+    se.stream_version                  as event_number,
+    orig.stream_uuid                   as stream_uuid,
+    se.original_stream_version         as stream_version,
+    e.event_type,
+    e.causation_id,
+    e.correlation_id,
+    e.data,
+    e.metadata,
+    e.created_at
+  from instructed.stream_events se
+  join instructed.events e
+    on e.event_id = se.event_id
+  join instructed.streams orig
+    on orig.stream_id = se.original_stream_id
+  where se.stream_id = 0
+    and se.stream_version >= p_from_event_number
+  order by se.stream_version
+  limit p_qty;
 end;
 $$;
 
@@ -630,9 +904,35 @@ create or replace function instructed.record_snapshot (
   returns void
   language plpgsql
 as $$
+#variable_conflict use_column
 begin
-  raise exception 'instructed.record_snapshot: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_source_uuid is null or p_source_uuid = '' then
+    raise exception 'record_snapshot: p_source_uuid is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_source_type is null or p_source_type = '' then
+    raise exception 'record_snapshot: p_source_type is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_source_version is null or p_source_version < 0 then
+    raise exception 'record_snapshot: p_source_version must be a non-negative integer'
+      using errcode = '22023';
+  end if;
+  if p_data is null then
+    raise exception 'record_snapshot: p_data is null'
+      using errcode = '22023';
+  end if;
+
+  insert into instructed.snapshots
+    (source_uuid, source_type, source_version, data, metadata, created_at)
+  values
+    (p_source_uuid, p_source_type, p_source_version, p_data, p_metadata, now())
+  on conflict (source_uuid) do update
+    set source_type    = excluded.source_type,
+        source_version = excluded.source_version,
+        data           = excluded.data,
+        metadata       = excluded.metadata,
+        created_at     = excluded.created_at;
 end;
 $$;
 
@@ -674,9 +974,21 @@ create or replace function instructed.read_snapshot (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
 begin
-  raise exception 'instructed.read_snapshot: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_source_uuid is null then
+    raise exception 'read_snapshot: p_source_uuid is null'
+      using errcode = '22023';
+  end if;
+
+  return query
+  select s.source_uuid, s.source_type, s.source_version, s.data, s.metadata, s.created_at
+    from instructed.snapshots s
+   where s.source_uuid = p_source_uuid;
+  if not found then
+    raise exception 'read_snapshot: snapshot % not found', p_source_uuid
+      using errcode = 'IS010';
+  end if;
 end;
 $$;
 
@@ -708,9 +1020,15 @@ create or replace function instructed.delete_snapshot (
   returns void
   language plpgsql
 as $$
+#variable_conflict use_column
 begin
-  raise exception 'instructed.delete_snapshot: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_source_uuid is null then
+    raise exception 'delete_snapshot: p_source_uuid is null'
+      using errcode = '22023';
+  end if;
+
+  delete from instructed.snapshots where source_uuid = p_source_uuid;
+  -- INV-SNAP-004: idempotent. No error if no row was deleted.
 end;
 $$;
 
@@ -809,9 +1127,122 @@ create or replace function instructed.claim_subscription (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id  bigint;
+  v_shard      smallint;
+  v_start_from text;
+  v_initial    bigint;
+  v_now        timestamptz := now();
+  v_expires    timestamptz;
+  v_row        instructed.subscriptions%rowtype;
 begin
-  raise exception 'instructed.claim_subscription: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  -- ----- input validation -----------------------------------------------
+  if p_stream_uuid is null then
+    raise exception 'claim_subscription: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'claim_subscription: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'claim_subscription: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_lease_seconds is null or p_lease_seconds <= 0 then
+    raise exception 'claim_subscription: p_lease_seconds must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+  if v_shard < 0 then
+    raise exception 'claim_subscription: shard must be non-negative'
+      using errcode = '22023';
+  end if;
+
+  v_start_from := coalesce(p_options->>'start_from', 'origin');
+  v_expires    := v_now + make_interval(secs => p_lease_seconds);
+
+  -- Resolve target stream_id ('$all' resolves to 0 via the seed row).
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'claim_subscription: stream % not found', p_stream_uuid
+      using errcode = 'IS003';
+  end if;
+
+  -- Lock the subscription row if it exists; insert otherwise.
+  select * into v_row
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update;
+
+  if not found then
+    -- First-create path. Compute initial cursor from start_from.
+    if v_start_from = 'origin' then
+      v_initial := 0;
+    elsif v_start_from = 'current' then
+      -- For $all this is current event_number; for single-stream this is
+      -- the current stream_version. Both are the streams row's
+      -- stream_version column.
+      select stream_version into v_initial
+        from instructed.streams
+       where stream_id = v_stream_id;
+    else
+      begin
+        v_initial := v_start_from::bigint;
+      exception when invalid_text_representation then
+        raise exception 'claim_subscription: start_from must be ''origin'', ''current'', or a non-negative integer'
+          using errcode = '22023';
+      end;
+      if v_initial < 0 then
+        raise exception 'claim_subscription: start_from must be non-negative'
+          using errcode = '22023';
+      end if;
+    end if;
+
+    insert into instructed.subscriptions
+      (stream_id, subscription_name, shard, last_seen,
+       claimed_by, claim_expires_at)
+    values
+      (v_stream_id, p_subscription_name, v_shard, v_initial,
+       p_worker_id, v_expires);
+
+    return query
+    select 'claimed'::text, v_initial, p_worker_id, v_expires;
+    return;
+  end if;
+
+  -- Row exists. Either we can take it (unclaimed or expired) or another
+  -- worker holds a live lease. INV-SUB-P-021: start_from is ignored on
+  -- subsequent claims.
+  if v_row.claimed_by is null
+     or v_row.claim_expires_at is null
+     or v_row.claim_expires_at <= v_now
+     or v_row.claimed_by = p_worker_id
+  then
+    update instructed.subscriptions
+       set claimed_by       = p_worker_id,
+           claim_expires_at = v_expires
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard;
+
+    return query
+    select 'claimed'::text, v_row.last_seen, p_worker_id, v_expires;
+    return;
+  end if;
+
+  -- A different worker holds a live lease.
+  return query
+  select 'already_claimed'::text,
+         v_row.last_seen,
+         v_row.claimed_by,
+         v_row.claim_expires_at;
 end;
 $$;
 
@@ -862,9 +1293,66 @@ create or replace function instructed.extend_subscription_claim (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id   bigint;
+  v_shard       smallint;
+  v_expires     timestamptz;
+  v_holder      text;
 begin
-  raise exception 'instructed.extend_subscription_claim: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'extend_subscription_claim: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'extend_subscription_claim: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'extend_subscription_claim: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_lease_seconds is null or p_lease_seconds <= 0 then
+    raise exception 'extend_subscription_claim: p_lease_seconds must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  v_shard   := coalesce((p_options->>'shard')::smallint, 0);
+  v_expires := now() + make_interval(secs => p_lease_seconds);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'extend_subscription_claim: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by into v_holder
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update;
+
+  if not found then
+    raise exception 'extend_subscription_claim: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'extend_subscription_claim: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS022';
+  end if;
+
+  update instructed.subscriptions
+     set claim_expires_at = v_expires
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard;
+
+  return query select v_expires;
 end;
 $$;
 
@@ -913,9 +1401,59 @@ create or replace function instructed.release_subscription (
   returns void
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
 begin
-  raise exception 'instructed.release_subscription: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'release_subscription: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'release_subscription: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'release_subscription: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'release_subscription: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by into v_holder
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update;
+
+  if not found then
+    raise exception 'release_subscription: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'release_subscription: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS022';
+  end if;
+
+  update instructed.subscriptions
+     set claimed_by       = null,
+         claim_expires_at = null
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard;
 end;
 $$;
 
@@ -1005,9 +1543,91 @@ create or replace function instructed.read_subscription_batch (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
+  v_last_seen bigint;
 begin
-  raise exception 'instructed.read_subscription_batch: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'read_subscription_batch: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'read_subscription_batch: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'read_subscription_batch: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_qty is null or p_qty <= 0 then
+    raise exception 'read_subscription_batch: p_qty must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'read_subscription_batch: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by, last_seen into v_holder, v_last_seen
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update;
+
+  if not found then
+    raise exception 'read_subscription_batch: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'read_subscription_batch: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS022';
+  end if;
+
+  -- Unified delivery query. For v_stream_id = 0 ($all): se.stream_version
+  -- is the event_number; original_stream_version is the per-stream
+  -- version; orig.stream_uuid is the event's original stream.
+  -- For v_stream_id > 0: se.stream_version = original_stream_version,
+  -- and all_se.stream_version is the event_number.
+  return query
+  select
+    e.event_id,
+    case when v_stream_id = 0
+         then se.stream_version
+         else all_se.stream_version
+    end                                  as event_number,
+    orig.stream_uuid                     as stream_uuid,
+    se.original_stream_version           as stream_version,
+    e.event_type,
+    e.causation_id,
+    e.correlation_id,
+    e.data,
+    e.metadata,
+    e.created_at
+  from instructed.stream_events se
+  join instructed.events e
+    on e.event_id = se.event_id
+  join instructed.streams orig
+    on orig.stream_id = se.original_stream_id
+  left join instructed.stream_events all_se
+    on v_stream_id <> 0
+   and all_se.event_id = se.event_id
+   and all_se.stream_id = 0
+  where se.stream_id = v_stream_id
+    and se.stream_version > v_last_seen
+  order by se.stream_version
+  limit p_qty;
 end;
 $$;
 
@@ -1076,9 +1696,68 @@ create or replace function instructed.advance_subscription (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
+  v_new       bigint;
 begin
-  raise exception 'instructed.advance_subscription: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'advance_subscription: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'advance_subscription: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'advance_subscription: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_up_to_position is null or p_up_to_position < 0 then
+    raise exception 'advance_subscription: p_up_to_position must be non-negative'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'advance_subscription: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by into v_holder
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update;
+
+  if not found then
+    raise exception 'advance_subscription: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'advance_subscription: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS022';
+  end if;
+
+  -- INV-SUB-P-034: monotone advance only; out-of-order or duplicate acks
+  -- are absorbed without error.
+  update instructed.subscriptions s
+     set last_seen = greatest(s.last_seen, p_up_to_position)
+   where s.stream_id = v_stream_id
+     and s.subscription_name = p_subscription_name
+     and s.shard = v_shard
+  returning s.last_seen into v_new;
+
+  return query select v_new;
 end;
 $$;
 
@@ -1124,9 +1803,43 @@ create or replace function instructed.read_subscription_position (
   )
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_last      bigint;
 begin
-  raise exception 'instructed.read_subscription_position: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'read_subscription_position: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'read_subscription_position: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'read_subscription_position: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  select s.last_seen into v_last
+    from instructed.subscriptions s
+   where s.stream_id = v_stream_id
+     and s.subscription_name = p_subscription_name
+     and s.shard = v_shard;
+  if not found then
+    raise exception 'read_subscription_position: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  return query select v_last;
 end;
 $$;
 
@@ -1174,8 +1887,40 @@ create or replace function instructed.delete_subscription (
   returns void
   language plpgsql
 as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_deleted   integer;
 begin
-  raise exception 'instructed.delete_subscription: not yet implemented (Pass 3)'
-    using errcode = '0A000';
+  if p_stream_uuid is null then
+    raise exception 'delete_subscription: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'delete_subscription: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'delete_subscription: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  delete from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard;
+  get diagnostics v_deleted = row_count;
+  if v_deleted = 0 then
+    raise exception 'delete_subscription: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
 end;
 $$;
