@@ -27,7 +27,7 @@ forward-compatibility constraints they impose on v1 design.
 
 ---
 
-## Phase 1 — Framing (this phase)
+## Phase 1 — Framing — **done**
 
 **Goal:** establish what we are doing, in what order, and capture the
 decisions already made.
@@ -43,7 +43,10 @@ decisions already made.
 
 ---
 
-## Phase 2 — Invariants extracted from Commanded's adapter contract
+## Phase 2 — Invariants extracted from Commanded's adapter contract — **done**
+
+Produced `docs/invariants.md`. Surfaced one open question (OQ-0001 on
+concurrent `:any_version` append ordering).
 
 **Goal:** produce a precise, mechanical specification of what a CQRS/ES
 event store must guarantee, derived from Commanded's adapter interface
