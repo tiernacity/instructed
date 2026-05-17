@@ -281,16 +281,901 @@ create trigger stream_events_no_delete
 
 
 -- ============================================================================
--- Procedure stubs (Pass 1)
+-- Procedure contract (Pass 2)
 --
--- Pass 1 only lays out the schema and resolves OQ-0001 (now D-0012). Pass 2
--- adds full docstrings (inputs, outputs, error sets, lock-acquisition order)
--- to each procedure listed above. Pass 3 fills the bodies.
+-- Each procedure has a docstring covering:
+--   * inputs (positional + options-jsonb shape)
+--   * outputs (return table or scalar)
+--   * the closed set of errors with SQLSTATEs
+--   * lock-acquisition order
 --
--- The roadmap procedure set, for reference:
---   append_to_stream, read_stream, read_all,
---   record_snapshot, read_snapshot, delete_snapshot,
---   claim_subscription, extend_subscription_claim, release_subscription,
---   read_subscription_batch, advance_subscription,
---   read_subscription_position, delete_subscription.
+-- Lock-set disjointness, per D-0011 Phase 7 input #6:
+--
+--   append_to_stream            holds  { streams[target], streams[$all],
+--                                        events, stream_events }
+--   read_stream / read_all      holds  { } (MVCC reads only)
+--   record_snapshot             holds  { snapshots[source_uuid] }
+--   read_snapshot               holds  { } (MVCC read)
+--   delete_snapshot             holds  { snapshots[source_uuid] }
+--   claim_subscription          holds  { subscriptions[stream,name,shard] }
+--   extend_subscription_claim   holds  { subscriptions[stream,name,shard] }
+--   release_subscription        holds  { subscriptions[stream,name,shard] }
+--   read_subscription_batch     holds  { subscriptions[stream,name,shard]
+--                                        (FOR UPDATE), events (MVCC) }
+--   advance_subscription        holds  { subscriptions[stream,name,shard] }
+--   read_subscription_position  holds  { } (MVCC read)
+--   delete_subscription         holds  { subscriptions[stream,name,shard] }
+--
+-- The persist-and-ack transaction the PM worker opens (record_snapshot then
+-- advance_subscription in one tx, per D-0008/PM-023) holds
+--   { snapshots, subscriptions }
+-- which is disjoint from the dispatch transaction
+--   { streams, events, stream_events }.
+-- A different SDK binary or language (the absurd-bridge task, per D-0011
+-- Phase 7 input #4) calling append_to_stream from a fresh session never
+-- competes for those locks because it only touches the dispatch set.
+--
+-- Forward-compat: every procedure that takes caller-tunable knobs accepts
+-- them via a `p_options jsonb default '{}'::jsonb` parameter so ML-0001 and
+-- ML-0002 can grow the surface without breaking v1 callers. Recognised keys
+-- per procedure are documented in each docstring; unknown keys are
+-- silently ignored.
+--
+-- Bodies in this file are stubs (raise feature_not_supported, 0A000) so the
+-- file installs and the signatures lock in. Pass 3 fills them in.
 -- ============================================================================
+
+
+-- ----------------------------------------------------------------------------
+-- append_to_stream
+--
+-- Atomically append N events to a single stream. Realises Part B of
+-- `docs/invariants.md` (INV-APPEND-001..041) and the optimistic-locking
+-- mechanism of D-0005 / INV-APPEND-022.
+--
+-- Inputs:
+--   p_stream_uuid              text, the target stream's external identity.
+--                                MUST NOT be the reserved literal '$all'
+--                                (INV-STREAM-003 / NG-0011); raises IS005.
+--   p_expected_version_type    text, one of:
+--                                'any'           -- :any_version (INV-APPEND-010)
+--                                'no_stream'     -- :no_stream   (INV-APPEND-011)
+--                                'stream_exists' -- :stream_exists (INV-APPEND-012)
+--                                'exact'         -- integer V    (INV-APPEND-013)
+--                              Any other value raises invalid_parameter_value
+--                              (22023).
+--   p_expected_version         bigint, required iff p_expected_version_type =
+--                              'exact'; the current stream version that MUST
+--                              hold at append time. Ignored for other types.
+--   p_events                   jsonb, a non-empty JSON array of event objects.
+--                              Each element MUST have:
+--                                event_id        uuid    (caller-supplied,
+--                                                          INV-APPEND-001,
+--                                                          D-0011 Phase 7 #2)
+--                                event_type      text
+--                                data            jsonb   (INV-META-011)
+--                              and MAY have:
+--                                metadata        jsonb   (default null)
+--                                causation_id    uuid    (default null)
+--                                correlation_id  uuid    (default null)
+--                              An empty or null array raises
+--                              invalid_parameter_value (22023).
+--   p_options                  jsonb, default '{}'. Recognised keys: none in
+--                              v1. ML-0002 reserves room for a future
+--                              'notify': bool key to suppress an end-of-
+--                              transaction pg_notify; that key MUST default
+--                              to true when added so v1 callers do not see
+--                              behaviour change.
+--
+-- Output: one row per appended event, in append order:
+--   event_id          uuid          echoed from input
+--   stream_version    bigint        per-stream contiguous version, starting at
+--                                    (current_version + 1) (INV-APPEND-002)
+--   event_number      bigint        gapless global position (INV-APPEND-003)
+--   created_at        timestamptz   the row's stored timestamp
+--
+-- Errors (closed set):
+--   IS001  wrong_expected_version   the current stream version did not match
+--                                    `p_expected_version` ('exact'), or a
+--                                    concurrent append took the same version
+--                                    slot (INV-APPEND-020).
+--   IS002  stream_exists            p_expected_version_type = 'no_stream'
+--                                    but the stream already exists
+--                                    (INV-APPEND-011).
+--   IS003  stream_not_found         p_expected_version_type = 'stream_exists'
+--                                    but the stream does not exist
+--                                    (INV-APPEND-012).
+--   IS004  duplicate_event          one of the supplied event_ids already
+--                                    exists in the store. The append is
+--                                    rolled back wholesale; no partial
+--                                    persistence (INV-APPEND-030, D-0011
+--                                    Phase 7 #3).
+--   IS005  reserved_stream_uuid     p_stream_uuid = '$all'.
+--   22023  invalid_parameter_value  malformed input (unknown
+--                                    expected_version_type, empty events
+--                                    array, missing required event fields,
+--                                    or bad UUID).
+--
+-- Atomicity (INV-APPEND-006/007): all N events succeed or none do. The
+-- procedure runs in a single (implicit) transaction; any error rolls back
+-- the per-stream and `$all` version bumps along with the event rows.
+--
+-- Lock-acquisition order (D-0012, the OQ-0001 resolution):
+--   1. The target stream's `streams` row: either upserted (INV-APPEND-010
+--      'any' / 'no_stream') or selected and version-checked
+--      ('stream_exists' / 'exact'). The row-level lock acquired here
+--      serialises concurrent appends to the same stream.
+--   2. The `$all` row in `streams` (stream_id = 0):
+--        UPDATE streams SET stream_version = stream_version + N
+--          WHERE stream_id = 0
+--          RETURNING stream_version - N AS initial_event_number
+--      The row lock taken here is the global serialisation point that
+--      gives INV-APPEND-003 its gaplessness.
+--   3. N new rows in `events`. INV-APPEND-030 fires here if any event_id
+--      collides with a prior row (events_pkey unique violation translated
+--      to IS004).
+--   4. 2N new rows in `stream_events`: one linking each event into its
+--      origin stream and one into `$all`. INV-APPEND-022 / D-0005 fires
+--      here on the origin-stream link if a concurrent appender beat us to
+--      the same (stream_id, stream_version) (stream_events_(stream_id,
+--      stream_version) unique violation translated to IS001).
+--
+-- Session / transaction:
+--   Callable from any session (including a different SDK binary or
+--   programming language, per D-0011 Phase 7 #4). The procedure makes no
+--   assumption about session GUCs, prior transactions, or held leases. The
+--   caller MAY wrap append_to_stream in a larger transaction; in that case
+--   the locks above are held until the caller's commit.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.append_to_stream (
+  p_stream_uuid           text,
+  p_expected_version_type text,
+  p_expected_version      bigint,
+  p_events                jsonb,
+  p_options               jsonb default '{}'::jsonb
+)
+  returns table (
+    event_id        uuid,
+    stream_version  bigint,
+    event_number    bigint,
+    created_at      timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.append_to_stream: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- read_stream
+--
+-- Read events from a single stream, in stream_version order. Realises Part
+-- C of `docs/invariants.md` (INV-READ-001..004, INV-READ-020).
+--
+-- Inputs:
+--   p_stream_uuid          text, the stream to read.
+--                            MUST NOT be '$all'; for the global stream use
+--                            read_all. A '$all' argument raises IS005.
+--   p_from_stream_version  bigint, inclusive lower bound on stream_version
+--                            (INV-READ-004). 0 returns from the start of
+--                            the stream.
+--   p_qty                  integer, maximum rows to return. NULL or <= 0
+--                            raises invalid_parameter_value (22023). The
+--                            SDK is responsible for paging (calling this
+--                            in a loop with `from = last + 1` until empty).
+--   p_options              jsonb, default '{}'. Recognised keys: none in v1.
+--
+-- Output: zero or more rows in strictly increasing stream_version order:
+--   event_id        uuid
+--   event_number    bigint        global position (INV-APPEND-003)
+--   stream_uuid     text          echoed (always = p_stream_uuid)
+--   stream_version  bigint        per-stream position (INV-APPEND-002)
+--   event_type      text
+--   causation_id    uuid
+--   correlation_id  uuid
+--   data            jsonb
+--   metadata        jsonb
+--   created_at      timestamptz
+--
+-- Errors (closed set):
+--   IS003  stream_not_found         the stream has never been appended to
+--                                    (INV-READ-001).
+--   IS005  reserved_stream_uuid     p_stream_uuid = '$all'.
+--   22023  invalid_parameter_value  malformed input.
+--
+-- Concurrency: MVCC snapshot read; INV-READ-020 applies (paged reads do
+-- not promise to lazily pick up later appends).
+--
+-- Lock-acquisition order: none. Pure read.
+--
+-- Session / transaction: callable from any session.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.read_stream (
+  p_stream_uuid         text,
+  p_from_stream_version bigint,
+  p_qty                 integer,
+  p_options             jsonb default '{}'::jsonb
+)
+  returns table (
+    event_id        uuid,
+    event_number    bigint,
+    stream_uuid     text,
+    stream_version  bigint,
+    event_type      text,
+    causation_id    uuid,
+    correlation_id  uuid,
+    data            jsonb,
+    metadata        jsonb,
+    created_at      timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.read_stream: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- read_all
+--
+-- Read events from the global `$all` stream, in event_number order. Realises
+-- INV-READ-005..008. The returned `stream_uuid` / `stream_version` carry the
+-- *original* stream identity (INV-READ-006/007), not `$all` / event_number.
+--
+-- Inputs:
+--   p_from_event_number  bigint, inclusive lower bound on event_number.
+--                          0 returns from the beginning of the store.
+--   p_qty                integer, maximum rows. NULL or <= 0 raises
+--                          invalid_parameter_value (22023).
+--   p_options            jsonb, default '{}'. Recognised keys: none in v1.
+--
+-- Output: zero or more rows in strictly increasing event_number order:
+--   event_id        uuid
+--   event_number    bigint        position in `$all`
+--   stream_uuid     text          original stream's uuid (INV-READ-006)
+--   stream_version  bigint        original stream's version (INV-READ-007)
+--   event_type      text
+--   causation_id    uuid
+--   correlation_id  uuid
+--   data            jsonb
+--   metadata        jsonb
+--   created_at      timestamptz
+--
+-- Errors (closed set):
+--   22023  invalid_parameter_value  malformed input.
+--
+-- Note: `read_all` never returns IS003. The `$all` stream is guaranteed to
+-- exist by the install-time seed in `instructed.streams`; an empty store is
+-- a valid state and returns zero rows.
+--
+-- Lock-acquisition order: none. Pure read.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.read_all (
+  p_from_event_number bigint,
+  p_qty               integer,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    event_id        uuid,
+    event_number    bigint,
+    stream_uuid     text,
+    stream_version  bigint,
+    event_type      text,
+    causation_id    uuid,
+    correlation_id  uuid,
+    data            jsonb,
+    metadata        jsonb,
+    created_at      timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.read_all: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- record_snapshot
+--
+-- Full-row upsert of a snapshot keyed by `source_uuid`. Realises INV-SNAP-001
+-- (at-most-one) and INV-SNAP-002 (wholesale replace). Used by aggregates and
+-- by process managers (PM-020..024; PM state is just a snapshot whose
+-- `source_version` doubles as `last_seen_event_number`).
+--
+-- Inputs:
+--   p_source_uuid     text, the snapshot key. For aggregates this is the
+--                       aggregate's uuid; for PMs this is
+--                       "<pm_name>-<process_uuid>" per PM-020 (the
+--                       namespacing convention is the SDK's responsibility;
+--                       the store treats it as an opaque key).
+--   p_source_type     text, informational (typically the aggregate / PM
+--                       module name); echoed on read. SNAP-005.
+--   p_source_version  bigint, the version this snapshot represents. SNAP-004.
+--   p_data            jsonb, the serialised state (INV-META-011).
+--   p_metadata        jsonb, may be null. The SDK reserves the metadata key
+--                       `snapshot_module_version` per SNAP-002, but the
+--                       store assigns no meaning.
+--   p_options         jsonb, default '{}'. Recognised keys: none in v1.
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   22023  invalid_parameter_value  null p_source_uuid / p_source_type /
+--                                    p_data, or negative p_source_version.
+--
+-- Lock-acquisition order:
+--   1. The `snapshots` row keyed by p_source_uuid (insert-or-update). This
+--      is the only lock taken.
+--
+-- Lock-set disjointness: holds `snapshots`; does not touch `streams`,
+-- `events`, `stream_events`, or `subscriptions`. Safe to call from inside
+-- the PM's persist-and-ack transaction alongside advance_subscription
+-- (D-0008 / PM-023).
+-- ----------------------------------------------------------------------------
+create or replace function instructed.record_snapshot (
+  p_source_uuid    text,
+  p_source_type    text,
+  p_source_version bigint,
+  p_data           jsonb,
+  p_metadata       jsonb default null,
+  p_options        jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.record_snapshot: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- read_snapshot
+--
+-- Fetch the snapshot for `source_uuid`. Realises INV-SNAP-003.
+--
+-- Inputs:
+--   p_source_uuid  text
+--   p_options      jsonb, default '{}'. Recognised keys: none in v1.
+--
+-- Output: exactly one row (or the procedure raises):
+--   source_uuid     text
+--   source_type     text
+--   source_version  bigint
+--   data            jsonb
+--   metadata        jsonb
+--   created_at      timestamptz
+--
+-- Errors (closed set):
+--   IS010  snapshot_not_found       no snapshot exists for p_source_uuid.
+--   22023  invalid_parameter_value  null p_source_uuid.
+--
+-- Lock-acquisition order: none. Pure MVCC read.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.read_snapshot (
+  p_source_uuid text,
+  p_options     jsonb default '{}'::jsonb
+)
+  returns table (
+    source_uuid    text,
+    source_type    text,
+    source_version bigint,
+    data           jsonb,
+    metadata       jsonb,
+    created_at     timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.read_snapshot: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- delete_snapshot
+--
+-- Remove the snapshot for `source_uuid`. Idempotent per INV-SNAP-004:
+-- deleting a missing snapshot succeeds silently (no error). Contrast
+-- delete_subscription (D-0009), which raises on missing.
+--
+-- Inputs:
+--   p_source_uuid  text
+--   p_options      jsonb, default '{}'. Recognised keys: none in v1.
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   22023  invalid_parameter_value  null p_source_uuid.
+--
+-- Lock-acquisition order:
+--   1. The `snapshots` row keyed by p_source_uuid (DELETE; no-op if
+--      absent).
+-- ----------------------------------------------------------------------------
+create or replace function instructed.delete_snapshot (
+  p_source_uuid text,
+  p_options     jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.delete_snapshot: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- claim_subscription
+--
+-- Acquire (or re-acquire) the lease on a persistent subscription. Realises
+-- INV-SUB-P-001/002, INV-SUB-P-010..012, INV-SUB-P-020/021. Lease-based
+-- single-active-subscriber per D-0006 (no pg_advisory_lock).
+--
+-- If the subscription row does not yet exist, it is created with the
+-- initial cursor determined by p_options->>'start_from' and immediately
+-- claimed by p_worker_id. If it exists and is either unclaimed or has an
+-- expired lease, the lease is transferred to p_worker_id; the cursor is
+-- preserved (INV-SUB-P-021: start_from is ignored on subsequent claims).
+-- If it exists and a different worker holds a live lease, the call returns
+-- with result = 'already_claimed' (NOT an error; the caller may retry or
+-- back off; the current holder is reported for diagnostics).
+--
+-- Inputs:
+--   p_stream_uuid       text, the subscription's stream scope. Use '$all'
+--                         to subscribe to the global stream.
+--   p_subscription_name text, the subscription's name (the human-readable
+--                         half of INV-SUB-P-001's identity pair).
+--   p_worker_id         text, an opaque identifier for the claiming
+--                         worker. The SDK supplies this; the store treats
+--                         it as an opaque string.
+--   p_lease_seconds     integer, lease duration in seconds. MUST be > 0;
+--                         null or <= 0 raises invalid_parameter_value
+--                         (22023). The new claim_expires_at is set to
+--                         now() + p_lease_seconds.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'start_from' :: 'origin' (default) | 'current'
+--                                      | non-negative integer.
+--                                      Used only on first create per
+--                                      INV-SUB-P-020; ignored on
+--                                      subsequent claims (INV-SUB-P-021).
+--                                      'origin' -> last_seen = 0.
+--                                      'current' -> last_seen = current
+--                                        head (stream_version for a
+--                                        single-stream subscription;
+--                                        event_number for '$all').
+--                                      integer N -> last_seen = N.
+--                         'shard'      :: smallint (default 0). Reserved
+--                                      for ML-0001; v1 callers should
+--                                      omit. Unknown shard values raise
+--                                      invalid_parameter_value.
+--
+-- Output: exactly one row:
+--   result              text, 'claimed' | 'already_claimed'
+--   last_seen           bigint, the subscription's cursor
+--   claimed_by          text, the current holder (= p_worker_id on
+--                         'claimed', else the existing holder).
+--   claim_expires_at    timestamptz, when the current lease expires.
+--
+-- Errors (closed set):
+--   IS003  stream_not_found         p_stream_uuid does not name an
+--                                    existing stream (and is not '$all').
+--                                    The store does not auto-create the
+--                                    underlying stream on subscribe.
+--   IS005  reserved_stream_uuid     not raised here -- '$all' is permitted
+--                                    for subscriptions and resolves to
+--                                    stream_id = 0.
+--   22023  invalid_parameter_value  null/empty p_subscription_name or
+--                                    p_worker_id; non-positive
+--                                    p_lease_seconds; malformed
+--                                    p_options.start_from; negative
+--                                    shard.
+--
+-- Lock-acquisition order:
+--   1. The target stream's `streams` row, read-only (lookup of
+--      stream_id, no lock).
+--   2. The `subscriptions` row keyed by
+--      (stream_id, subscription_name, shard):
+--        a. On first create: INSERT (row-level lock until commit).
+--        b. On re-claim: SELECT ... FOR UPDATE; if unclaimed or expired,
+--           UPDATE claimed_by, claim_expires_at; otherwise return
+--           'already_claimed' without modifying the row.
+--
+-- Lock-set disjointness: holds the subscriptions row only. Does not
+-- contend with append_to_stream's lock set.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.claim_subscription (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_lease_seconds     integer,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    result           text,
+    last_seen        bigint,
+    claimed_by       text,
+    claim_expires_at timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.claim_subscription: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- extend_subscription_claim
+--
+-- Heartbeat: extend the lease on a subscription the caller already holds.
+-- Per D-0006, if this fails (because the lease has been lost to another
+-- worker, or the subscription was deleted) the worker MUST stop processing
+-- immediately; continuing risks double-delivery against the new holder.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text, the caller's worker_id. Must match the row's
+--                         current claimed_by.
+--   p_lease_seconds     integer, the new lease duration (> 0).
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   claim_expires_at    timestamptz, the new lease expiry (= now() +
+--                         p_lease_seconds).
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard).
+--   IS022  subscription_lease_lost  the row exists but claimed_by !=
+--                                    p_worker_id (another worker took
+--                                    over after a lease expiry).
+--   22023  invalid_parameter_value  null inputs, non-positive lease.
+--
+-- Lock-acquisition order:
+--   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--      SELECT ... FOR UPDATE; verify claimed_by; UPDATE
+--      claim_expires_at.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.extend_subscription_claim (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_lease_seconds     integer,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    claim_expires_at timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.extend_subscription_claim: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- release_subscription
+--
+-- Clean release of a held lease (INV-SUB-P-060). The cursor is preserved;
+-- the row remains; only claimed_by and claim_expires_at are cleared. A
+-- subsequent claim_subscription resumes from last_seen.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text, the caller's worker_id. Must match
+--                         claimed_by; releasing someone else's lease is an
+--                         error.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard).
+--   IS022  subscription_lease_lost  row exists but claimed_by !=
+--                                    p_worker_id, or the lease has
+--                                    already expired and been picked up
+--                                    by another worker. This is
+--                                    informational; the application may
+--                                    safely ignore it on graceful
+--                                    shutdown.
+--   22023  invalid_parameter_value  null inputs.
+--
+-- Lock-acquisition order:
+--   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--      SELECT ... FOR UPDATE; verify claimed_by; UPDATE
+--      (claimed_by := NULL, claim_expires_at := NULL).
+-- ----------------------------------------------------------------------------
+create or replace function instructed.release_subscription (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.release_subscription: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- read_subscription_batch
+--
+-- Fetch the next batch of events for a held subscription, in delivery order.
+-- Realises INV-SUB-P-030 (strictly increasing order) and INV-SUB-P-031
+-- (at-least-once: this call does NOT advance the cursor; only
+-- advance_subscription does).
+--
+-- For single-stream subscriptions, events are ordered by stream_version
+-- starting at last_seen + 1. For '$all' subscriptions, events are ordered
+-- by event_number starting at last_seen + 1, and each row's `stream_uuid`
+-- and `stream_version` carry the *original* stream identity
+-- (INV-READ-006/007).
+--
+-- Inputs:
+--   p_stream_uuid       text, the subscription's stream scope.
+--   p_subscription_name text
+--   p_worker_id         text, must match the row's claimed_by.
+--   p_qty               integer, batch size cap. MUST be > 0.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--                       OQ-0003 (selector evaluation locus) is deferred to
+--                       Phase 8; if server-side selector evaluation is
+--                       chosen there, it lands here as an additive
+--                       'selector' key, with no change to the v1 default
+--                       semantics.
+--
+-- Output: zero or more rows in delivery order:
+--   event_id        uuid
+--   event_number    bigint
+--   stream_uuid     text          original-stream identity (always for
+--                                  $all; equal to p_stream_uuid for
+--                                  single-stream)
+--   stream_version  bigint        original-stream version
+--   event_type      text
+--   causation_id    uuid
+--   correlation_id  uuid
+--   data            jsonb
+--   metadata        jsonb
+--   created_at      timestamptz
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard).
+--   IS022  subscription_lease_lost  claimed_by != p_worker_id.
+--   22023  invalid_parameter_value  null inputs or non-positive p_qty.
+--
+-- Lock-acquisition order:
+--   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--      SELECT ... FOR UPDATE; verify claimed_by. The row lock is held
+--      until the caller's transaction commits. This serves the SDK's
+--      "BEGIN; read_batch; handler; advance; COMMIT" pattern (D-0008):
+--      the subsequent advance_subscription call from the same
+--      transaction reuses the row lock without re-acquiring; the
+--      handler's projection writes happen in between without contending
+--      with the cursor.
+--   2. `events` and `stream_events` reads (MVCC; no row locks).
+--
+-- Note: holding the row lock across the handler means a second worker
+-- attempting to take the lease (claim_subscription on an expired lease)
+-- will block on the SELECT FOR UPDATE rather than racing. This is
+-- deliberate -- it keeps the at-most-one-live-handler invariant intact
+-- for the duration of an in-flight batch.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.read_subscription_batch (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_qty               integer,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    event_id        uuid,
+    event_number    bigint,
+    stream_uuid     text,
+    stream_version  bigint,
+    event_type      text,
+    causation_id    uuid,
+    correlation_id  uuid,
+    data            jsonb,
+    metadata        jsonb,
+    created_at      timestamptz
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.read_subscription_batch: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- advance_subscription
+--
+-- Advance the persistent cursor for a held subscription. Realises
+-- INV-SUB-P-032/033 (ack monotonic, up-to-and-including N) and supports
+-- the co-transactional persist-and-ack pattern of D-0008 (the SDK calls
+-- this in the same transaction as its projection write).
+--
+-- The cursor advances to max(last_seen, p_up_to_position): out-of-order
+-- or duplicate acks are absorbed without error (INV-SUB-P-034).
+--
+-- Selectors that skip events (INV-SUB-P-050) call this with the highest
+-- *delivered-or-skipped* position, per D-0008's selector clause.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text, must match claimed_by.
+--   p_up_to_position    bigint, the cursor target. For single-stream
+--                         subscriptions this is a stream_version; for
+--                         '$all' subscriptions an event_number. MUST be
+--                         >= 0.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   last_seen  bigint, the cursor's value after the update.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard).
+--   IS022  subscription_lease_lost  claimed_by != p_worker_id. The
+--                                    SDK MUST stop processing on this
+--                                    error per D-0006.
+--   22023  invalid_parameter_value  null inputs or negative position.
+--
+-- Lock-acquisition order:
+--   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--      UPDATE ... WHERE claimed_by = p_worker_id RETURNING last_seen.
+--      In the recommended co-transactional pattern this row is already
+--      locked by an earlier read_subscription_batch in the same
+--      transaction; the UPDATE reuses the lock. In the non-co-
+--      transactional pattern this is the only lock taken.
+--
+-- D-0008 constraint: advance_subscription MUST NOT take any lock that
+-- the SDK could plausibly hold from earlier statements. The
+-- subscriptions row IS such a lock -- but it is the *only* one, and the
+-- SDK's documented pattern is to acquire it deliberately via
+-- read_subscription_batch. No other store procedure touches
+-- subscriptions rows, so the SDK cannot accidentally acquire it through
+-- some other path.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.advance_subscription (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_up_to_position    bigint,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    last_seen bigint
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.advance_subscription: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- read_subscription_position
+--
+-- Return a subscription's current cursor (`last_seen`) without claiming or
+-- modifying anything. Used by the strong-consistency-on-dispatch wait
+-- helper per D-0010 / CON-010: after appending events, the dispatcher
+-- polls this for each name in `consistency: [...]` until each returned
+-- `last_seen` is >= the appended event's position (stream_version for
+-- single-stream subscriptions; event_number for '$all'), or the
+-- `consistency_timeout` elapses.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   last_seen  bigint
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard). The strong-
+--                                    consistency wait helper treats this
+--                                    as a configuration error (the named
+--                                    subscription does not exist) and
+--                                    surfaces it; it does not retry.
+--   22023  invalid_parameter_value  null inputs.
+--
+-- Lock-acquisition order: none. Pure MVCC read.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.read_subscription_position (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    last_seen bigint
+  )
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.read_subscription_position: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- delete_subscription
+--
+-- Remove a subscription row entirely. Realises INV-SUB-P-061. A subsequent
+-- claim_subscription on the same identity behaves as a first-create and
+-- honours `start_from`.
+--
+-- Per D-0009, deleting a missing subscription is an *error*
+-- (subscription_not_found), not a silent success. This is the abstract
+-- Commanded contract (INV-SUB-P-062); the reference adapter is lenient,
+-- and we deliberately are not.
+--
+-- delete_subscription does NOT check claimed_by. The administrator (or
+-- any caller) can delete a subscription even while another worker holds
+-- its lease; that worker's next call (extend_subscription_claim,
+-- read_subscription_batch, or advance_subscription) will fail with
+-- IS020, which is the contract's signal to stop.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard).
+--   22023  invalid_parameter_value  null inputs.
+--
+-- Lock-acquisition order:
+--   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--      DELETE returning 1; if 0 rows deleted, raise IS020.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.delete_subscription (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+begin
+  raise exception 'instructed.delete_subscription: not yet implemented (Pass 3)'
+    using errcode = '0A000';
+end;
+$$;
