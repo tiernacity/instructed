@@ -10,8 +10,8 @@ The work is done in passes:
 | Pass | Scope | Status |
 |------|-------|--------|
 | 1 | Survey absurd's task/step model; lay out the three candidate shapes concretely | done |
-| 2 | Take a position; record the decision | **this commit** |
-| 3 | Implications for schema and SDK loop; Phase 7 inputs | pending |
+| 2 | Take a position; record the decision | done |
+| 3 | Implications for schema and SDK loop; Phase 7 inputs | **this commit** |
 
 Pass 1 deliberately does not pick a winner. It surveys what each
 candidate actually looks like, so Pass 2's choice is grounded.
@@ -395,15 +395,230 @@ a first-class table would be the start of building candidate 2 by
 accident. Recorded here so a later phase can deliberately revisit
 rather than drift into it.
 
-### What Pass 3 must cover
+---
 
-- Schema implications: confirm "no new tables" against the Pass-1
-  candidate-2 sketch and against PM-020..024 in `mapping.md`.
-- SDK loop: where compensation fits relative to PM-011's
-  handle → dispatch → apply → persist → ack ordering. (Hypothesis:
-  nowhere new — the compensating command is dispatched in step 3
-  of PM-011 like any other.)
-- Phase 7 inputs: forward-pointing constraints on the SQL contract,
-  especially around caller-supplied `event_id` and the
-  `:duplicate_event` error being part of the public contract (not
-  reference-only).
+## Pass 3 — Schema and SDK implications
+
+### Schema
+
+No new tables. The full saga primitive set in `instructed` is the
+union of tables Phase 4 has already reserved:
+
+| Need | Table from Phase 4 | Used as |
+|------|--------------------|---------|
+| PM instance state | `snapshots` (PM-020..024) | One row per PM instance, keyed `"<pm_name>-<process_uuid>"`. The serialised `data` carries whatever state the application chose to model (`phase` enum, intermediate booking IDs, references to in-flight absurd tasks, ...). |
+| Saga's view of the world | `events` (Part B/C of `invariants.md`) | The PM's subscription reads forward events *and* failure events from here. "Failure event" is not a structural concept; it is just an event whose semantics the application designed for. |
+| Saga's command emissions | `events` again | Compensating and forward commands both dispatch through `append_to_stream` exactly the same way. |
+| Saga's event consumption | `subscriptions` (INV-SUB-P-*) | One persistent subscription per PM type, leased per D-0006. Cursor advances co-transactionally with the PM's state snapshot per D-0008. |
+| Linkage to absurd tasks | (none) | Carried inside the PM's snapshot `data` if the application wants the linkage durable. No first-class instructed table records `pm_instance ↔ absurd_task` (see Pass 2's "deliberately not surfaced" note). |
+
+The Pass-1 candidate-2 sketch — `saga_instances`, `saga_step_log`,
+`claim_saga_step` family — is discarded wholesale. None of those
+artifacts will appear in the Phase 7 schema.
+
+### SDK loop
+
+The PM worker loop is exactly what Pass-3 of `mapping.md` already
+specified under PM-011:
+
+1. Read an event from the PM's subscription via
+   `read_subscription_batch`.
+2. Look up the instance: call `interested?` on the event; if it
+   produces `{:start, uuid}` or `{:continue, uuid}`, load the
+   instance state via `read_snapshot("<pm_name>-<uuid>")`.
+3. Call `handle(state, event, metadata)`; collect the returned
+   command list. **Compensating commands are returned here in
+   the same way as forward commands** — the only difference is
+   *which* clause produced them (the clause matching a failure
+   event vs. one matching a success event).
+4. Dispatch each command through the dispatch helper. Each
+   dispatch runs its own load-execute-append cycle on its target
+   aggregate, in its own transaction.
+5. Apply the triggering event to the instance state
+   (`apply(state, event)`).
+6. In a single transaction: `record_snapshot` for the new state,
+   then `advance_subscription` past the triggering event, then
+   commit (D-0008).
+
+Compensation does not introduce a new branch in this loop, a new
+step, or a reordering. It is just — step 3 produces a command
+list that includes `CancelHotelBooking` instead of (or alongside)
+`BookFlight`. Step 4 dispatches it the same way. Step 6 records
+the state transition (`phase: :compensating`) in the snapshot the
+same way.
+
+The absurd-bridge case adds no new step either. The PM dispatches
+a command in step 4 that records a `PaymentRequested` event into
+the store. A separate process — an absurd task whose handler
+subscribes to the relevant event stream — reads that event,
+performs the durable external call with absurd's checkpoint /
+retry machinery, and at the end calls `append_to_stream` with a
+`PaymentProcessed` or `PaymentFailed` event. The PM's
+subscription, on a later iteration of its own loop, picks up that
+returning event and reacts to it in step 3.
+
+From the PM worker loop's perspective, there is no "the workflow
+is waiting on an external system" state — it is event-driven
+throughout. The only thing that distinguishes "waiting for an
+absurd task" from "waiting for an aggregate command's success
+event" is which event eventually arrives. This is the property
+that makes candidate 3 cheap: the same loop handles both.
+
+### Error and retry semantics
+
+Unchanged from PM-013 / PM-031 in `mapping.md`. A failed command
+dispatch from step 4 surfaces to the application's `error/3`
+callback with the usual vocabulary (`{:retry, ...}`,
+`{:skip, ...}`, `{:continue, commands, context}`,
+`{:skip, :discard_pending | :continue_pending}`, `{:stop, ...}`).
+The application chooses whether a dispatch failure (e.g. the
+target aggregate rejecting the compensating command) translates
+into another compensating attempt, a different compensating
+command, or giving up. None of this is saga-specific; it is the
+PM error-handling contract.
+
+### What "first-class" means under this decision
+
+The substance of D-0001 is preserved by the following concrete
+properties, none of which require new mechanism beyond what Phase
+4 already specified:
+
+1. **Compensation runs reliably under crashes.** The PM's
+   snapshot is co-transactional with its cursor advance (D-0008),
+   so a worker that crashes between dispatching the compensating
+   command and recording the new state will re-deliver the
+   triggering failure event on restart, re-dispatch the
+   compensating command (idempotent at the aggregate by
+   optimistic-locking + INV-APPEND-030), and converge.
+2. **Compensation is ordered.** Because the PM's subscription
+   delivers in strictly increasing order (INV-SUB-P-030) and the
+   state snapshot is the durable record of "where we are", the
+   PM cannot dispatch a compensating command in response to a
+   failure event whose precursor event it hasn't already
+   processed.
+3. **Compensation is causation-tracked.** The compensating
+   command inherits `causation_id = failure_event.event_id`
+   automatically (PM-012). The original command's `causation_id`
+   was the triggering event's id, and so on up the chain. A
+   compensation flow is traceable end-to-end through the
+   `causation_id` graph in the events table.
+4. **Side-effecting compensation is durable.** Cancelling a
+   Stripe charge is itself a side effect; under candidate 3 it
+   is itself an absurd task spawned by a `RefundRequested` event
+   dispatched by the PM in its compensation path. The same
+   bridge pattern that handles `PaymentRequested` handles
+   `RefundRequested`. There is one pattern, used twice.
+
+This is the bar D-0001 set: the application is not left to
+build durability, ordering, or recovery for compensation flows.
+It is left to write the PM clauses.
+
+---
+
+## Phase 7 inputs
+
+Forward-pointing constraints that the SQL contract must honour to
+make D-0011 work. Most are restatements or tightenings of items
+already in Phase 4's mapping; they are gathered here so Phase 7
+does not have to rederive them.
+
+1. **No saga-specific tables.** The Phase 7 schema set is
+   `streams`, `events`, `snapshots`, `subscriptions` (and
+   whatever join / sequence artifacts OQ-0001 introduces). PMs
+   and sagas add nothing.
+
+2. **`event_id` is caller-supplied, not server-generated.**
+   INV-APPEND-001 already says "every event MUST be assigned a
+   unique `event_id`" but does not pin *who* assigns it.
+   D-0011's absurd-bridge pattern relies on the *caller*
+   supplying the id, so that an absurd task replaying a step can
+   re-derive the same id and get a clean `:duplicate_event`
+   instead of a second insert. Phase 7 MUST keep `event_id` as a
+   caller input on `append_to_stream`. The SDK is responsible
+   for generating a fresh UUID for normal commands; the
+   absurd-bridge task is responsible for deriving it
+   deterministically from `(task_id, step_name)`.
+
+3. **`:duplicate_event` is a public error, not reference-only.**
+   INV-APPEND-030 flagged this as `[reference-only, optional]`
+   in the abstract Commanded contract. Under D-0011 it becomes a
+   load-bearing error code for the cross-system idempotency
+   pattern. Phase 7's `append_to_stream` MUST surface it (a
+   distinct SQLSTATE or sentinel return value) rather than
+   folding it into `wrong_expected_version`. The SDK is
+   responsible for mapping the SQLSTATE to the language-native
+   error type, and an absurd-task helper is responsible for
+   treating it as success (the prior emit already succeeded).
+
+4. **`append_to_stream` MUST be callable from any session,
+   including a session that is *not* the dispatching SDK.** An
+   absurd task is a different process, often a different SDK
+   binary, possibly a different programming language. The stored
+   procedure must not assume the caller has set any session
+   GUCs, opened any prior transaction, or claimed any lease.
+   This is already implicit in Phase 4 but worth pinning
+   explicitly because the cross-boundary use case is the first
+   one that breaks if it slips.
+
+5. **`read_subscription_batch` must surface enough information
+   for failure-event recognition to be a domain-modelling
+   concern, not a framework one.** Concretely: the `event_type`
+   string and the `data` JSONB are delivered to the SDK as-is
+   (per INV-META-010/011), and the SDK delivers them to the PM
+   handler as-is. The framework does not need to know which
+   event types are "failure" events; the PM's pattern-match on
+   `event_type` is the only classification step.
+
+6. **Lock ordering: PM persist-and-ack transaction holds
+   `snapshots` and `subscriptions` row locks; the PM's
+   compensating command dispatch (step 4 above) runs in a
+   *separate* transaction that holds `streams`, `events`, and
+   (per OQ-0001) the global-ordering serialisation point.**
+   These are disjoint lock sets, in agreement with D-0008's
+   constraint that `advance_subscription` must not take a lock
+   the SDK could plausibly hold from earlier statements. Phase 7
+   must keep them disjoint when laying out lock-acquisition
+   orders in the stored-procedure docstrings.
+
+7. **No new `consistency: [...]` semantics needed for sagas.**
+   D-0010 already covers the case where a dispatcher wants to
+   wait for a specific subscription to catch up. A PM that wants
+   to dispatch a follow-up command only after a specific
+   projection has seen its prior emission uses the same explicit
+   list mechanism. No saga-specific waiting primitive is
+   required.
+
+8. **Optional future helper (informational, not a requirement):**
+   should Phase 8's worked example produce a workflow whose
+   shape is genuinely linear-with-pairable-compensation, an
+   SDK-level helper that compiles a step-pair declaration into a
+   PM module is compatible with this contract — it would emit
+   the same `handle/3` clauses by hand-written rule, generate
+   the same `record_snapshot` / `advance_subscription` calls,
+   and use the same `append_to_stream` for dispatch. Phase 7
+   need not reserve any schema for this; the helper lives
+   entirely in the SDK if it is built at all.
+
+---
+
+## Phase 6 status
+
+The roadmap's Phase-6 done-criterion ("a choice is made and
+recorded in `decisions.md`, and the implications for the schema
+and SDK are written into `mapping.md`") is met:
+
+- Choice recorded: D-0011 in `decisions.md`.
+- Schema implications: none beyond Phase 4; recorded in PM-030's
+  updated mapping entry and in this document's Pass 3.
+- SDK implications: PM-011's existing handle → dispatch → apply →
+  persist → ack ordering is unchanged; compensating commands are
+  dispatched in step 3 alongside any forward commands. Recorded
+  in PM-030's updated mapping entry and in this document's
+  Pass 3.
+- Phase 7 inputs catalogued above so the SQL contract phase does
+  not have to rederive them.
+
+No new entries in `open-questions.md`. The PM-instance ↔ absurd-task
+linkage question raised in Pass 2 is *deliberately* not surfaced as
+an OQ; promoting it now would be the first step toward accidentally
+building candidate 2.
