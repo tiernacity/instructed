@@ -200,7 +200,21 @@ and any "we're not doing X" mentioned there has a corresponding entry.
 
 ---
 
-## Phase 6 — Saga / process manager strategy
+## Phase 6 — Saga / process manager strategy — **done**
+
+Produced `docs/sagas.md` in three review passes (survey absurd /
+lay out candidates; take a position; schema and SDK implications
+plus Phase 7 inputs). **D-0011** records the verdict: candidate 3
+— PMs are the saga primitive, compensation is a command, side
+effects bridge to absurd via events. No new tables; PM-011's
+handle → dispatch → apply → persist → ack ordering is unchanged
+(compensating commands dispatch in step 3 alongside forward
+commands). PM-030 in `mapping.md` now has a verdict and a
+cross-reference to D-0011. Eight forward-pointing constraints
+handed to Phase 7 — most notably that `event_id` must stay
+caller-supplied and `:duplicate_event` must be promoted from
+reference-only to a public error so the absurd-bridge idempotency
+pattern works.
 
 **Goal:** decide how `instructed` handles long-running, multi-step
 workflows with the ability to express compensating actions.
