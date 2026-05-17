@@ -24,8 +24,8 @@ shot, so the reader can review the reasoning incrementally.
 
 | Pass | Scope | Status |
 |------|-------|--------|
-| 1 | Append (Part B), Read (Part C), cross-cutting Streams/Meta (Part F), Aggregate execution (AGG-*) | **this commit** |
-| 2 | Snapshots (Part D + SNAP-*), Event handler / subscriber (Part E transient & persistent + HND-*) | pending |
+| 1 | Append (Part B), Read (Part C), cross-cutting Streams/Meta (Part F), Aggregate execution (AGG-*) | done |
+| 2 | Snapshots (Part D + SNAP-*), Event handler / subscriber (Part E transient & persistent + HND-*) | **this commit** |
 | 3 | Process managers (PM-*), Strong consistency (CON-*), Dispatch (DSP-*) | pending |
 
 Items in later passes are listed at the bottom under "Deferred to a
@@ -445,28 +445,427 @@ the primitives; the SDK provides the orchestration.
 
 ---
 
+## Pass 2 — Snapshots and event handlers / subscriptions
+
+### Part D — Snapshots (`record_snapshot`, `read_snapshot`, `delete_snapshot`)
+
+#### INV-SNAP-001 — At most one snapshot per `source_uuid`
+
+- **Commanded / reference adapter:** `snapshots.source_uuid TEXT
+  PRIMARY KEY`.
+- **`instructed`:** identical. `snapshots.source_uuid TEXT PRIMARY
+  KEY`.
+- **Verdict:** **equivalent**.
+
+#### INV-SNAP-002 — `record_snapshot` is full-row upsert
+
+- **Commanded:** `INSERT ... ON CONFLICT (source_uuid) DO UPDATE
+  SET ...` replacing every field including `source_type`,
+  `source_version`, `data`, `metadata`, `created_at`.
+- **`instructed`:** identical. The stored procedure is
+  `record_snapshot(source_uuid, source_type, source_version, data
+  jsonb, metadata jsonb)`. `created_at` is set to `now()` on each
+  upsert (the reference adapter behaves the same way).
+- **Verdict:** **equivalent**.
+
+#### INV-SNAP-003 — `read_snapshot` returns `:snapshot_not_found` for missing
+
+- **Commanded:** explicit `nil`-check after the lookup.
+- **`instructed`:** stored procedure raises a `snapshot_not_found`
+  SQLSTATE which the SDK maps to its language-native error.
+- **Verdict:** **equivalent**.
+
+#### INV-SNAP-004 — `delete_snapshot` is idempotent
+
+- **Commanded:** `DELETE` returns `:ok` whether or not a row was
+  removed.
+- **`instructed`:** same. The stored procedure does not signal
+  "nothing was deleted". (Contrast D-0009 for `delete_subscription`,
+  where the conformance contract explicitly demands an error and we
+  follow it. Snapshots are deliberately treated as soft state — the
+  test suite shows record-delete-read sequences without complaining
+  about a missing-on-delete error — so we match that.)
+- **Verdict:** **equivalent**.
+
+#### INV-SNAP-005 — No snapshot history
+
+- **Commanded:** single-row-per-source schema enforces this.
+- **`instructed`:** same. We deliberately do not introduce a
+  snapshot-history table. Applications that need historical
+  snapshots can append them to a dedicated stream (snapshots-as-
+  events) at the application layer.
+- **Verdict:** **equivalent**.
+
+#### INV-SNAP-006 — Snapshots are advisory; events are truth
+
+- **Commanded:** documented convention; enforced by AGG-001
+  hydration logic.
+- **`instructed`:** same. The SDK's `load` helper reads the
+  snapshot, validates `snapshot_module_version` (SNAP-002), and on
+  any mismatch falls back to event replay from version 0 (AGG-003).
+  The store does not enforce this; it cannot — it does not know what
+  the application considers a valid snapshot.
+- **Verdict:** **equivalent**.
+
+#### SNAP-001 — `snapshot_every: N` policy
+
+- **Commanded:** the snapshotting module checks `source_version -
+  snapshot_version >= snapshot_every` after each append; if true,
+  calls `record_snapshot`.
+- **`instructed`:** SDK-level convention. The SDK's append helper
+  takes an optional `snapshot_every: N` parameter on the aggregate
+  module; after a successful append it computes whether to call
+  `record_snapshot` and does so in a separate transaction
+  (SNAP-003).
+- **Verdict:** **equivalent**.
+
+#### SNAP-002 — `snapshot_module_version` stamping and validation
+
+- **Commanded:** the snapshotting module stamps a module-level
+  integer into `metadata.snapshot_module_version` on record, checks
+  it on read.
+- **`instructed`:** identical. The SDK's `record_snapshot` helper
+  reserves the metadata key `snapshot_module_version` and the
+  `read_snapshot` helper validates it. Applications must not use
+  that key for other purposes. (This is the only metadata key the
+  SDK reserves; we record it as an SDK convention rather than as a
+  schema constraint so that the store stays application-agnostic.)
+- **Verdict:** **equivalent**.
+
+#### SNAP-003 — Best-effort write
+
+- **Commanded:** a failed snapshot write is logged but does not
+  fail the command.
+- **`instructed`:** SDK invokes `record_snapshot` in a transaction
+  *separate* from the append transaction, swallows errors
+  (logging), and returns success to the caller as long as the
+  append committed.
+- **Verdict:** **equivalent**.
+
+#### SNAP-004 — `source_version` meaning
+
+- **Commanded:** `source_version` equals the aggregate version at
+  the moment of snapshot.
+- **`instructed`:** same. The SDK is responsible for passing the
+  correct version; the store stores what it is given. This also
+  underwrites PM-024 in Pass 3 (process-manager state stored as a
+  snapshot uses `source_version` as `last_seen_event_number`).
+- **Verdict:** **equivalent**.
+
+#### SNAP-005 — `source_type` informational
+
+- **Commanded:** stores the aggregate module name; not used for
+  routing or validation.
+- **`instructed`:** same.
+- **Verdict:** **equivalent**.
+
+---
+
+### Part E.1 — Transient subscriptions
+
+#### INV-SUB-T-001..005 — The whole transient family
+
+- **Commanded:** in-VM pub/sub via the `Commanded.Subscriptions`
+  registry, push delivery to a subscriber PID, lost on PID exit,
+  no replay, no ack.
+- **`instructed`:** **dropped** per D-0007. The use cases
+  (Commanded's internal aggregate self-watch, the strong-
+  consistency notification pipe, and applications wanting a live
+  event tail) are all served either by other mechanisms in
+  `instructed` or by a persistent subscription with `start_from:
+  :current` plus a teardown call.
+- **Verdict:** **looser**: there is no fire-and-forget pub/sub
+  primitive in v1. Live-tail use cases are satisfied via
+  persistent subscriptions; the SDK MAY offer a `tail()` helper
+  that wraps create/process/teardown.
+
+---
+
+### Part E.2 — Persistent subscriptions
+
+#### INV-SUB-P-001 — Identity `(stream_uuid_or_:all, name)`
+
+- **Commanded / reference adapter:**
+  `subscriptions (stream_id, name)` is the natural key.
+- **`instructed`:** same. `subscriptions` table has primary key
+  `(stream_id, name)` where `stream_id = 0` represents `$all`
+  (consistent with INV-STREAM-002 / OQ-0001 option 1). Per
+  ML-0001's forward-compat note we reserve room for a `shard
+  SMALLINT NOT NULL DEFAULT 0` column to be added later without
+  breaking callers.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-002 — Idempotent (re)subscribe attaches and resumes
+
+- **Commanded:** `subscribe_to` finds-or-creates the subscription
+  row and resumes from `last_seen`.
+- **`instructed`:** `claim_subscription(stream, name, worker_id,
+  lease_secs, start_from)` is upsert-on-first-call: if the row
+  exists, `start_from` is ignored (INV-SUB-P-021) and the existing
+  cursor is returned alongside the granted lease.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-010..012 — Single-active-subscriber
+
+- **Commanded / reference adapter:** `pg_try_advisory_lock`
+  scoped to the session (INV-SUB-P-011, reference-only).
+- **`instructed`:** **lease-based** per D-0006.
+  `claim_subscription` succeeds when the row is unclaimed *or*
+  when `claim_expires_at < now()`. The previous holder's writes
+  are still safe — they only matter if it tries to call
+  `advance_subscription`, which will fail the `claimed_by` check.
+  When a holder disconnects (process exit, network loss), the
+  lease times out and another worker can claim without
+  administrative action, satisfying INV-SUB-P-012.
+  At v1, `concurrency_limit` is fixed at 1 (D-0002).
+- **Verdict:** **equivalent on semantics**, **looser on failover
+  latency** by the lease TTL (Commanded's session-lock release is
+  near-instant; ours is bounded by the TTL). Tradeoff is
+  deliberate and tunable.
+
+#### INV-SUB-P-020, INV-SUB-P-021 — `start_from` semantics
+
+- **Commanded:** on first create, `start_from` sets the initial
+  cursor (`:origin` → 0, `:current` → head, integer N → N). On
+  subsequent attaches, `start_from` is ignored.
+- **`instructed`:** identical. `claim_subscription` on a
+  non-existent row writes the initial cursor according to
+  `start_from`; on an existing row the `start_from` argument is
+  silently ignored.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-030 — Strictly-increasing delivery order
+
+- **Commanded:** subscription server delivers in stored order.
+- **`instructed`:** `read_subscription_batch(stream, name,
+  worker_id, qty)` returns events whose position is `>
+  last_seen`, ordered by `stream_version` (for single-stream
+  subscriptions) or `event_number` (for `$all`), limited to
+  `qty`. The `worker_id` check ensures only the lease-holder can
+  fetch.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-031 — At-least-once delivery
+
+- **Commanded:** if a subscriber crashes after receive but before
+  ack, the next attach gets the unacked events again.
+- **`instructed`:** identical. `read_subscription_batch` does not
+  advance the cursor; only `advance_subscription` does. A crash
+  before advance leaves the cursor where it was; a re-claim of
+  the lease (after TTL or a graceful release) reads from the
+  same point.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-032, INV-SUB-P-033 — Ack advances cursor up to N
+
+- **Commanded:** `ack_event(subscriber, event)` advances cursor
+  to the event's position; ack of N implies ack of all <= N.
+- **`instructed`:** `advance_subscription(stream, name,
+  worker_id, up_to_position)` sets `last_seen = max(last_seen,
+  up_to_position)` if `claimed_by = worker_id`, else raises
+  `subscription_lease_lost`. Calling with a lower `up_to_position`
+  than the current cursor is a no-op (the `max` makes ack
+  effectively monotonic, satisfying INV-SUB-P-032's "all events
+  up to and including N" rule).
+  Per D-0008, the SDK is expected to call `advance_subscription`
+  inside the same transaction as its projection write — yielding
+  a stronger projection-and-cursor atomicity than Commanded's
+  reference adapter (see HND-031 below).
+- **Verdict:** **equivalent on the per-event ack contract**,
+  **tighter on projection atomicity** (the optional co-
+  transactional pattern is unique to `instructed`).
+
+#### INV-SUB-P-034 — Out-of-order ack behaviour unspecified
+
+- **Commanded:** silent on this; subscribers are expected to ack
+  in order.
+- **`instructed`:** the `max(last_seen, up_to_position)` rule
+  above means out-of-order acks are absorbed without error; they
+  just don't move the cursor backwards. We do not advertise
+  out-of-order ack as a feature — it's a robustness property of
+  the primitive, not a contract.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-040..042 — Partitioned consumers
+
+- **`instructed`:** **deferred per ML-0001 and D-0002**. The
+  schema reserves a `shard SMALLINT DEFAULT 0` column slot to
+  enable this without migration in a future version.
+- **Verdict:** **looser** by deliberate deferral.
+
+#### INV-SUB-P-050 — Selector filters delivery but advances cursor
+
+- **Commanded:** the subscription server evaluates the selector
+  in-VM; filtered-out events are still acked.
+- **`instructed`:** **SDK-side filter for v1**. The SDK reads a
+  batch, runs the application's predicate, calls the handler on
+  matches, and calls `advance_subscription` to the highest
+  *fetched* event_number regardless of how many matched. Server-
+  side selector evaluation is OQ-0003 — we can add it later as a
+  pure additive parameter on `read_subscription_batch`.
+- **Verdict:** **equivalent on semantics**, **looser on
+  bandwidth** for sparse selectors. Acceptable for v1.
+
+#### INV-SUB-P-060 — `unsubscribe` detaches without deleting cursor
+
+- **Commanded:** releases the session lock; the subscription row
+  stays.
+- **`instructed`:** `release_subscription(stream, name,
+  worker_id)` clears `claimed_by` and `claim_expires_at` after
+  verifying the worker still holds the lease; the cursor stays.
+  Subsequent `claim_subscription` resumes from `last_seen`.
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-061 — `delete_subscription` removes the cursor
+
+- **Commanded:** deletes the `subscriptions` row.
+- **`instructed`:** `delete_subscription(stream, name)` deletes
+  the row. A subsequent `claim_subscription` with `start_from`
+  honours it as a first-create (INV-SUB-P-020).
+- **Verdict:** **equivalent**.
+
+#### INV-SUB-P-062 — Delete-missing returns `:subscription_not_found`
+
+- **Commanded contract:** error.
+- **Commanded reference adapter:** silent `:ok` (a known
+  divergence in `invariants.md`).
+- **`instructed`:** **error**, per D-0009. We follow the abstract
+  contract, not the lenient reference behaviour.
+- **Verdict:** **tighter than the reference adapter**, equivalent
+  to the abstract contract.
+
+---
+
+### HND-* — Event handler / subscriber
+
+Most HND-* items are SDK conventions on top of the persistent-
+subscription primitives above. Where a handler concern dissolves
+into "the SDK loop does this", it is noted briefly.
+
+#### HND-001..003 — Identity, name stability, `start_from`
+
+- **Commanded:** handler `name:` plus subscription target form the
+  persistent identity; `start_from` honoured only on first create.
+- **`instructed`:** SDK passes `(stream_or_:all, name, start_from)`
+  to `claim_subscription`. The store enforces the
+  first-create-honours-start_from rule (INV-SUB-P-020/021).
+- **Verdict:** **equivalent**.
+
+#### HND-010 — Single-event or batched delivery
+
+- **Commanded:** `batch_size`, `batch_timeout` knobs gather events
+  before invoking `handle_batch/1`.
+- **`instructed`:** SDK calls `read_subscription_batch(... qty)`
+  with an SDK-chosen batch size; it iterates events to the
+  application handler one at a time, or hands the batch over,
+  per the application's choice. Pure SDK ergonomics.
+- **Verdict:** **equivalent**.
+
+#### HND-011, HND-031 — Ack on success; projection-cursor atomicity
+
+This is the consequential one.
+
+- **Commanded:** the handler returns; the framework calls
+  `ack_event` as a separate SQL statement. The projection write
+  (in the handler's own transaction) and the cursor advance are
+  *not* atomic. Commanded papers over this with at-least-once
+  delivery + application-side idempotency, or with strong-
+  consistency-on-dispatch (Part E of `guarantees.md`).
+- **`instructed`:** **tighter, per D-0008**. The SDK opens a
+  transaction, fetches the batch, runs the handler (which writes
+  to its projection tables in the same transaction), and calls
+  `advance_subscription` before commit. The cursor advance and
+  the projection write commit or roll back together. An
+  application that uses this pattern gets exactly-once *between*
+  projection writes and cursor advances; redelivery becomes a
+  transaction-level concern rather than a (write, advance)-pair
+  concern.
+  The legacy non-atomic pattern is still supported: an SDK can
+  call `advance_subscription` after the handler's own transaction
+  commits, accepting the same idempotency burden Commanded has.
+  OQ-0002 records the SDK-API shape question.
+- **Verdict:** **tighter on the recommended pattern**,
+  **equivalent on the loose pattern**.
+
+#### HND-012 — Monotonic ack; `last_seen_event` absorbs duplicates
+
+- **Commanded:** handler in-memory state tracks `last_seen_event`;
+  events with `event_number <= last_seen_event` are silently
+  re-acked without `handle/2`.
+- **`instructed`:** the `max(last_seen, up_to_position)` rule in
+  `advance_subscription` (INV-SUB-P-032) already gives the store
+  side. On the SDK side, with co-transactional advance there is
+  generally no redelivery to absorb — the transaction either
+  committed (cursor moved) or rolled back (no projection write,
+  no advance, redelivery is welcome). With non-co-transactional
+  advance the SDK MAY track `last_seen_event` to skip the handler
+  call on duplicates.
+- **Verdict:** **equivalent** (mechanism shifts; semantics
+  preserved).
+
+#### HND-013 — `{:error, :already_seen_event}` opt-in
+
+- **Commanded:** handler can return this to ack-and-skip an
+  event it has independently determined it has already seen.
+- **`instructed`:** equivalent SDK convention. The handler
+  returns a `:skip` sentinel; the SDK includes the event's
+  position in its `advance_subscription` call without doing
+  projection work for it.
+- **Verdict:** **equivalent**.
+
+#### HND-020..022 — Error handling vocabulary (`:retry`, `:skip`, `:stop`)
+
+- **Commanded:** the `error/3` callback returns one of a fixed
+  set of tuples; the framework dispatches accordingly.
+- **`instructed`:** SDK-level. The SDK provides the same
+  vocabulary as a return-shape contract on the handler. The
+  store is uninvolved: `:retry` simply means "don't advance the
+  cursor and try the same event again"; `:skip` means "advance
+  the cursor past this event and continue"; `:stop` means "stop
+  the worker; release the lease cleanly".
+- **Verdict:** **equivalent**. Class-C concern (per the Part G
+  table in `guarantees.md`); the *vocabulary* is convenience, but
+  the *cursor-advancement-on-skip* semantics are intrinsic.
+
+#### HND-023 — At-least-once is intrinsic
+
+- **Commanded:** documented requirement.
+- **`instructed`:** same. Even with D-0008's co-transactional
+  pattern, a worker that crashes *between commit and the SDK
+  acknowledging the commit to the application code* still
+  produces at-most-an-already-committed-effect; in the strict
+  CAP sense, delivery is still at-least-once because the worker
+  may not have observed its own commit. Applications building on
+  this remain responsible for idempotency when they care about
+  side effects, not just database state.
+- **Verdict:** **equivalent**.
+
+#### HND-030 — Transient in-memory handler state
+
+- **Commanded:** carried via `{:ok, handler_state}` return.
+- **`instructed`:** SDK-level. The worker loop threads handler
+  state across iterations. Not a store concern.
+- **Verdict:** **equivalent**.
+
+#### HND-040 — Upcasting
+
+- **Commanded:** an `upcast` chain rewrites old event shapes
+  before delivery.
+- **`instructed`:** SDK-level convention. The SDK MAY offer an
+  upcast pipeline; it is not part of the SQL contract.
+- **Verdict:** **equivalent**.
+
+#### HND-050 — Partitioned consumers
+
+- **`instructed`:** **deferred per ML-0001**.
+- **Verdict:** **looser** by deliberate deferral.
+
+---
+
 ## Deferred to a later pass
 
-The following IDs from `invariants.md` and `guarantees.md` are not
-yet mapped. Each will get its own section in a later pass.
-
-### Pass 2 — snapshots and handlers
-
-- **Part D (`invariants.md`)** — INV-SNAP-001..006: snapshot
-  storage contract.
-- **SNAP-001..005 (`guarantees.md`)** — snapshot policy,
-  versioning, best-effort write.
-- **Part E (`invariants.md`)** —
-  - Transient subscriptions: INV-SUB-T-001..005 (likely partially
-    dropped; transient pubsub has no obvious Postgres analogue
-    short of `LISTEN`/`NOTIFY`, which D-0003 puts out of v1).
-  - Persistent subscriptions: INV-SUB-P-001..062 except the
-    partitioned-consumer block (INV-SUB-P-040..042, deferred per
-    ML-0001).
-- **HND-001..050 (`guarantees.md`)** — handler subscription,
-  delivery, ack, error handling, projection-cursor atomicity
-  (HND-031 is the consequential one), upcasting, partitioned
-  consumers.
+The following IDs from `guarantees.md` are not yet mapped. Each
+will get its own section in Pass 3.
 
 ### Pass 3 — process managers, consistency, dispatch
 
@@ -483,7 +882,9 @@ yet mapped. Each will get its own section in a later pass.
 
 ---
 
-## Cross-references created in this pass
+## Cross-references
+
+### Pass 1
 
 - **D-0004** — No in-memory aggregate cache.
 - **D-0005** — Per-aggregate serialisation via optimistic-lock
@@ -491,4 +892,20 @@ yet mapped. Each will get its own section in a later pass.
 - **OQ-0001** (moved from `invariants.md`) — Global ordering
   mechanism.
 
-No new `maybe-later.md` entries needed in Pass 1.
+### Pass 2
+
+- **D-0006** — Subscriptions are leased (`claimed_by`,
+  `claim_expires_at`), not session-locked.
+- **D-0007** — Transient subscriptions dropped from v1.
+- **D-0008** — Cursor advance is callable inside the SDK's
+  projection transaction; co-transactional advance is the
+  recommended pattern.
+- **D-0009** — `delete_subscription` on missing is an error
+  (follows the abstract contract; tighter than the reference
+  adapter's silent `:ok`).
+- **OQ-0002** — SDK transaction-boundary shape for co-
+  transactional advance.
+- **OQ-0003** — Selector evaluation locus (SDK-side vs
+  server-side).
+
+No new `maybe-later.md` entries needed in Passes 1 or 2.

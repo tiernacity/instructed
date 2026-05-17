@@ -12,6 +12,196 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0009 — `delete_subscription` on a missing subscription is an error
+
+**Date:** 2026-05-17
+
+**Context:** Commanded's abstract adapter contract specifies that
+`delete_subscription` on a non-existent subscription returns
+`{:error, :subscription_not_found}` (INV-SUB-P-062). The reference
+adapter actually returns `:ok` silently — a documented divergence
+in `invariants.md` where the reference adapter is *more lenient*
+than its own contract.
+
+**Decision:** `instructed` matches the abstract contract: deleting
+a subscription that does not exist returns the
+`subscription_not_found` error. We do not adopt the reference
+adapter's silent success.
+
+**Rationale:** silent success on a missing target hides operational
+bugs (typo in subscription name; deleting the wrong tenant's
+subscription). The error is cheap to surface and easy for callers
+to swallow if they want idempotent delete. The reverse — reading
+lenient behaviour out of a strict contract — is impossible.
+
+**Implications:**
+
+- Conformance harness (Phase 9) will test for the error.
+- SDK helpers may offer an `ignore_missing: true` option as a
+  convenience for idempotent teardown, but that lives in the SDK,
+  not the SQL contract.
+
+---
+
+## D-0008 — Cursor advance is co-transactional with handler writes
+
+**Date:** 2026-05-17
+
+**Context:** Commanded's reference adapter advances the persistent
+subscription cursor as a separate SQL statement *after* the handler
+returns. The atomicity of the handler's projection write and the
+cursor advance is explicitly *not* provided (HND-031). Applications
+that need a projection to be exactly-once-consistent with the cursor
+use strong-consistency-on-dispatch (Part E of `guarantees.md`) or
+build idempotency keys into their projections.
+
+**Decision:** `instructed`'s `advance_subscription` stored procedure
+is callable from within an SDK-opened transaction so that the
+projection write and the cursor advance commit together (or roll
+back together). The SDK's handler loop:
+
+```
+BEGIN;
+  -- handler does its projection writes
+  CALL advance_subscription(name, last_event_number);
+COMMIT;
+```
+
+This is **tighter** than Commanded: with this pattern, a
+successfully-committed handler invocation has both written its
+projection and advanced its cursor; a crash mid-handler rolls back
+both; redelivery is at-least-once at the *transaction* level rather
+than at the (write, advance) pair level. Idempotency on the
+projection side is now optional rather than mandatory.
+
+**Rationale:** Postgres already has the right primitive (the
+transaction). The reference adapter doesn't use it because
+Commanded handlers run in a separate process from the event store
+and can't share a transaction across the BEAM boundary. The SDK
+does not have that constraint — it owns the connection.
+
+**Implications:**
+
+- Cursor advance is **not** required to be co-transactional; an SDK
+  may also do projection-then-advance in separate transactions and
+  rely on application-level idempotency. The contract supports both
+  patterns; the recommended pattern is co-transactional.
+- `advance_subscription` MUST be safe to call from any transaction
+  that holds no conflicting locks. In particular it must not take a
+  lock that the SDK could plausibly hold from earlier statements.
+  This becomes a lock-ordering constraint for Phase 7.
+- Selectors (INV-SUB-P-050) that skip events still advance the
+  cursor in this transaction; the SDK passes the highest
+  *delivered-or-skipped* event_number.
+
+---
+
+## D-0007 — Drop transient subscriptions from v1
+
+**Date:** 2026-05-17
+
+**Context:** Commanded's adapter exposes `subscribe(meta, stream)`
+for transient, fire-and-forget pub/sub (INV-SUB-T-001..005). The
+store pushes `{:events, events}` messages to the subscriber
+process; no cursor, no ack, lost on process exit. Commanded uses
+this internally for the aggregate's self-subscription (AGG-025) and
+for the `Subscriptions` registry's strong-consistency notifications
+(CON-002..003).
+
+In `instructed`, both internal uses are gone: D-0004 drops the
+aggregate cache (so no AGG-025), and CON-* (Pass 3) will be
+realised by polling persistent cursors per D-0003.
+
+Applications also call `subscribe/2` directly when they want a
+live event tail. Realising that in Postgres without push requires
+either (a) ad-hoc polling — which is what persistent subscriptions
+already are — or (b) `LISTEN`/`NOTIFY`, which D-0003 puts out of
+v1.
+
+**Decision:** v1 has no transient-subscription primitive in the
+SQL contract. Live tails are expressed as a persistent
+subscription with `start_from: :current` plus a teardown call when
+the consumer is done. The SDK MAY offer an ergonomic
+`tail(stream, fn)` helper that wraps this pattern.
+
+**Rationale:** transient subscriptions are a BEAM ergonomic, not a
+CQRS/ES semantic. Removing them simplifies the contract surface
+and keeps every event-delivery path going through the same
+cursor-and-claim primitives, which means there is one place to
+reason about ordering, ack, and redelivery.
+
+**Implications:**
+
+- INV-SUB-T-001..005 are dropped from the realised contract.
+- The conformance harness (Phase 9) will skip the transient-
+  subscription test cases and the divergence is explicit in
+  `non-goals.md` (Phase 5).
+- The transient "live tail" use case is satisfied by persistent
+  subscriptions; the SDK helper hides the create/teardown pair.
+
+---
+
+## D-0006 — Subscriptions are leased, not session-locked
+
+**Date:** 2026-05-17
+
+**Context:** Commanded's reference adapter implements
+single-active-subscriber (INV-SUB-P-010..012) with
+`pg_try_advisory_lock` held for the lifetime of the database
+session. When the session closes (worker exits, network drop), the
+lock is released automatically and another subscriber can attach.
+This ties subscription ownership to connection ownership, which
+rarely lines up with worker process ownership when a connection
+pool sits in between.
+
+Absurd's task scheduler solves the analogous problem with a
+row-level lease: `claimed_by TEXT, claim_expires_at TIMESTAMPTZ`
+on each task, with `claim_task` (allocate), `extend_claim`
+(heartbeat), and timeout reclamation built into the next claim.
+
+**Decision:** `instructed`'s `subscriptions` table carries
+`claimed_by TEXT NULL` and `claim_expires_at TIMESTAMPTZ NULL`.
+The SDK calls:
+
+- `claim_subscription(name, worker_id, lease_secs)` — atomically
+  acquires the subscription if unclaimed *or* if the existing
+  claim has expired. Returns `:ok` with the cursor, or
+  `:already_claimed` with the current holder for diagnostics.
+- `extend_subscription_claim(name, worker_id, lease_secs)` —
+  heartbeat. Fails if `claimed_by <> worker_id`, which is the
+  signal that the worker has lost the subscription and must stop.
+- `release_subscription(name, worker_id)` — clean release on
+  graceful shutdown.
+
+We do **not** use `pg_advisory_lock` for subscription claim.
+
+**Rationale:** leasing decouples claim lifetime from connection
+lifetime, matches absurd's pull-based shape, and survives the
+connection-pool middlebox cleanly (a returned connection does not
+release the lease). It does introduce one new operational concern
+— lease TTL tuning — but that knob is also the natural place to
+express "how long do we tolerate a silent worker before another
+takes over". The absurd codebase has working production
+intuitions for this we can borrow.
+
+**Implications:**
+
+- INV-SUB-P-010..012 are realised by lease semantics rather than
+  by session locks.
+- The SDK worker loop runs a heartbeat alongside its processing
+  loop. If `extend_subscription_claim` fails the worker MUST stop
+  processing immediately; otherwise it risks double-delivery with
+  the new holder. (This becomes a real correctness boundary,
+  documented in the SDK.)
+- A crashed worker keeps the subscription unavailable until its
+  lease expires. Default lease TTL needs to balance fast failover
+  vs. tolerating GC pauses; tuning is deferred to Phase 7/8.
+- The `concurrency_limit` knob (INV-SUB-P-010) is fixed at 1 in v1
+  per D-0002; the lease realisation generalises naturally to N by
+  adding a `shard` column (per ML-0001's forward-compat note).
+
+---
+
 ## D-0005 — Per-aggregate command serialisation via optimistic-lock retry, not advisory locks
 
 **Date:** 2026-05-17
