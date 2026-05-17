@@ -9,8 +9,8 @@ The work is done in passes:
 
 | Pass | Scope | Status |
 |------|-------|--------|
-| 1 | Survey absurd's task/step model; lay out the three candidate shapes concretely | **this commit** |
-| 2 | Take a position; record the decision | pending |
+| 1 | Survey absurd's task/step model; lay out the three candidate shapes concretely | done |
+| 2 | Take a position; record the decision | **this commit** |
 | 3 | Implications for schema and SDK loop; Phase 7 inputs | pending |
 
 Pass 1 deliberately does not pick a winner. It surveys what each
@@ -280,15 +280,130 @@ executor when needed". The PMs *are* the saga support.
 
 ---
 
-## What Pass 2 must decide
+---
 
-The choice is essentially between candidate 2 and candidate 3.
-Pass 2 will:
+## Pass 2 — Position
 
-- Pick one.
-- Record the decision in `decisions.md`.
-- Update mapping.md's PM-030 entry with the verdict.
-- Surface any new open questions.
+**Decision: candidate 3.** Process managers in `instructed` stay
+pure (events in → commands out + state). Compensation is a
+first-class concern in the sense that D-0001 demands, because the
+PM contract — durable state, ordered at-least-once event
+delivery, transactional persist-and-ack (D-0008), and a `dispatch`
+helper that runs the full load-execute-append cycle — gives the
+application every primitive it needs to express
+compensating-command flows without inventing its own durability,
+ordering, or recovery. Side-effecting workflows are delegated to
+absurd tasks, with the event store as the integration surface in
+both directions.
 
-Pass 3 then writes the schema and SDK implications, plus the
-forward-pointing constraints for Phase 7.
+Recorded as **D-0011** in `decisions.md`.
+
+### Why not candidate 2
+
+Candidate 2 — a first-class saga DSL inside `instructed` with
+explicit step-pair tracking — was tempting. It would have produced
+a nicer story for tooling (
+"saga is at step 3 of 5; here is
+which steps have committed and which compensations have run").
+It was rejected for four reasons, in descending weight:
+
+1. **It duplicates the PM model.** A PM is already an
+   event-driven, state-carrying, command-dispatching workflow.
+   A saga DSL adds a second, structurally similar abstraction.
+   Application authors would have to choose between PM and saga
+   for every workflow, and most would choose wrong at least
+   once. Two abstractions with overlapping semantic ranges is
+   the kind of bloat we set out to avoid.
+2. **Linear step lists don't fit reactive workflows.** Real
+   CQRS/ES sagas fan in and out: "book hotel and flight in
+   parallel; charge card when both confirm; cancel the other if
+   either fails" is natural as a state machine, awkward as a
+   forward/compensate step list. A DSL would either pretend
+   linearity or grow combinators (parallel, alternative, retry,
+   compensate-conditionally) until it became a state-machine
+   notation with extra ceremony.
+3. **The side-effect step inside the DSL is absurd in disguise.**
+   A saga step that calls Stripe is a durable external call with
+   retries and a checkpoint. That is precisely what absurd
+   provides. Either we reinvent it inside `instructed` (NIH) or
+   we delegate to absurd (in which case the saga DSL is a thin
+   wrapper plus a compensation table — most of the weight is in
+   the existing absurd integration, not in the new instructed
+   abstraction).
+4. **Schema and lock-ordering weight.** Candidate 2 needs new
+   tables (`saga_instances`, `saga_step_log`), new procedures
+   (`claim_saga_step`, `complete_saga_step`, `fail_saga_step`),
+   a saga-worker lease story, and a place in the Phase 7 lock
+   ordering. Candidate 3 needs none of these — PM state is
+   already snapshots, PM consumption is already a subscription,
+   PM dispatch is already `append_to_stream`.
+
+### What the position commits us to
+
+- **PMs are the saga primitive.** There is no separate `saga`
+  abstraction. The PM contract (PM-001..024, 031 in
+  `mapping.md`) is the saga contract.
+- **Compensation is a command.** Compensating actions are
+  modelled as commands the PM dispatches in response to failure
+  events. There is no `compensate` keyword, no reverse-walk
+  engine, no paired-step data structure. The forward/compensate
+  pairing lives in the PM module's `handle/3` clauses (one
+  clause emits the forward command on the success-side event;
+  another emits the compensating command on the failure-side
+  event).
+- **Failure events must exist as first-class domain events.**
+  This is the modelling discipline candidate 3 imposes. The PM
+  cannot compensate in response to an exception that wasn't
+  raised; it can only react to events that were appended. Every
+  aggregate command that can fail "permanently" in a way the
+  saga needs to know about must produce a failure event
+  (`FlightBookingFailed`, `PaymentDeclined`, ...) rather than
+  silently returning `{:error, ...}` to its caller. The PM
+  subscribes to those events the same way it subscribes to
+  success events.
+- **Side-effecting steps are absurd tasks bridged through
+  events.** When a PM needs work that isn't expressible as a
+  command-on-an-aggregate (charge a card, send an email, call
+  an external API), the pattern is: dispatch a command that
+  produces a `XRequested` event; an absurd task subscribes
+  (logically, as an instructed event-handler-shaped consumer)
+  to that event, runs the durable side effect with absurd's
+  checkpoint/retry machinery, and on completion or permanent
+  failure calls `append_to_stream` to emit a `XCompleted` or
+  `XFailed` event back into the event store. The PM consumes
+  the result like any other event. Neither system reaches
+  across to the other directly.
+- **Cross-boundary idempotency is the absurd task's job.** When
+  an absurd task emits a returning event after retries, it MUST
+  ensure the event is appended at most once. The integration
+  pattern relies on caller-supplied `event_id` (already part of
+  the contract per INV-APPEND-001) and the `:duplicate_event`
+  error (INV-APPEND-030): the task derives `event_id`
+  deterministically from its `task_id` and the step name, so a
+  re-run that re-emits gets a clean duplicate-event signal
+  instead of inserting a second copy. This is captured as a
+  forward-pointing constraint in the Phase 7 inputs (Pass 3).
+
+### Open question deliberately *not* surfaced
+
+A tempting question: "do we need a registry / table of
+`pm_instance ↔ spawned_absurd_task` so we can answer 'is this
+saga waiting on a task right now?' for tooling?" The answer for
+v1 is no — the PM's snapshot data is where that linkage lives,
+and the application chooses its own shape for it. Surfacing it as
+a first-class table would be the start of building candidate 2 by
+accident. Recorded here so a later phase can deliberately revisit
+rather than drift into it.
+
+### What Pass 3 must cover
+
+- Schema implications: confirm "no new tables" against the Pass-1
+  candidate-2 sketch and against PM-020..024 in `mapping.md`.
+- SDK loop: where compensation fits relative to PM-011's
+  handle → dispatch → apply → persist → ack ordering. (Hypothesis:
+  nowhere new — the compensating command is dispatched in step 3
+  of PM-011 like any other.)
+- Phase 7 inputs: forward-pointing constraints on the SQL contract,
+  especially around caller-supplied `event_id` and the
+  `:duplicate_event` error being part of the public contract (not
+  reference-only).

@@ -12,6 +12,92 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0011 — Compensation is a command; PMs are the saga primitive; side effects bridge to absurd via events
+
+**Date:** 2026-05-17
+
+**Context:** D-0001 committed `instructed` to treating compensation
+as a first-class concern and explicitly ruled out "punt to
+absurd". PM-030 in `mapping.md` was the artifact left for Phase 6
+to resolve. The three remaining candidates: (1) punt — already
+ruled out; (2) a first-class saga abstraction inside `instructed`
+with forward/compensation step pairing and its own table family;
+(3) PMs stay pure (events in → commands out + state), with
+side-effecting workflows delegated to absurd tasks and bridged
+through the event store.
+
+**Decision:** **candidate 3**. Process managers are the saga
+primitive. Compensation is modelled as commands the PM dispatches
+in response to failure events. There is no separate `saga`
+abstraction, no paired-step DSL, no compensation engine walking
+backward through committed steps. When a workflow needs durable
+execution of an external side effect (Stripe, email, third-party
+API), the PM dispatches a command that produces a `XRequested`
+event; an absurd task subscribes to that event, runs the side
+effect with its own checkpoint/retry machinery, and appends a
+`XCompleted` or `XFailed` event back into the event store on
+completion. The PM consumes that returning event like any other.
+
+**Rationale:** the PM contract — durable snapshot-backed state,
+ordered at-least-once subscription delivery, co-transactional
+persist-and-ack (D-0008), and a dispatch helper that runs the
+full load-execute-append cycle — already provides every primitive
+needed to express compensating-command flows without inventing
+new durability, ordering, or recovery machinery. This satisfies
+D-0001's bar ("first-class") because the application is not left
+to build saga support itself; it is left to *use* the existing PM
+support, knowing that compensation flows are not a special case
+but the same shape as forward flows. Candidate 2 was rejected on
+four grounds, documented in `sagas.md`: it duplicates the PM
+model; linear step lists don't fit reactive workflows that fan in
+and out; its "side-effect step" is absurd in disguise and would
+either be NIH'd or thin-wrap absurd anyway; it carries real
+schema and lock-ordering weight in Phase 7.
+
+**Implications:**
+
+- **No new tables.** PM state remains in the snapshots table per
+  PM-020..024. Compensation commands flow through
+  `append_to_stream`. The PM's subscription is the same
+  persistent-subscription primitive Pass 2 of `mapping.md`
+  already specified. Phase 7 inherits zero new schema obligations
+  from saga support.
+- **PM-011 ordering is unchanged.** The compensating command is
+  dispatched in step 3 (`dispatch all returned commands`) of the
+  handle → dispatch → apply → persist → ack sequence, indistinguishable
+  from a forward command.
+- **Failure events become a modelling obligation.** Aggregate
+  commands that can permanently fail in a way the saga needs to
+  observe MUST produce failure events rather than silently
+  returning errors to the dispatcher. This is a documentation /
+  SDK-guidance concern, not a contract-level one. The conformance
+  harness in Phase 9 does not test for it.
+- **Cross-boundary event idempotency.** An absurd task that emits
+  an event back into the store after a retry MUST do so with a
+  deterministic `event_id` derived from `(task_id, step_name)`,
+  so that a re-run hits INV-APPEND-030's `:duplicate_event` path
+  and does not double-append. This requires caller-supplied
+  `event_id` to remain part of the public contract (it already
+  is, per INV-APPEND-001) and the `:duplicate_event` error to be
+  surfaced (not reference-only).
+- **PM-030 in `mapping.md`** receives a verdict: realised by
+  PM-001..024 + 031 — no additional mechanism. The mapping entry
+  is updated to record this and to cross-reference D-0011.
+- **Tooling cost is acknowledged.** A linear-saga DSL would let
+  tooling display "saga is at step 3 of 5". With candidate 3,
+  tooling can only show the PM's state field (whatever the
+  application put there). Accepted.
+- **A future linear-saga helper is not precluded.** Should a
+  worked example in Phase 8 produce a linear-and-pairable
+  workflow often enough to want sugar, an SDK-level helper that
+  generates the right PM clauses from a step-pair declaration is
+  compatible with this decision. The helper would compile into
+  PMs; it would not become a parallel primitive in the SQL
+  contract. Not currently tracked in `maybe-later.md`; revisit
+  if Phase 8 demands it.
+
+---
+
 ## D-0010 — Strong-consistency-on-dispatch waits on an explicit subscription list
 
 **Date:** 2026-05-17

@@ -1017,10 +1017,27 @@ This is the load-bearing ordering rule. Commanded's sequence:
 
 - **Commanded:** not first-class; whatever commands the PM
   dispatches in response to failure events.
-- **`instructed`:** **deferred to Phase 6** per D-0001. Pass 3
-  records no mapping decision here — the mechanism is open.
-- **Verdict:** **TBD**. Phase 6 produces `sagas.md`; this section
-  will be revisited.
+- **`instructed`:** **realised by the PM contract itself**, per
+  D-0011 (Phase 6, `sagas.md`). PMs stay pure (events in →
+  commands out + state); compensation is modelled as commands the
+  PM dispatches in response to failure events. Side-effecting
+  workflows that need durable external calls are delegated to
+  absurd tasks and bridged back through the event store (the task
+  appends a `XCompleted` or `XFailed` event; the PM consumes it
+  like any other event). No new tables, no separate saga
+  abstraction, no compensation engine. The PM-011 ordering is
+  unchanged — the compensating command is dispatched in step 3
+  alongside any forward commands.
+- **Verdict:** **tighter than Commanded on substance, equivalent
+  on shape**. Commanded calls compensation "not first-class";
+  `instructed` calls the same mechanism first-class because the
+  PM primitives (snapshot-backed state, co-transactional
+  persist-and-ack per D-0008, ordered at-least-once delivery)
+  carry the durability and recovery guarantees that make
+  compensating-command flows reliable without application-side
+  re-implementation. The semantic shape — compensation is a
+  command — is the same as Commanded's; the contract underneath
+  it is stronger.
 
 #### PM-031 — Command failure surfaces to `error/3`
 
@@ -1209,9 +1226,11 @@ are already mapped in Pass 1 (AGG-*).
 - **D-0010** — Strong-consistency-on-dispatch waits on an
   explicit subscription list; no in-store registry. The
   `consistency: :strong` shorthand is not supported.
-- **PM-030 cross-references D-0001 / Phase 6** — compensation
-  mechanism is deliberately deferred; PM-030 in the mapping has
-  no Pass-3 verdict.
+- **PM-030** was deferred at the time of Pass 3 and resolved in
+  Phase 6 by **D-0011** (`sagas.md`): PMs are the saga primitive;
+  compensation is a command; side effects bridge to absurd via
+  events. No new schema; PM-011 ordering unchanged. The PM-030
+  entry above has been updated retroactively with the verdict.
 - The PM section reuses the snapshot primitive from Pass 2 and
   the subscription primitives from Pass 2. No new schema is
   introduced in Pass 3.
@@ -1223,8 +1242,9 @@ No new `maybe-later.md` entries in Pass 3.
 ## Phase 4 status
 
 All Phase-2 invariants and all Phase-3 guarantees now have a
-mapping entry, with the single deliberate exception of **PM-030
-(compensation)** which is deferred to Phase 6 per D-0001.
+mapping entry. **PM-030 (compensation)** was the one deliberate
+exception at the end of Pass 3; Phase 6 (`sagas.md`, D-0011)
+resolved it without introducing new schema.
 
 The roadmap's Phase 4 "done when" criterion ("every Commanded
 invariant/guarantee has either a proposed realisation or an
