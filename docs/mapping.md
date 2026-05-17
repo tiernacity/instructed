@@ -71,16 +71,17 @@ set.
   then links every event into `$all` via `stream_events` with
   contiguous numbers. Lock ordering is `streams[target] →
   streams[$all] → events → stream_events`.
-- **`instructed`:** **mechanism is OQ-0001**. The candidates are
-  (1) `$all`-as-stream like the reference, (2) a Postgres sequence
-  (loses gap-freedom; needs invariant revision), or (3) `SERIALIZABLE`
-  + `MAX() + 1`. The default assumption pending OQ-0001 is option 1,
-  because it most directly preserves the invariant as written and
-  matches the reference adapter's lock ordering.
-- **Verdict:** **equivalent** under option 1 (the current default);
-  **looser** under option 2 (would require weakening INV-APPEND-003
-  to "monotone, not gapless"); **equivalent but lower throughput**
-  under option 3.
+- **`instructed`:** **`$all`-as-stream with row-level lock**, per
+  **D-0012** (resolves OQ-0001 in Phase 7). A `streams` row with
+  `stream_id = 0`, `stream_uuid = '$all'` is seeded at install
+  time. `append_to_stream` issues
+  `UPDATE streams SET stream_version = stream_version + N WHERE
+  stream_id = 0 RETURNING stream_version - N` to take the row
+  lock and reserve `[initial+1 .. initial+N]` as the global
+  numbers, then links each event into `$all` via `stream_events`.
+  Lock order: per-stream row → `$all` row → events → stream_events.
+- **Verdict:** **equivalent** — the same mechanism as the
+  reference adapter, preserving INV-APPEND-003 literally.
 
 #### INV-APPEND-004 — Contiguity within a single multi-event append
 

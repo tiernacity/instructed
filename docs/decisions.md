@@ -12,6 +12,136 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0012 — Global ordering via `$all`-as-stream with row-level lock
+
+**Date:** 2026-05-17
+
+**Context:** OQ-0001 had three candidates for the serialisation
+point that gives `event_number` its globally-unique,
+monotonically-increasing, **gapless** property under concurrent
+writers (INV-APPEND-003):
+
+1. **`$all`-as-stream with row-level lock** — what Commanded's
+   reference adapter does. A real `streams` row for `$all`
+   (`stream_id = 0`); every append issues an
+   `UPDATE streams SET stream_version = stream_version + N
+    WHERE stream_id = 0 RETURNING ...` that takes the `$all`
+   row's row lock for the rest of the transaction, assigns
+   contiguous global numbers, and links each event into `$all`
+   via `stream_events`. Strong, simple, preserves the invariant
+   as written. Serialises every append in the store at the `$all`
+   row.
+2. **`bigserial`/sequence on `events.event_number`** — cheap and
+   highly concurrent, but sequences can skip values (rolled-back
+   transactions, sequence cache, restart gaps). Would force
+   INV-APPEND-003 to be weakened from "gapless" to "monotone,
+   possibly gapped", which in turn would force every downstream
+   reader (subscriptions, `$all` reads, the PM cursor, the
+   strong-consistency wait helper in D-0010) to be audited for
+   gap-tolerance.
+3. **`SERIALIZABLE` isolation + `MAX(event_number) + 1`** —
+   correct and gapless, but throughput is bounded by the
+   serialisation-failure / retry rate. Retries are observable to
+   the SDK and compose awkwardly with the SDK's own optimistic-
+   lock retry on `wrong_expected_version` (D-0005): a single
+   command can now fail for two unrelated reasons that require
+   the same recovery action, and operators reading logs would
+   see SERIALIZABLE retries as a distinct, opaque error class.
+
+**Decision:** **candidate 1 — `$all`-as-stream with row-level
+lock**, as in the reference adapter. The v1 schema includes a
+`streams` row with `stream_id = 0` and `stream_uuid = '$all'`,
+seeded at install time. `append_to_stream` updates that row inside
+its transaction (`UPDATE streams SET stream_version = stream_version
++ N WHERE stream_id = 0 RETURNING stream_version - N AS
+initial_event_number`), then links every event into `$all` via
+`stream_events` with contiguous numbers starting at `initial_event_number
++ 1`. Lock acquisition order is documented in the
+`append_to_stream` docstring: per-stream `streams` row first,
+then `$all` `streams` row, then `events`, then `stream_events`.
+
+**Rationale:**
+
+- **INV-APPEND-003 as written.** Candidate 1 is the only option
+  that preserves the invariant literally. Candidates 2 and 3
+  either weaken the contract or pay for keeping it with
+  observable retries. The mapping document, the conformance
+  harness target, and several downstream invariants
+  (INV-SUB-P-030 "strictly increasing delivery order by
+  event_number", CON-010's polling comparison) all assume
+  gaplessness; rewriting them for tolerance to sequence gaps is
+  a larger surface change than the throughput ceiling justifies
+  for v1.
+- **Mechanism parity with the reference adapter** is a feature.
+  The reference adapter has run in production at non-trivial
+  scale under exactly this lock pattern. We inherit the
+  empirical confidence that the contention point is not the
+  bottleneck most workloads hit first — the per-stream lock and
+  the application's own command latency tend to dominate.
+- **Lock-ordering simplicity.** `append_to_stream` is already
+  the only mechanism that takes a lock (per D-0005, no advisory
+  locks; per D-0008, `advance_subscription` does not take a lock
+  the SDK could hold). Adding `$all` to the lock set is a single
+  additional row, acquired in a fixed order; the disjointness
+  property D-0011's Phase 7 input #6 demands is preserved.
+- **Forward compatibility.** Should v2 need higher append
+  throughput, the `$all` row remains a *mechanism* of
+  INV-APPEND-003, not part of the SDK-visible contract.
+  Replacing it with a sharded counter, a Redis-backed allocator,
+  or anything else that preserves gaplessness is an internal
+  schema migration. Replacing it with a non-gapless mechanism
+  would be a contract change, which is precisely the change
+  we are choosing not to make now.
+
+**Implications:**
+
+- **Schema.** The `streams` table is seeded with one row at
+  install time: `(stream_id = 0, stream_uuid = '$all',
+  stream_version = 0)`. The `CHECK (stream_uuid <> '$all')`
+  constraint from the mapping (INV-STREAM-003) is restated as
+  `CHECK (stream_uuid <> '$all' OR stream_id = 0)` so the seed
+  row passes while user-supplied collisions still fail.
+- **`$all` is a real stream**, queryable via
+  `read_all(from_event_number, qty)` (per the ROADMAP
+  procedure list). `read_stream` rejects `stream_uuid = '$all'`
+  to force callers through the dedicated entry point;
+  alternatively, the procedure could route. The chosen shape is
+  the dedicated entry point — it makes the asymmetry between
+  per-stream and global reads explicit at the SQL surface.
+- **`stream_events` is a real table**, not a view. It carries
+  `(event_id, stream_id, stream_version, original_stream_id,
+  original_stream_version)` exactly like the reference adapter.
+  This realises INV-READ-005..008 directly: an `$all` read joins
+  through `stream_events.stream_id = 0`, and the projection
+  carries the *original* stream identity via
+  `original_stream_id` / `original_stream_version`.
+- **Concurrent append throughput is bounded by the `$all` row
+  lock**, not by per-stream optimistic-lock contention. This is
+  the same throughput ceiling Commanded operators have, and is
+  recorded in `non-goals.md` only by implication (we make no
+  promise of higher global write throughput than Commanded does).
+  Higher-throughput mechanisms remain a candidate for
+  `maybe-later.md` once Phase 8/9 has produced realistic
+  benchmarks. Not currently tracked as ML- — adding it now
+  would be premature.
+- **Lock-acquisition order is fixed for the lifetime of v1.**
+  Documented in the `append_to_stream` docstring as: per-stream
+  row (or insert) → `$all` row → events → stream_events. Other
+  procedures (`record_snapshot`, `read_subscription_batch`,
+  `advance_subscription`, etc.) acquire row locks in disjoint
+  sets, per D-0011's Phase 7 input #6.
+- **Conformance harness (Phase 9)** can use the reference
+  adapter's `$all` semantics directly without translation. The
+  bandwidth gap between candidate 1 and candidate 2 will only
+  show up in benchmarks, not in correctness tests; we record
+  here that benchmarking is a Phase-9-or-later concern.
+
+The entry for OQ-0001 is now removed from `open-questions.md`; its
+text is preserved in the **Context** section above per the file's
+opening convention.
+
+---
+
 ## D-0011 — Compensation is a command; PMs are the saga primitive; side effects bridge to absurd via events
 
 **Date:** 2026-05-17
