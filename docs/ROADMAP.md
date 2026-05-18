@@ -286,7 +286,7 @@ cases, and lock ordering.
 
 ---
 
-## Phase 8 — Reference SDK — **in progress**
+## Phase 8 — Reference SDK — **done**
 
 Design signed off (D-0013 — TypeScript / Node 18+ / pg 8.x;
 D-0015 — API shape; D-0016 — handlers opaque to SDK; D-0017 —
@@ -374,8 +374,9 @@ with tests against the docker-compose Postgres).
   docker-compose Postgres and prints the final balances
   (700 / 300). `test/bank-account.test.ts` exercises the same
   modules under `npm test` (77 total).
-- **Step 8/8.** Update repo `README.md` to point at the example and
-  the SDK.
+- **Step 8/8 — done.** Top-level `README.md` updated: status flipped
+  to "Phase 8 done", all five layers summarised with their D- entries,
+  bank-account example called out with its run command.
 
 **Language:** TypeScript / Node 18+, `pg` 8.x peer dependency
 (recorded as D-0013).

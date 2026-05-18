@@ -13,25 +13,45 @@ guarantees required from the host (no BEAM, no OTP).
 
 ## Status
 
-**Phase 8 — Reference SDK — in progress.**
+**Phase 8 — Reference SDK — done.**
 
 - The SQL contract is the spec: see [`sql/instructed.sql`](sql/instructed.sql).
   Schema, 12 plpgsql procedures with full docstrings, closed SQLSTATE
   catalogue, lock-acquisition order documented inline. Human-oriented
-  reference in [`docs/sql-contract.md`](docs/sql-contract.md). Phases 1–7
-  are done.
-- The reference SDK lives in [`sdks/typescript/`](sdks/typescript/). Steps
-  1–3 of the eight-step Phase 8 sequencing (see
-  [`docs/sdk-design.md`](docs/sdk-design.md) §10) have landed:
+  reference in [`docs/sql-contract.md`](docs/sql-contract.md).
+- The reference TypeScript SDK lives in
+  [`sdks/typescript/`](sdks/typescript/). All five layers per
+  [`docs/sdk-design.md`](docs/sdk-design.md) §3 are implemented and
+  tested against the docker-compose Postgres (77 cases):
     - **Layer 0** `Client` — thin wrappers around every stored procedure,
       SQLSTATE → typed `Error` subclass.
     - **Layer 1** `runCommand` — aggregate load-execute-append loop with
-      OCC retry (D-0005).
+      OCC retry (D-0005 / D-0019).
     - **Layer 2** `startProjection` — persistent-subscription worker with
-      lease heartbeat, abort-aware shutdown, and handler-throws backoff.
-- Layers 3–5 (process manager, consistency wait, facade), the bank-account
-  example, and a follow-up README update are still ahead. The detailed
-  per-step status is in [`docs/ROADMAP.md`](docs/ROADMAP.md) "Phase 8".
+      lease heartbeat, abort-aware shutdown, handler-throws backoff
+      (D-0016 / D-0018).
+    - **Layer 3** `startProcessManager` — routing PM with separate
+      dispatch session, snapshot + cursor-advance in one short SDK-internal
+      transaction (D-0011 / D-0012 / D-0020).
+    - **Layer 4** `waitForProjection` — consistency-on-dispatch wait
+      (D-0010, explicit list, no `:strong` shorthand).
+    - **Layer 5** `Instructed` facade — `registerAggregate` /
+      `registerProjection` / `registerProcessManager`, `dispatch`,
+      `startWorker`, lazy dispatch-pool materialisation.
+- The bank-account example in
+  [`sdks/typescript/examples/bank-account/`](sdks/typescript/examples/bank-account/)
+  is the Phase 8 done-criterion target: an `Account` and a `Transfer`
+  aggregate, a `Balances` projection, and a `TransferProcessManager`
+  realising compensation by refusal (D-0011). `main.ts` runs end-to-end
+  against the docker-compose Postgres and prints final balances.
+- Per-step history is in [`docs/ROADMAP.md`](docs/ROADMAP.md) "Phase 8";
+  non-obvious choices are pinned in
+  [`docs/decisions.md`](docs/decisions.md) (most recently D-0019 —
+  aggregate-runner semantics, and D-0020 — PM-worker / runner
+  fresh-stream details).
+
+Phase 9 (the cross-language conformance harness) is the next major
+milestone.
 
 ## Layout
 
@@ -73,6 +93,17 @@ npm test
 The fixtures connect to `instructed_test`, create the database if missing,
 install [`sql/instructed.sql`](sql/instructed.sql), and truncate the
 `instructed.*` tables between cases.
+
+## Running the bank-account example
+
+```sh
+docker compose up -d
+cd sdks/typescript
+node --experimental-strip-types examples/bank-account/main.ts
+```
+
+See [`sdks/typescript/examples/bank-account/README.md`](sdks/typescript/examples/bank-account/README.md)
+for what the example demonstrates.
 
 ## Further reading
 
