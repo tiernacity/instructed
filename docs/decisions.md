@@ -12,6 +12,77 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0019 — Aggregate runner: retry semantics, explicit-expected-version, snapshot-write failure, load page size
+
+**Date:** 2026-05-18
+
+**Context:** implementing Layer 1 (`runCommand`, Phase 8 step 2)
+required pinning four details the design doc left under-specified.
+The SDK ships with these defaults so a user can call `runCommand`
+without extra knobs; revisit if benchmarks or real workloads
+show them wrong.
+
+**Decided:**
+
+1. **`retryBudget` is the number of retries after the first attempt.**
+   `retryBudget: 0` therefore means *one* attempt total; the first
+   `IS001` raises `RetryBudgetExhausted` carrying the underlying
+   `WrongExpectedVersion`. The default of 5 (mapping.md AGG-010)
+   permits up to 6 attempts total. This is the natural reading of
+   "retry up to retryBudget" in `sdk-design.md` §3 layer 1 and
+   matches Commanded's `retry_attempts` field shape (their default
+   is 0; ours is 5).
+
+2. **Explicit `RunCommandOptions.expectedVersion` disables OCC retry.**
+   When the caller supplies an explicit expected version, a
+   mismatch surfaces as the underlying `WrongExpectedVersion`
+   rather than triggering the retry loop. The default-expected-
+   version case (where the SDK constructs `expected.exact(V)` from
+   the loaded version) is the only path that retries. Rationale:
+   an explicit expected version is a caller-asserted invariant; if
+   it is wrong on attempt N it is wrong on attempt N+1, because
+   the SDK would still assert the same value. Retrying would
+   either be a no-op (still wrong) or silently change the
+   semantics of the assertion (re-derive against the new head).
+   Both are surprising; surfacing the error is honest.
+
+3. **Snapshot-write failures are non-fatal and currently log via
+   `console.warn`.** A failed `recordSnapshot` after a successful
+   append never fails the command — the load path works without
+   a snapshot, just more slowly. v1 does not expose a logger or
+   `onError` on `RunCommandOptions`; output goes to `console.warn`
+   prefixed with `[instructed]`. A logger surface can be added
+   later without breaking callers; tracked informally and revisited
+   when the facade (layer 5) lands a `log` option.
+
+4. **Aggregate-load page size is an internal constant of 500.**
+   `runCommand` pages `readStream` in 500-event chunks during
+   load. Not exposed on `RunCommandOptions`: tuning it requires
+   workload data we do not have yet, and a knob here would
+   freeze the loader's internal contract. If a real workload
+   makes this matter, add an option then.
+
+**Consequences:**
+
+- `RetryBudgetExhausted.attempts` is always >= 1 (the first try
+  counts as attempt 1). With the default budget, it is between 1
+  and 6.
+- Callers that need at-most-one-attempt OCC semantics still set
+  `retryBudget: 0` explicitly; callers that want to assert a
+  precise head version ("this command is only valid against
+  version N") use `expectedVersion: expected.exact(Nn)` and
+  accept that they get the raw `WrongExpectedVersion`.
+- Snapshot-write hardening (retries, dead-letter, async
+  enqueue) is explicitly *not* in v1; the design's claim that
+  snapshots are "best-effort optimisations of the load path"
+  (sdk-design.md §3 layer 1) is realised literally.
+
+**Sources:** `sdk-design.md` §3 layer 1, §6, §11.8; `mapping.md`
+AGG-010; D-0005 (no advisory lock, OCC only); D-0017 (causation/
+correlation defaulting).
+
+---
+
 ## D-0018 — Worker lifecycle, `AbortSignal`, and ack-tx-on-shutdown
 
 **Date:** 2026-05-17

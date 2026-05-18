@@ -6,5 +6,14 @@
  */
 
 export { Client, type ClientOptions } from "./client.ts";
+export {
+  runCommand,
+  everyN,
+  DEFAULT_RETRY_BUDGET,
+  type AggregateDefinition,
+  type RunCommandOptions,
+  type SnapshotPolicy,
+  type DomainEvent,
+} from "./aggregate.ts";
 export * from "./errors.ts";
 export * from "./types.ts";
