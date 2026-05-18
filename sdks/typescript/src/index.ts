@@ -15,5 +15,16 @@ export {
   type SnapshotPolicy,
   type DomainEvent,
 } from "./aggregate.ts";
+export {
+  startProjection,
+  DEFAULT_BATCH_SIZE,
+  DEFAULT_LEASE_SECONDS,
+  DEFAULT_POLL_INTERVAL_MS,
+  type ProjectionDefinition,
+  type ProjectionHandler,
+  type ProjectionWorkerOptions,
+  type HandlerContext,
+  type RunningWorker,
+} from "./subscription.ts";
 export * from "./errors.ts";
 export * from "./types.ts";
