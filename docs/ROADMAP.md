@@ -350,13 +350,21 @@ with tests against the docker-compose Postgres).
   cursor using `stream_version`, not `event_number` (sql/instructed.sql
   :: advance_subscription). Existing projection tests only covered
   `$all` so this hadn't surfaced.
-- **Step 6/8.** `instructed.ts` (Layer 5 facade). Thin composition
-  over 0–4: `registerAggregate` / `registerProjection` /
-  `registerProcessManager`, `dispatch` (by-name aggregate lookup),
+- **Step 6/8 — done.** `instructed.ts` (Layer 5 facade). Thin
+  composition over 0–4: `registerAggregate` /
+  `registerProjection` / `registerProcessManager`, `dispatch`
+  (by-name aggregate lookup raising `UnknownAggregateType`),
   `startWorker` (fans out to one subscription loop per registered
-  projection/PM). Lazy dispatch-pool materialisation; registry
-  lookup; default propagation. Tests cover only facade-specific
-  behaviour.
+  projection / PM under one handle). `dispatch` accepts a
+  `consistency` list — bare strings as sugar for `$all`
+  subscriptions — and delegates the wait to
+  `waitForProjection` (no `:strong` shorthand, D-0010). Dispatch
+  pool materialises eagerly on `registerProcessManager` (or via
+  `dispatchClient()`); a process that only registers aggregates
+  never opens a second pool. Owned pools are closed by
+  `close()`; user-supplied pools / Queryables are left alone.
+  Tests: registry lookup + miss, fan-out, lazy materialisation
+  with both connection-string and Pool inputs, consistency wait.
 - **Step 7/8 — done-criterion.** `sdks/typescript/examples/bank-account/`
   with a `Balances` projection and a `TransferProcessManager`
   (compensation per D-0011: `WithdrawalRefused` stops the PM, no

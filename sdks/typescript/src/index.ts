@@ -42,5 +42,12 @@ export {
   type SubscriptionRef,
   type WaitForProjectionOptions,
 } from "./consistency.ts";
+export {
+  Instructed,
+  type InstructedOptions,
+  type InstructedDefaults,
+  type RegistrationOptions,
+  type DispatchOptions,
+} from "./instructed.ts";
 export * from "./errors.ts";
 export * from "./types.ts";
