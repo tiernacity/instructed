@@ -272,12 +272,17 @@ export function startProjection<E = unknown>(
           }
 
           let advanceTo: bigint | null = null;
+          // advance_subscription targets event_number for $all and
+          // stream_version for per-stream subscriptions (sql/instructed.sql
+          // :: advance_subscription).
+          const positionOf = (e: RecordedEvent<E>): bigint =>
+            stream === "$all" ? e.event_number : e.stream_version;
           for (const event of batch) {
             if (closing || aborted) break;
             // SDK-side selector (§7 / OQ-0003): the cursor advances
             // past the event regardless; only the handler is gated.
             if (def.selector && !def.selector(event)) {
-              advanceTo = event.event_number;
+              advanceTo = positionOf(event);
               continue;
             }
             await runHandlerWithBackoff(event);
@@ -286,7 +291,7 @@ export function startProjection<E = unknown>(
             // handler still resolved, the SDK MUST skip the advance.
             // `aborted` covers both lease-loss and close() cases.
             if (closing) break;
-            advanceTo = event.event_number;
+            advanceTo = positionOf(event);
             lastPosition = {
               eventNumber: event.event_number,
               streamVersion: event.stream_version,

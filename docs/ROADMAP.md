@@ -338,10 +338,18 @@ with tests against the docker-compose Postgres).
 
 **Remaining:**
 
-- **Step 5/8.** `consistency.ts` (Layer 4) `waitForProjection` +
-  timeout test. Polls `readSubscriptionPosition` until each named
-  subscription's `lastSeen >= target`, throws `ConsistencyTimeout`
-  on timeout. No `:strong` shorthand (D-0010).
+- **Step 5/8 — done.** `consistency.ts` (Layer 4)
+  `waitForProjection` + timeout test. Polls
+  `readSubscriptionPosition` until each named subscription's
+  `lastSeen >= target` (event_number for `$all`; stream_version
+  per-stream). Throws `ConsistencyTimeout({waitedMs, missing})`
+  on timeout. Treats `IS020` (subscription not yet created) as
+  "not caught up" and keeps polling. No `:strong` shorthand
+  (D-0010). Also fixed a latent bug in `subscription.ts` /
+  `process-manager.ts`: per-stream subscriptions now advance the
+  cursor using `stream_version`, not `event_number` (sql/instructed.sql
+  :: advance_subscription). Existing projection tests only covered
+  `$all` so this hadn't surfaced.
 - **Step 6/8.** `instructed.ts` (Layer 5 facade). Thin composition
   over 0–4: `registerAggregate` / `registerProjection` /
   `registerProcessManager`, `dispatch` (by-name aggregate lookup),

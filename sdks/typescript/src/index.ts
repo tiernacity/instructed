@@ -35,5 +35,12 @@ export {
   type RouteResult,
   type DispatchedCommand,
 } from "./process-manager.ts";
+export {
+  waitForProjection,
+  DEFAULT_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_WAIT_TIMEOUT_MS,
+  type SubscriptionRef,
+  type WaitForProjectionOptions,
+} from "./consistency.ts";
 export * from "./errors.ts";
 export * from "./types.ts";

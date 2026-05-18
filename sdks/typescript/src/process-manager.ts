@@ -325,7 +325,9 @@ export function startProcessManager<S, E = unknown>(
             stream,
             def.name,
             workerId,
-            event.event_number,
+            // event_number for $all; stream_version for per-stream
+            // (sql/instructed.sql :: advance_subscription).
+            stream === "$all" ? event.event_number : event.stream_version,
           );
         });
       } catch (err) {
@@ -351,7 +353,7 @@ export function startProcessManager<S, E = unknown>(
         stream,
         def.name,
         workerId,
-        event.event_number,
+        stream === "$all" ? event.event_number : event.stream_version,
       );
       return true;
     } catch (err) {
