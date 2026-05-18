@@ -1,0 +1,346 @@
+/**
+ * SQLSTATE → typed Error subclass translation.
+ *
+ * The closed error set per procedure is documented in
+ * `sql/instructed.sql`. Standard Postgres errors (connection loss,
+ * serialization_failure, …) pass through unwrapped — they are
+ * infrastructure failures, not contract failures.
+ */
+
+export class InstructedError extends Error {
+  /** The SQLSTATE that produced this error, if any. */
+  readonly code?: string;
+  /** Original Postgres error message detail, if present. */
+  readonly detail?: string;
+  /** Original Postgres error hint, if present. */
+  readonly hint?: string;
+
+  constructor(
+    message: string,
+    options?: { code?: string; detail?: string; hint?: string; cause?: unknown },
+  ) {
+    super(message, options?.cause ? { cause: options.cause } : undefined);
+    this.name = new.target.name;
+    this.code = options?.code;
+    this.detail = options?.detail;
+    this.hint = options?.hint;
+  }
+}
+
+// ---- IS00x: append-path errors ---------------------------------------------
+
+export class AppendError extends InstructedError {}
+
+export class WrongExpectedVersion extends AppendError {
+  /** Parsed from the server message when possible. */
+  readonly actualVersion?: bigint;
+  readonly expectedVersion?: bigint;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      actualVersion?: bigint;
+      expectedVersion?: bigint;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.actualVersion = opts.actualVersion;
+    this.expectedVersion = opts.expectedVersion;
+  }
+}
+
+export class StreamExists extends AppendError {
+  readonly streamUuid?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      streamUuid?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.streamUuid = opts.streamUuid;
+  }
+}
+
+/**
+ * Raised by append_to_stream(stream_exists), read_stream, and
+ * claim_subscription when the stream does not exist.
+ */
+export class StreamNotFound extends AppendError {
+  readonly streamUuid?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      streamUuid?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.streamUuid = opts.streamUuid;
+  }
+}
+
+export class DuplicateEvent extends AppendError {
+  readonly eventId?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      eventId?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.eventId = opts.eventId;
+  }
+}
+
+export class ReservedStreamUuid extends AppendError {
+  readonly streamUuid?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      streamUuid?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.streamUuid = opts.streamUuid;
+  }
+}
+
+/**
+ * IS006. Fires only on direct table manipulation (UPDATE / DELETE on
+ * events / stream_events); the procedures never raise this. Surfaced as
+ * a named class so a user bypassing the contract sees a useful name.
+ */
+export class AppendOnlyViolation extends InstructedError {}
+
+// ---- IS010 -----------------------------------------------------------------
+
+export class SnapshotNotFound extends InstructedError {
+  readonly sourceUuid?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      sourceUuid?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.sourceUuid = opts.sourceUuid;
+  }
+}
+
+// ---- IS020 / IS021 / IS022: subscription errors ----------------------------
+
+export class SubscriptionError extends InstructedError {
+  readonly streamUuid?: string;
+  readonly subscriptionName?: string;
+  readonly shard?: number;
+  readonly holder?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      streamUuid?: string;
+      subscriptionName?: string;
+      shard?: number;
+      holder?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.streamUuid = opts.streamUuid;
+    this.subscriptionName = opts.subscriptionName;
+    this.shard = opts.shard;
+    this.holder = opts.holder;
+  }
+}
+
+export class SubscriptionNotFound extends SubscriptionError {}
+/** Reserved by the SQL catalogue; never thrown in v1. */
+export class SubscriptionAlreadyClaimed extends SubscriptionError {}
+export class SubscriptionLeaseLost extends SubscriptionError {}
+
+// ---- 22023 -----------------------------------------------------------------
+
+export class InvalidParameterValue extends InstructedError {}
+
+// ---- SDK-level (no SQLSTATE) ----------------------------------------------
+
+export class RetryBudgetExhausted extends InstructedError {
+  readonly attempts: number;
+  readonly lastError: unknown;
+  constructor(message: string, opts: { attempts: number; lastError: unknown }) {
+    super(message, { cause: opts.lastError });
+    this.attempts = opts.attempts;
+    this.lastError = opts.lastError;
+  }
+}
+
+export class ConsistencyTimeout extends InstructedError {
+  readonly waitedMs: number;
+  readonly missing: string[];
+  constructor(
+    message: string,
+    opts: { waitedMs: number; missing: string[] },
+  ) {
+    super(message);
+    this.waitedMs = opts.waitedMs;
+    this.missing = opts.missing;
+  }
+}
+
+export class UnknownAggregateType extends InstructedError {
+  readonly aggregateType: string;
+  constructor(aggregateType: string) {
+    super(`Unknown aggregate type: ${aggregateType}`);
+    this.aggregateType = aggregateType;
+  }
+}
+
+export class HandlerError extends InstructedError {
+  readonly cause: unknown;
+  readonly event: unknown;
+  constructor(message: string, opts: { cause: unknown; event: unknown }) {
+    super(message, { cause: opts.cause });
+    this.cause = opts.cause;
+    this.event = opts.event;
+  }
+}
+
+// ---- Translation -----------------------------------------------------------
+
+interface PgErrorLike {
+  code?: string;
+  message?: string;
+  detail?: string;
+  hint?: string;
+  severity?: string;
+}
+
+/** Pull a hint from the server message in the form "actual N, expected M". */
+function parseWrongExpectedVersion(message: string | undefined): {
+  actualVersion?: bigint;
+  expectedVersion?: bigint;
+} {
+  if (!message) return {};
+  const m = message.match(/actual\s+(-?\d+),\s*expected\s+(-?\d+)/);
+  if (!m) return {};
+  try {
+    return {
+      actualVersion: BigInt(m[1]),
+      expectedVersion: BigInt(m[2]),
+    };
+  } catch {
+    return {};
+  }
+}
+
+export interface MapPgErrorContext {
+  /** The stream the SDK was operating on, if known at call site. */
+  streamUuid?: string;
+  /** The subscription name, if known at call site. */
+  subscriptionName?: string;
+  /** The shard, if known at call site. */
+  shard?: number;
+  /** The snapshot source_uuid, if known at call site. */
+  sourceUuid?: string;
+}
+
+/**
+ * Translate a Postgres error to the matching InstructedError subclass.
+ *
+ * Non-IS errors (and the catch-all 22023) are wrapped without preserving
+ * the original error class, so callers can `instanceof InstructedError`.
+ * If the error has no SQLSTATE at all (a transport / driver error), it is
+ * returned unchanged.
+ */
+export function mapPgError(err: unknown, ctx: MapPgErrorContext = {}): unknown {
+  if (!err || typeof err !== "object") return err;
+  const pgErr = err as PgErrorLike;
+  const code = pgErr.code;
+  if (!code) return err;
+
+  const base = {
+    code,
+    detail: pgErr.detail,
+    hint: pgErr.hint,
+    cause: err,
+  } as const;
+  const msg = pgErr.message ?? `instructed error ${code}`;
+
+  switch (code) {
+    case "IS001": {
+      const parsed = parseWrongExpectedVersion(pgErr.message);
+      return new WrongExpectedVersion(msg, { ...base, ...parsed });
+    }
+    case "IS002":
+      return new StreamExists(msg, { ...base, streamUuid: ctx.streamUuid });
+    case "IS003":
+      return new StreamNotFound(msg, { ...base, streamUuid: ctx.streamUuid });
+    case "IS004":
+      return new DuplicateEvent(msg, base);
+    case "IS005":
+      return new ReservedStreamUuid(msg, {
+        ...base,
+        streamUuid: ctx.streamUuid,
+      });
+    case "IS006":
+      return new AppendOnlyViolation(msg, base);
+    case "IS010":
+      return new SnapshotNotFound(msg, {
+        ...base,
+        sourceUuid: ctx.sourceUuid,
+      });
+    case "IS020":
+      return new SubscriptionNotFound(msg, {
+        ...base,
+        streamUuid: ctx.streamUuid,
+        subscriptionName: ctx.subscriptionName,
+        shard: ctx.shard,
+      });
+    case "IS021":
+      return new SubscriptionAlreadyClaimed(msg, {
+        ...base,
+        streamUuid: ctx.streamUuid,
+        subscriptionName: ctx.subscriptionName,
+        shard: ctx.shard,
+      });
+    case "IS022":
+      return new SubscriptionLeaseLost(msg, {
+        ...base,
+        streamUuid: ctx.streamUuid,
+        subscriptionName: ctx.subscriptionName,
+        shard: ctx.shard,
+      });
+    case "22023":
+      return new InvalidParameterValue(msg, base);
+    default:
+      // Standard Postgres errors (08xxx connection, 40001 serialization
+      // failure, etc.) pass through unwrapped. They are infrastructure
+      // failures, not contract failures.
+      return err;
+  }
+}
