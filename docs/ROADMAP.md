@@ -365,11 +365,15 @@ with tests against the docker-compose Postgres).
   `close()`; user-supplied pools / Queryables are left alone.
   Tests: registry lookup + miss, fan-out, lazy materialisation
   with both connection-string and Pool inputs, consistency wait.
-- **Step 7/8 — done-criterion.** `sdks/typescript/examples/bank-account/`
-  with a `Balances` projection and a `TransferProcessManager`
-  (compensation per D-0011: `WithdrawalRefused` stops the PM, no
-  compensating command needed; `Withdrawn` → `Deposited` is the
-  forward path).
+- **Step 7/8 — done.** `sdks/typescript/examples/bank-account/`
+  ships an `Account` and a `Transfer` aggregate, a `Balances`
+  projection on `$all`, and a `TransferProcessManager` realising
+  D-0011 compensation-by-refusal: `WithdrawalRefused` stops the PM,
+  no compensating command needed; `Withdrawn` → `Deposited` is the
+  forward path. `main.ts` runs end-to-end against the
+  docker-compose Postgres and prints the final balances
+  (700 / 300). `test/bank-account.test.ts` exercises the same
+  modules under `npm test` (77 total).
 - **Step 8/8.** Update repo `README.md` to point at the example and
   the SDK.
 
