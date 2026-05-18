@@ -12,6 +12,67 @@ Maybe-laters are things we likely *will* do, just not now.
 
 ---
 
+## ML-0004 — `bindToConnection` for caller-supplied transaction sharing
+
+**Deferred at:** Phase 8 SDK design review (the question surfaced
+when comparing the `Instructed` facade against absurd's
+`Absurd.bindToConnection`).
+
+**What:** an SDK-level helper that lets a caller share their own
+open Postgres transaction with `instructed` calls that otherwise
+open their own. Two distinct use cases:
+
+- **Dispatcher side:** `app.bindToConnection(myTx).dispatch(...)`
+  (or the layered equivalent
+  `runCommand(boundClient, def, ...)`) runs the aggregate's
+  load‐execute‐append cycle inside the caller's transaction, so
+  that command dispatch commits atomically with the caller's
+  own application writes. This was one half of the original
+  D-0008 motivation; it survived D-0016's reversal (D-0016 only
+  closed the *handler* side).
+- **Projection side:** a projection worker that targets the same
+  Postgres database the event store lives in could optionally
+  run its handler inside a transaction that also performs the
+  `advance_subscription` call, re-enabling the historical
+  D-0008 co-transactional persist-and-ack behaviour for that
+  narrow case. NG-0015 explicitly leaves the door open for
+  this; it would be an opt-in per‐registration flag
+  (e.g. `coTransactional: true`) that internally calls a
+  bound variant of the worker loop.
+
+absurd's analogue is `Absurd.bindToConnection(con, owned)`,
+which returns a sibling client backed by the supplied
+connection while sharing the registry.
+
+**Why deferred:**
+
+- The layered API in v1 already lets advanced callers compose
+  their own load‐execute‐append against `Client.appendToStream`
+  inside a caller-owned transaction; ML-0004 is the ergonomic
+  wrapper, not a new capability.
+- The projection-side opt-in needs a per-registration plumbing
+  story (which connection? owned by whom? what about lease
+  loss mid-handler?) that we should not design speculatively
+  without a workload demanding it.
+- Adding `bindToConnection` later is purely additive on the
+  `Instructed` facade and on the layered helpers; no v1
+  signature changes.
+
+**Forward compatibility constraints:**
+
+- `Client` already accepts a `Queryable` (`pg.Pool | pg.Client
+  | pg.PoolClient`), so the underlying primitive is in place.
+- The facade's `register*` options shape must be free to grow
+  a `coTransactional?: boolean` flag without breaking v1
+  callers.
+- The PM dispatch path (which uses a *separate* connection per
+  D-0011/D-0012 lock-set disjointness) is incompatible with
+  binding the PM persist-and-ack tx to a caller's transaction;
+  ML-0004 will not cover PMs in its first cut. Aggregates and
+  projections only.
+
+---
+
 ## ML-0003 — Server-side selector evaluation for persistent subscriptions
 
 **Deferred at:** Phase 8 SDK design (OQ-0003 resolution).

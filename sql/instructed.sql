@@ -890,8 +890,10 @@ $$;
 --
 -- Lock-set disjointness: holds `snapshots`; does not touch `streams`,
 -- `events`, `stream_events`, or `subscriptions`. Safe to call from inside
--- the PM's persist-and-ack transaction alongside advance_subscription
--- (D-0008 / PM-023).
+-- the PM's SDK-internal snapshot+advance transaction alongside
+-- advance_subscription (D-0016 / PM-023; D-0016 limits the
+-- co-transactional pattern to SDK-owned bookkeeping like the PM
+-- snapshot, not to user-facing handlers).
 -- ----------------------------------------------------------------------------
 create or replace function instructed.record_snapshot (
   p_source_uuid    text,
@@ -1636,15 +1638,24 @@ $$;
 -- advance_subscription
 --
 -- Advance the persistent cursor for a held subscription. Realises
--- INV-SUB-P-032/033 (ack monotonic, up-to-and-including N) and supports
--- the co-transactional persist-and-ack pattern of D-0008 (the SDK calls
--- this in the same transaction as its projection write).
+-- INV-SUB-P-032/033 (ack monotonic, up-to-and-including N).
+--
+-- Per D-0016 (supersedes D-0008), the recommended SDK pattern is:
+--   BEGIN; read_subscription_batch(...); COMMIT;
+--   <handler(s) run OUTSIDE any SDK transaction>
+--   BEGIN; advance_subscription(..., last_position); COMMIT;
+-- The two short transactions release and re-acquire the subscriptions
+-- row lock; lease loss in the gap between them is signalled by IS022
+-- on the advance call (the new lease holder will redeliver).
 --
 -- The cursor advances to max(last_seen, p_up_to_position): out-of-order
 -- or duplicate acks are absorbed without error (INV-SUB-P-034).
 --
 -- Selectors that skip events (INV-SUB-P-050) call this with the highest
--- *delivered-or-skipped* position, per D-0008's selector clause.
+-- *fetched* event_number: per D-0016 the SDK advances past every event
+-- returned by read_subscription_batch regardless of whether the
+-- application's selector matched (the selector decides only whether
+-- `handler` is called, not whether the cursor moves past the event).
 --
 -- Inputs:
 --   p_stream_uuid       text
@@ -1671,18 +1682,20 @@ $$;
 -- Lock-acquisition order:
 --   1. The `subscriptions` row keyed by (stream_id, name, shard):
 --      UPDATE ... WHERE claimed_by = p_worker_id RETURNING last_seen.
---      In the recommended co-transactional pattern this row is already
---      locked by an earlier read_subscription_batch in the same
---      transaction; the UPDATE reuses the lock. In the non-co-
---      transactional pattern this is the only lock taken.
+--      Under the D-0016 two-short-tx pattern this is the only lock
+--      taken by this procedure; the lock acquired by the earlier
+--      read_subscription_batch was released at that tx's COMMIT.
 --
--- D-0008 constraint: advance_subscription MUST NOT take any lock that
--- the SDK could plausibly hold from earlier statements. The
--- subscriptions row IS such a lock -- but it is the *only* one, and the
--- SDK's documented pattern is to acquire it deliberately via
--- read_subscription_batch. No other store procedure touches
--- subscriptions rows, so the SDK cannot accidentally acquire it through
--- some other path.
+-- D-0016 / D-0008 lock-set constraint: advance_subscription MUST NOT
+-- take any lock that the SDK could plausibly hold from earlier
+-- statements outside its own short ack transaction. The subscriptions
+-- row IS such a lock -- but it is the *only* one, and no other store
+-- procedure touches subscriptions rows, so the SDK cannot accidentally
+-- acquire it through some other path. The SQL contract still permits
+-- an SDK that wants the historical D-0008 co-transactional behaviour
+-- (projection write atomic with cursor advance, same Postgres database)
+-- to call advance_subscription inside its own larger transaction; v1
+-- SDKs do not exercise that capability (NG-0015).
 -- ----------------------------------------------------------------------------
 create or replace function instructed.advance_subscription (
   p_stream_uuid       text,

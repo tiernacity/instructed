@@ -299,8 +299,7 @@ const byTransferId = (e: any) => e.metadata?.transferId ?? null;
 
 export const TransferProcessManager:
   ProcessManagerDefinition<TransferState, any> = {
-  name:   "TransferProcessManager",
-  pmType: "TransferProcessManager",
+  name:   "TransferProcessManager",   // also used as snapshot source_type
   stream: "$all",
 
   routes: {

@@ -123,13 +123,54 @@ class Client {
   claimSubscription(...): Promise<ClaimResult>;               // 'claimed' | 'already_claimed'
   extendSubscriptionClaim(...): Promise<{ claimExpiresAt: Date }>;
   releaseSubscription(...): Promise<void>;
-  readSubscriptionBatch(...): Promise<RecordedEvent[]>;       // requires open tx
-  advanceSubscription(...): Promise<{ lastSeen: bigint }>;    // requires open tx
+  readSubscriptionBatch(...): Promise<RecordedEvent[]>;       // caller wraps in its own short tx
+  advanceSubscription(...): Promise<{ lastSeen: bigint }>;    // caller wraps in its own short tx
   readSubscriptionPosition(...): Promise<{ lastSeen: bigint }>;
   deleteSubscription(...): Promise<void>;
 
 }
 ```
+
+The two subscription methods that take row locks
+(`readSubscriptionBatch`, `advanceSubscription`) are each
+called inside their own short SDK-opened transaction; per
+D-0016 they are **two separate transactions**, not one with
+the handler nested between them. See §3 layer 2 for the loop.
+
+`ClaimResult` is:
+
+```ts
+type ClaimResult =
+  | { result: 'claimed';
+      lastSeen: bigint;
+      claimedBy: string;          // = the caller's workerId on success
+      claimExpiresAt: Date }
+  | { result: 'already_claimed';
+      lastSeen: bigint;
+      claimedBy: string;          // the current holder, for diagnostics
+      claimExpiresAt: Date };
+```
+
+`NewEvent<E>` (the shape `appendToStream` and `execute`
+produce) is:
+
+```ts
+interface NewEvent<E = unknown> {
+  event_id?:       string;   // optional; SDK fills via crypto.randomUUID() (§11.2)
+  event_type:      string;
+  data:            E;
+  metadata?:       unknown;
+  causation_id?:   string;   // optional; SDK fills per D-0017 / §11.8
+  correlation_id?: string;   // optional; SDK fills per D-0017 / §11.8
+}
+```
+
+All three id fields follow the same defaulting pattern: if
+the caller supplies a value, the SDK uses it verbatim; if the
+caller omits it, the SDK fills it from the appropriate source
+(`crypto.randomUUID()` for `event_id`; the per-`runCommand`
+`commandId` for `causation_id`; the `runCommand` option for
+`correlation_id`).
 
 `ExpectedVersion` is a tagged union:
 
@@ -189,9 +230,14 @@ Notes:
 
 ```ts
 interface RunCommandOptions {
-  retryBudget?: number;        // default 8
+  retryBudget?: number;        // default 5 (mapping.md AGG-010)
   expectedVersion?: ExpectedVersion;
                                // default 'exact' on loaded version
+  commandId?: string;          // default crypto.randomUUID(); per D-0017
+                               //   the SDK fills any unset event.causation_id
+                               //   with this value (AGG-020)
+  correlationId?: string;      // optional; if present, SDK fills any unset
+                               //   event.correlation_id with it (AGG-021)
 }
 
 async function runCommand<S, C, E>(
@@ -226,6 +272,14 @@ async function runCommand<S, C, E>(
 
 There is no aggregate cache (D-0004), no advisory lock (D-0005),
 no concurrency control beyond OCC retry.
+
+Causation / correlation defaulting (D-0017): the SDK fills any
+`causation_id` left unset by `execute` with the per-call
+`commandId` (defaulting to `crypto.randomUUID()`); any unset
+`correlation_id` is filled with `RunCommandOptions.correlationId`
+if supplied (otherwise left null). Callers that supply either
+field on a `NewEvent` win verbatim. See §11.8 for the full
+rules including the PM-dispatch override.
 
 ### Layer 2 — Projection worker
 
@@ -315,6 +369,25 @@ stop) and sets an internal `aborted = true`. The loop checks
 that completes after lease loss has its ack silently dropped —
 the new lease holder will redeliver the event.
 
+**Lease-loss race between read tx and ack tx.** Per D-0016 the
+row lock acquired by `read_subscription_batch` is released
+when the read tx commits; the ack tx (`advance_subscription`)
+re-acquires it briefly. If the lease expires in that window
+and another worker claims, the ack tx raises `IS022` and this
+worker's handler output is treated as dropped — the new holder
+will redeliver the same events. This is the price of NG-0015
+and is the reason application-level idempotency matters even
+for handlers that complete in milliseconds.
+
+**Heartbeat error handling.** Any error from
+`extend_subscription_claim` other than `IS022` / `IS020` is
+retried once with a 250ms delay; a second failure escalates
+to effective lease loss (sets `aborted`, fires `onError`,
+exits the loop). Transient network failures on a single
+heartbeat tick do not bring down an otherwise-healthy worker;
+persistent failures do not silently keep it running while
+another holder takes over. Per D-0018.
+
 Selector locus: **SDK-side filtering** per the resolution of
 OQ-0003 below (§7). The handler is only called for matching
 events; `advance_subscription` is called with the highest
@@ -350,8 +423,9 @@ type RouteResult =
 type RouteFn<E> = (event: RecordedEvent<E>) => string | RouteResult | null;
 
 interface ProcessManagerDefinition<S, E> {
-  name: string;                          // becomes subscription name + snapshot prefix
-  pmType: string;                        // source_type for snapshot
+  name: string;                          // becomes subscription name,
+                                         // snapshot prefix, AND source_type
+                                         // for the snapshot row
   stream?: string;                       // default '$all'
   routes: { [eventType: string]: RouteFn<E> };
   initialState(): S;
@@ -390,7 +464,13 @@ for (c of commands):
   // dispatch on the SEPARATE client/connection (D-0011/D-0012 lock-set
   // disjointness). Dispatch failures throw out of the handler call;
   // the SDK does NOT advance the cursor; the event redelivers.
-  await runCommand(dispatchClient, c.aggregate, c.streamUuid, c.command)
+  // D-0017: thread causation/correlation from the triggering event so the
+  // dispatched command's appended events carry the right chain.
+  await runCommand(dispatchClient, c.aggregate, c.streamUuid, c.command, {
+    commandId:     crypto.randomUUID(),
+    causationId:   event.event_id,
+    correlationId: event.correlation_id ?? undefined,
+  })
 // Persist-and-ack: snapshot + cursor advance in one short SDK tx.
 // The handler itself ran outside any tx (D-0016); only the snapshot
 // write and the advance share a transaction here.
@@ -398,7 +478,7 @@ BEGIN
   if (routed.kind === 'stop'):
     deleteSnapshot(sourceUuid)
   else:
-    recordSnapshot({ sourceUuid, sourceType: def.pmType,
+    recordSnapshot({ sourceUuid, sourceType: def.name,
                      sourceVersion: event.eventNumber, data: state })
   advanceSubscription(..., event.eventNumber)
 COMMIT
@@ -410,10 +490,21 @@ depends on it staying consistent with `last_seen`), not
 application data, so D-0016's "handlers are opaque" reasoning
 does not apply to it.
 
+**PM snapshot policy.** The PM worker writes a snapshot on
+every handled event, by design — the snapshot's
+`source_version` doubles as the per-instance `last_seen_event`
+(PM-024), so skipping snapshot writes would widen the
+redelivery-absorption window. The per-event write cost is
+accepted; per-PM snapshot-skip tuning is a candidate for a
+future `ML-` entry if a workload demands it.
+
 Note `dispatchClient` is a different `Client` (typically backed
 by a different pool, or at minimum a separately checked-out
 connection). This is internal SDK plumbing required by D-0011/
-D-0012 lock-set disjointness; the PM author does not see it.
+D-0012 lock-set disjointness; the PM author does not see it. If
+the caller hands the same `Client` instance for both arguments,
+`startProcessManager` throws at construction time — the
+requirement is documented and enforced cheaply.
 
 A PM handler that fails idempotency on redelivery is the PM
 author's concern. Typical patterns: derive dispatched command
@@ -517,6 +608,11 @@ Design notes:
   the facade does not add a `:strong` shorthand.
 - **`close()` stops the worker and closes owned pools** in one
   call. Mirrors absurd's `app.close()`.
+- **The dispatch pool is opened lazily.** A process that only
+  calls `registerAggregate` + `dispatch` never starts a PM and
+  does not pay for a second pool; the dispatch pool is
+  materialised on the first `registerProcessManager` or first
+  PM-driven dispatch, whichever comes first.
 
 Full bank-account example using the facade is in
 [`sdk-usage-sketch.md`](sdk-usage-sketch.md) §2b.
@@ -565,6 +661,8 @@ InstructedError
 └── SDK-level (no SQLSTATE):
     ├── RetryBudgetExhausted      { lastError, attempts }
     ├── ConsistencyTimeout        { waitedMs, missing: string[] }
+    ├── UnknownAggregateType      { aggregateType }  -- facade by-name
+    │                                                   dispatch lookup miss
     └── HandlerError              { cause, event } -- wraps user-thrown
                                                        errors for onError
 ```
@@ -625,6 +723,10 @@ interface SnapshotPolicy<S> {
 }
 ```
 
+(The three-argument form is authoritative; an earlier draft of
+§3 layer 1 omitted `eventsSinceLast`, which the `everyN(n)`
+strategy below needs.)
+
 Default: never (caller opts in). Two prebuilt strategies in
 `aggregate.ts`:
 
@@ -667,9 +769,12 @@ that the `selector` option key is already reserved.
 
 ## 8. Worker-loop summary (single diagram)
 
+Per D-0016 the handler runs **outside** any SDK transaction;
+the read and the ack are two separate short transactions.
+
 ```
                   +------------------------+
-                  | startSubscriptionWorker|
+                  | startProjection worker |
                   +-----------+------------+
                               |
                        claim_subscription
@@ -677,17 +782,22 @@ that the `selector` option key is already reserved.
               +---------------+----------------+
               |                                |
               v                                v
-   +-------------------+          +------------------------+
-   | heartbeat timer   |          | poll loop              |
-   | every (lease/3) s |          |  BEGIN tx              |
-   |                   |          |   read_batch (FOR UPD) |
-   |  extend_claim ----+----->----+ if empty: COMMIT, sleep|
-   |    on IS022/IS020:           |   for e in batch:      |
-   |      set aborted = true      |     if selector(e):    |
-   |                              |       handler(e, {tx}) |
-   +-------------------+          |   advance_subscription |
-                                  |  COMMIT                |
-                                  +-----------+------------+
+   +-------------------+          +-------------------------+
+   | heartbeat timer   |          | poll loop               |
+   | every (lease/3) s |          |  BEGIN read tx          |
+   |                   |          |   read_batch (FOR UPD)  |
+   |  extend_claim ----+----->----+  COMMIT                 |
+   |    on IS022/IS020:           |  if empty: sleep, cont. |
+   |      set aborted = true      |  for e in batch:        |
+   |                              |    if selector(e):      |
+   +-------------------+          |      await handler(e,   |
+                                  |             { workerId, |
+                                  |               position, |
+                                  |               signal }) |
+                                  |  BEGIN ack tx           |
+                                  |   advance_subscription  |
+                                  |  COMMIT                 |
+                                  +-----------+-------------+
                                               |
                                        on aborted: stop
                                               |
@@ -695,8 +805,9 @@ that the `selector` option key is already reserved.
 ```
 
 A process manager is the same diagram with the handler body
-replaced by `read_snapshot → handle → dispatch on separate client
-→ record_snapshot`, exactly as described in §3 layer 3.
+replaced by `read_snapshot → handle → dispatch on separate
+client → (snapshot + advance in one short SDK-internal ack
+tx)`, exactly as described in §3 layer 3.
 
 ---
 
@@ -781,11 +892,17 @@ Elasticsearch, Redis, an external API, an in-memory cache —
 and is responsible for its own idempotency (NG-0015).
 
 `signal` is provided so long-running handlers can cooperate with
-graceful shutdown and lease loss. The handler is not *required*
-to observe it; the SDK will drop the handler's eventual ack
-silently if the lease was lost in the meantime (the new lease
-holder will redeliver). Observing the signal is purely a
-resource-cleanup courtesy.
+graceful shutdown and lease loss. **The signal aborts
+immediately** on `close()` or on lease loss — it is not delayed
+until the in-flight handler returns. The SDK still awaits the
+handler's promise after the abort; if the handler resolves, the
+SDK skips the `advance_subscription` call (the `aborted` flag
+is set; advancing under a lost lease would raise IS022 anyway).
+If the handler rejects, the SDK fires `onError` with the
+wrapped `HandlerError` and exits the loop without advancing.
+Observing the signal is purely a resource-cleanup courtesy;
+the correctness contract holds either way. See §11.9 for the
+full lifecycle semantics.
 
 ### 11.2 `NewEvent.event_id` is optional; the SDK fills it
 
@@ -908,6 +1025,87 @@ idempotency story:
 Dropped: `Client.withTransaction` no longer exists (D-0016).
 Nothing to nest. Section retained as a numbered placeholder so
 the original §11.x references in review notes remain stable.
+
+### 11.8 Causation / correlation propagation (D-0017)
+
+The SDK fills `causation_id` and `correlation_id` on appended
+events with sensible defaults; callers who set either field on
+a `NewEvent` win verbatim. The defaulting is the symmetric
+counterpart of §11.2's `event_id` story.
+
+**`runCommand` (aggregate dispatch):**
+
+- The SDK mints a per-call `commandId` (default
+  `crypto.randomUUID()`; overridable via
+  `RunCommandOptions.commandId`).
+- For every event the SDK appends whose `causation_id` is
+  unset, the SDK fills it with `commandId`. This realises
+  AGG-020 (every event in a single command shares a
+  causation_id).
+- If `RunCommandOptions.correlationId` is supplied, the SDK
+  fills any unset `correlation_id` with it. If not, unset
+  `correlation_id` stays null. Callers that want a correlation
+  chain start it explicitly at the top of the chain (AGG-021).
+
+**PM dispatch (the worker calling `runCommand` on the user's
+behalf):**
+
+The PM worker constructs `RunCommandOptions` internally for
+every dispatched command:
+
+```ts
+await runCommand(dispatchClient, c.aggregate, c.streamUuid, c.command, {
+  commandId:     crypto.randomUUID(),
+  causationId:   event.event_id,                       // PM-012
+  correlationId: event.correlation_id ?? undefined,    // PM-012
+});
+```
+
+(`causationId` in `RunCommandOptions` is the override hook;
+when present it wins over `commandId` for event defaulting,
+so PM-dispatched events get `causation_id =
+triggering_event.event_id` directly, the Commanded
+behaviour.)
+
+The PM author writes no causation/correlation plumbing; the
+chain is propagated automatically. The bank-account sketch's
+`execute` does not set either field, and the appended events
+still carry the right ids because of this defaulting.
+
+**Absurd-bridge interaction (D-0011).** Absurd tasks that
+re-append into the event store typically supply their own
+`causation_id` (the triggering event's id) explicitly. The
+SDK's defaulting only fires when the field is absent; explicit
+supply continues to work verbatim.
+
+### 11.9 Worker lifecycle, `AbortSignal`, ack-tx-on-shutdown (D-0018)
+
+Pinned semantics for the handle returned from `startProjection`
+/ `startProcessManager` / `Instructed.startWorker`:
+
+- `close()` is idempotent; calling it on a stopping worker
+  returns the same `Promise<void>` as the first call. After
+  `stopped` has resolved, `close()` is a no-op.
+- `close()` resolves after `stopped` resolves *and* after a
+  best-effort `release_subscription` call. Failures of the
+  release call are swallowed.
+- `stopped` always resolves; it never rejects. Fatal
+  conditions (lease loss, repeated handler throws with
+  exhausted backoff, fatal SQL errors during the SDK's own
+  bookkeeping) fire `onError` and then `stopped` resolves
+  normally. Callers that want to detect abnormal exit observe
+  `onError`.
+- `AbortSignal` aborts immediately on `close()` or on lease
+  loss; the SDK still awaits the in-flight handler's promise
+  (see §11.1).
+- In-flight ack transactions are allowed to commit. After
+  `close()` the SDK only refuses to *start a new batch read*;
+  an ack tx already opened proceeds to COMMIT. (Dropping it
+  would force a redelivery the handler must absorb anyway;
+  committing it is strictly cheaper.)
+- Heartbeat errors other than `IS022` / `IS020` retry once
+  with a 250ms delay; a second failure escalates to effective
+  lease loss.
 
 ### 11.7 PM dispatch shape: by value, or by registry lookup
 

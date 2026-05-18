@@ -389,19 +389,22 @@ the primitives; the SDK provides the orchestration.
 
 - **Commanded:** `ExecutionContext` retries up to
   `retry_attempts`, defaulting to 0.
-- **`instructed`:** **same semantics, default raised to a small
-  positive number (e.g. 3) for v1**. Rationale: without an
-  in-memory cache, the "winning" thread for an integer
-  expected_version is whichever thread hits the store first. The
-  loser's retry is cheap (re-read events since its observed
-  version, re-fold, re-run command, re-append) and almost always
-  succeeds on the second try. A default of 0 makes the no-cache
-  story look worse than it is.
+- **`instructed`:** **same semantics, default raised to 5 for v1**
+  (`RunCommandOptions.retryBudget = 5` in the TypeScript SDK; see
+  `sdk-design.md` §3 layer 1). Rationale: without an in-memory
+  cache, the "winning" thread for an integer expected_version is
+  whichever thread hits the store first. The loser's retry is
+  cheap (re-read events since its observed version, re-fold,
+  re-run command, re-append) and almost always succeeds on the
+  second try. A default of 0 would make the no-cache story look
+  worse than it is; a default of 5 absorbs bursty contention
+  without hiding genuine command-logic conflicts (which surface
+  as `RetryBudgetExhausted` after the budget is gone). Recorded
+  alongside D-0015 as part of the SDK API shape; revisit if
+  benchmarks under contention show the number is wrong.
 - **Verdict:** **tighter on default ergonomics, equivalent on
   semantics**. Applications that need at-most-one-attempt
-  semantics set `retry_attempts: 0` explicitly. Recording this as a
-  deliberate departure; revisit during SDK design in Phase 8 if
-  the default proves wrong.
+  semantics set `retryBudget: 0` explicitly.
 
 #### AGG-011 — Per-aggregate command serialisation *[BEAM-mechanism]*
 
@@ -1047,7 +1050,11 @@ This is the load-bearing ordering rule. Commanded's sequence:
   compensating-command flows reliable without application-side
   re-implementation. The semantic shape — compensation is a
   command — is the same as Commanded's; the contract underneath
-  it is stronger.
+  it is stronger. (The "co-transactional snapshot+ack" here is
+  the SDK-internal snapshot+advance pair the PM worker writes
+  after `handle` returns, per D-0016 §3 layer 3; the *user* PM
+  handler still runs outside any SDK transaction, like every
+  other handler.)
 
 #### PM-031 — Command failure surfaces to `error/3`
 

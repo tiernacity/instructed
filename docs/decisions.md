@@ -12,6 +12,210 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0018 — Worker lifecycle, `AbortSignal`, and ack-tx-on-shutdown
+
+**Date:** 2026-05-17
+
+**Context:** the Phase 8 SDK design review surfaced that
+`RunningWorker` (the handle returned from `startProjection` /
+`startProcessManager` / `Instructed.startWorker`) declared
+`close()` and `stopped` without pinning their semantics:
+idempotency of `close()`, whether `close()` waits for `stopped`,
+what `stopped` resolves to on lease loss vs poison-event loop,
+when `AbortSignal` aborts relative to the in-flight handler, and
+whether the SDK commits an ack transaction whose handler
+returned before `close()` fired. None of these were blocking on a
+new design choice; they needed pinning so the implementer does
+not have to invent them.
+
+**Decision:** pin the following worker-lifecycle semantics. They
+apply uniformly to `startProjection`, `startProcessManager`, and
+the internal workers spawned by `Instructed.startWorker`.
+
+1. **`close()` is idempotent.** Calling it on a worker that is
+   already stopping returns the same `Promise<void>` as the
+   first call. Calling it after `stopped` has resolved is a
+   no-op that resolves immediately.
+2. **`close()` resolves after `stopped` resolves *and* after a
+   best-effort `release_subscription` call.** Failures of the
+   release call (lease already lost, network blip on shutdown)
+   are swallowed; the worker is gone regardless.
+3. **`stopped` always resolves; it never rejects.** Fatal
+   conditions (lease loss, repeated handler throws with
+   exhausted backoff, fatal SQL errors during the SDK's own
+   bookkeeping) fire `onError` and then `stopped` resolves
+   normally. Callers that want to detect abnormal exit observe
+   `onError`; the `stopped` promise is purely a "this worker
+   has finished its loop" signal, mirroring absurd's worker
+   shape.
+4. **`AbortSignal` aborts immediately** on `close()` *or* on
+   lease loss (`IS022` / `IS020` from the heartbeat or the ack
+   tx). The signal is not delayed until the in-flight handler
+   returns — a handler observing the signal can begin cleanup
+   while the SDK continues to await its promise.
+5. **The SDK still awaits the in-flight handler's promise**
+   even after the signal aborts. If the handler resolves, the
+   SDK skips the `advance_subscription` call (the `aborted`
+   flag is set; advancing under a lost lease would raise IS022
+   anyway). If the handler rejects, the SDK fires `onError`
+   with the wrapped `HandlerError` and exits the loop without
+   advancing.
+6. **In-flight ack transactions are allowed to commit.** If
+   `close()` is called after the handler has returned but
+   before the SDK has committed `advance_subscription`, the ack
+   tx commits normally; the SDK only refuses to *start a new
+   batch read* after `close()`. Dropping an in-flight ack would
+   simply force a redelivery the handler must absorb
+   idempotently anyway; committing it is strictly cheaper.
+7. **Heartbeat failures other than `IS022` / `IS020` retry
+   once** with a 250ms delay; a second failure is treated as
+   effective lease loss (sets `aborted`, fires `onError`, exits
+   the loop). Transient network failures during heartbeat
+   should not bring down an otherwise-healthy worker on the
+   first hiccup; persistent failures should not silently keep
+   the worker running while another holder takes over.
+
+**Rationale:** every item above is the cheapest correct
+semantics for the stated scenario. The shape mirrors absurd's
+worker lifecycle (where `close()` is idempotent, `stopped`
+always resolves, and fatal conditions surface through hooks).
+None of this constrains the SQL contract.
+
+**Implications:**
+
+- `docs/sdk-design.md` §3 layer 2 picks up the lease-loss-race
+  and heartbeat-failure sentences; §11 gains §11.9 documenting
+  the lifecycle semantics above.
+- The implementer can ship the worker loop without coming back
+  for clarifications on the close/abort/ack interplay. The
+  bank-account example does not need to exercise any of these
+  paths explicitly; the conformance harness (Phase 9) will.
+- No SQL-contract change. `advance_subscription` and
+  `release_subscription` already raise on lease loss; this
+  decision only specifies how the SDK responds to those errors.
+
+---
+
+## D-0017 — Causation / correlation propagation (SDK-default with explicit overrides)
+
+**Date:** 2026-05-17
+
+**Context:** `mapping.md` AGG-020/021 and PM-012 commit the SDK
+to propagating `causation_id` and `correlation_id` through
+command dispatch (every event in a single command shares
+`causation_id = command_uuid`; PM-dispatched commands inherit
+`causation_id = triggering_event.event_id` and `correlation_id
+= triggering_event.correlation_id`). The first Phase 8 design
+pass had no place to thread either value: `RunCommandOptions`
+had `retryBudget` / `expectedVersion` only, `DispatchedCommand`
+had `streamUuid` / `aggregate` / `command` only, and the
+bank-account sketch built `NewEvent`s with neither field set.
+Without a decision, the bank-account example would silently
+establish a different contract than `mapping.md` promises and
+the Phase 9 Commanded conformance harness would fail the first
+time it exercised AGG-020 / PM-012.
+
+**Decision:** the SDK fills `causation_id` and `correlation_id`
+automatically with sensible defaults and allows the caller to
+override either. This is the **hybrid** shape (the same
+defaulting pattern §11.2 already chose for `event_id`):
+
+1. **`NewEvent<E>` declares both fields optional.** The user's
+   `execute` may set them; if it does, the SDK uses the
+   supplied values verbatim. If it does not, the SDK fills them
+   per the rules below.
+2. **`runCommand` mints a per-call `commandId`** (default:
+   `crypto.randomUUID()`; overridable via
+   `RunCommandOptions.commandId`). For every event the SDK
+   appends whose `causation_id` is unset, the SDK fills it with
+   `commandId`. This realises AGG-020.
+3. **`runCommand` accepts an optional `correlationId`** in its
+   options; if supplied, the SDK fills any unset
+   `correlation_id` on the appended events with it. If not
+   supplied, the SDK does not invent one (callers that want a
+   correlation chain start it explicitly at the top of the
+   chain). This realises AGG-021.
+4. **PM dispatch threads causation/correlation from the
+   triggering event.** When the PM worker calls `runCommand`
+   for a `DispatchedCommand`, it passes:
+   - `commandId = crypto.randomUUID()` (a fresh command id;
+     each PM-dispatched command is its own command).
+   - `causationId = triggering_event.event_id` (overriding the
+     default; this is the per-event causation, not the
+     per-command one — see clause 5 below).
+   - `correlationId = triggering_event.correlation_id` (if
+     present).
+   These flow into `runCommand`'s defaulting so the dispatched
+   command's appended events get the right values without the
+   PM author writing any plumbing. This realises PM-012.
+5. **One subtle precedence:** within a `runCommand` invocation,
+   `causationId` (if supplied in options) wins over the
+   per-call `commandId` for event defaulting. This is so PM
+   dispatch can hand the triggering event's id straight through
+   as the causation, which is the Commanded behaviour. The
+   `commandId` option remains available for callers that want
+   the AGG-020 "all events share command id" shape on a
+   top-level dispatch; the PM path overrides it explicitly.
+6. **`DispatchedCommand` does not grow new fields.** The PM
+   worker constructs the right options object internally; the
+   PM author writes only `{ streamUuid, aggregate, command }`
+   (or the by-name variant per §11.7).
+
+**Rationale:**
+
+- **Symmetric with `event_id` (§11.2).** The same
+  SDK-fills-when-absent rule applies to all three
+  caller-supplied id fields, so there is one mental model: "the
+  SDK fills caller-omitted ids with sensible defaults; callers
+  who care override."
+- **Application code stays free of plumbing.** The bank-account
+  example's `execute` does not need to know about
+  `causation_id` or `correlation_id`; the PM author does not
+  need to know about them either. The mapping.md promises hold
+  without the caller doing anything.
+- **The Commanded conformance harness (Phase 9) maps directly.**
+  AGG-020/021 and PM-012 become observable defaults; the test
+  cases are "dispatch a command, read back the appended events,
+  assert all share a causation_id" / "PM consumes event X,
+  asserts dispatched command's appended events have
+  causation_id = X.event_id".
+- **The absurd-bridge pattern (D-0011) is unaffected.** Absurd
+  tasks that re-append into the event store with deterministic
+  `event_id`s also typically supply their own `causation_id`
+  (the triggering event's id); the SDK's defaulting only fires
+  when the field is absent, so explicit supply works
+  identically.
+
+**Implications:**
+
+- **`docs/sdk-design.md` §3 layer 0** declares `NewEvent<E>` with
+  optional `event_id`, `metadata`, `causation_id`,
+  `correlation_id`.
+- **`docs/sdk-design.md` §3 layer 1** adds `commandId?: string`
+  and `correlationId?: string` to `RunCommandOptions`, and
+  documents the defaulting rules above.
+- **`docs/sdk-design.md` §3 layer 3** documents that the PM
+  worker constructs `RunCommandOptions` internally with
+  `causationId = triggering_event.event_id` and
+  `correlationId = triggering_event.correlation_id`; the PM
+  author writes no causation plumbing.
+- **`docs/sdk-design.md` §11** gains §11.8 cross-referencing
+  this decision.
+- **`docs/sdk-usage-sketch.md`** — the bank-account `execute`
+  example no longer needs to be updated to set causation_id
+  manually; the existing event-construction shape is correct
+  *because* the SDK fills the field. A one-line comment in the
+  sketch (or in the design doc) noting "causation_id is filled
+  by the SDK from the per-call commandId; see D-0017" is
+  enough.
+- **`docs/mapping.md` AGG-020 / AGG-021 / PM-012** verdicts
+  remain *equivalent*; this decision is the realisation note.
+- No SQL-contract change. `events.causation_id` and
+  `events.correlation_id` are already nullable; the SDK is the
+  only thing that decides when to fill them.
+
+---
+
 ## D-0016 — Handlers are opaque to the SDK; cursor advance is independent; idempotency is the application's concern (supersedes D-0008)
 
 **Date:** 2026-05-17

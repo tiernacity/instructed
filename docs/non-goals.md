@@ -312,6 +312,47 @@ silent `:ok`. Missing-on-delete is `subscription_not_found`.
 
 ---
 
+### NG-0016 — No `:skip` / `:stop` handler return vocabulary; handlers are `(event, ctx) => Promise<void>`
+
+Commanded's event-handler contract gives handlers a return
+vocabulary of `:retry` / `:skip` / `:stop` (HND-020..022) plus
+`{:error, :already_seen_event}` for opt-in dedup (HND-013).
+`instructed`'s v1 SDK handlers return only `Promise<void>`:
+
+- **Retry** is signalled by `throw` (the SDK does not advance
+  the cursor; the event redelivers on the next batch, with the
+  exponential backoff in `sdk-design.md` §11.5).
+- **Skip** is realised by a handler that returns silently
+  having done nothing for the event. Per D-0016 the SDK
+  advances the cursor on any successful return, so a silent
+  return *is* a skip; idempotency means re-skipping on
+  redelivery is also harmless. Handlers that want to short-
+  circuit on "already seen" check the position themselves
+  (the projection's own state typically encodes this; see the
+  `last_event < $2` guard in `sdk-usage-sketch.md` §2a).
+- **Stop** is realised by the caller calling `worker.close()`
+  from outside the handler (the handler can fire an event /
+  set a flag the supervising code observes); there is no
+  handler-side `:stop` sentinel.
+
+**Why:** D-0016 collapsed the handler signature to its simplest
+possible shape (`(event, ctx) => Promise<void>`) to match
+absurd's task-handler shape and to keep the SDK from leaking
+routing state into the handler return. Re-introducing a
+return-shape vocabulary would reverse that simplification for
+features (`:skip` and `:stop`) that have idiomatic
+alternatives.
+
+**Cross-reference:** `docs/mapping.md` HND-013 and HND-020..022
+are realised by the above conventions rather than by a
+return-shape contract; the verdicts in those entries are
+equivalent on semantics, with the vocabulary classed as Class-C
+convenience per the Part G table in `guarantees.md`.
+
+**Sources:** D-0016, D-0015.
+
+---
+
 ## What is *not* a non-goal
 
 A few things that look like they might belong here but don't:
