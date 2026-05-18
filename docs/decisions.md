@@ -12,6 +12,76 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0020 — Process-manager worker: `{kind:'start'}` discards in-place; load-time `StreamNotFound` is empty stream; same-`Client` is a construction error
+
+**Date:** 2026-05-18
+
+**Context:** implementing Layer 3 (`startProcessManager`, Phase 8
+step 4) required pinning three details the design doc left to the
+implementer.
+
+**Decided:**
+
+1. **`{kind: 'start'}` discards an existing snapshot in-memory; the
+   ack tx overwrites it.** Per §11.4 the start route is lenient: if a
+   snapshot already exists for the `processId`, the SDK ignores it,
+   calls `def.initialState()`, runs `handle`, dispatches commands, and
+   writes a fresh snapshot (same `source_uuid`) in the ack
+   transaction. `record_snapshot` is a full-row upsert (INV-SNAP-002),
+   so a separate delete-then-record dance is unnecessary. No
+   `start!` strict variant in v1.
+
+2. **`runCommand` treats `StreamNotFound` (IS003) during load as an
+   empty stream when `version == 0`.** The aggregate runner is the
+   entry point for first-ever commands against a new aggregate;
+   read_stream on a non-existent stream raises IS003, and the runner
+   now catches it as the equivalent of an empty event page. Only the
+   `version == 0` case is swallowed — a non-zero version reaching
+   IS003 implies the stream was deleted out from under us, which v1
+   does not allow but which we still surface as the underlying error
+   rather than silently treat as empty. This is a step-2 gap that
+   step 4's PM smoke test exposed (PM dispatches the first command
+   to a fresh target stream).
+
+3. **Construction-time guard for same-`Client` persist/dispatch.**
+   Per §3 layer 3 and D-0011/D-0012 the persist-and-ack session and
+   the dispatch session must be different so their lock sets are
+   disjoint. `startProcessManager` throws `InstructedError` at
+   construction (cheap, deterministic, before any procedure call) if
+   `client === dispatchClient`. The check is by identity, not
+   structural — sharing the *underlying pool* across two `Client`
+   instances is fine (the two pool checkouts produce distinct
+   sessions); sharing the `Client` wrapper is not. The Layer 5
+   facade will be responsible for materialising a second pool
+   lazily so PM authors never face this concern.
+
+**Consequences:**
+
+- The PM worker's `processEvent` loop is a single state machine:
+  route → load state → handle → dispatch → ack-tx. Each transition
+  failure (snapshot load, handle throw, any dispatch, ack-tx) triggers
+  the shared §11.5 backoff and re-enters at `load state`, so a
+  redelivery after a partially-dispatched batch re-runs `handle`
+  with the same input event. PM authors' idempotency contract per
+  §11.5 PM-specific note still applies.
+- The dispatch loop short-circuits on the first failure: subsequent
+  commands in the same `commands` array are NOT attempted for that
+  attempt. They will be retried on the next pass through `handle`.
+  This is the conservative reading of §11.5 ("commands dispatched up
+  to the throw point are durable; commands after the throw point
+  never ran") applied symmetrically to dispatch failures.
+- The ack tx is the only place the SDK wraps two procedures in a
+  single transaction. `withTransaction` (internal) checks out a
+  dedicated session from the underlying pool, BEGINs, runs the
+  callback against a session-bound `Client`, then COMMITs.
+
+**Sources:** `sdk-design.md` §3 layer 3, §11.4, §11.5, §11.8, §11.9;
+`sql/instructed.sql` :: `record_snapshot` (INV-SNAP-002),
+`advance_subscription` (D-0016 / PM-023); D-0011, D-0012, D-0016,
+D-0017.
+
+---
+
 ## D-0019 — Aggregate runner: retry semantics, explicit-expected-version, snapshot-write failure, load page size
 
 **Date:** 2026-05-18

@@ -13,6 +13,7 @@ import type { Client } from "./client.ts";
 import {
   RetryBudgetExhausted,
   SnapshotNotFound,
+  StreamNotFound,
   WrongExpectedVersion,
 } from "./errors.ts";
 import { expected as ev } from "./types.ts";
@@ -103,9 +104,18 @@ export interface RunCommandOptions {
   /**
    * Per-call command identity. Defaults to `crypto.randomUUID()`.
    * The SDK fills any unset `event.causation_id` with this value
-   * (§11.8 / AGG-020).
+   * unless `causationId` is supplied (§11.8 / AGG-020).
    */
   commandId?: string;
+
+  /**
+   * Explicit causation id (overrides the `commandId`-based default).
+   * The PM worker passes the triggering event's `event_id` here so
+   * every dispatched-command event carries `causation_id =
+   * triggering_event.event_id` (§11.8 / D-0017 / PM-012). Callers
+   * who omit this get the `commandId` default.
+   */
+  causationId?: string;
 
   /**
    * Optional correlation id. The SDK fills any unset
@@ -148,6 +158,9 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
     );
   }
   const commandId = opts.commandId ?? globalThis.crypto.randomUUID();
+  // §11.8: explicit causationId wins for event defaulting; otherwise
+  // commandId doubles as the causation default (AGG-020).
+  const causationDefault = opts.causationId ?? commandId;
   const correlationId = opts.correlationId;
   const explicitExpected = opts.expectedVersion;
 
@@ -171,7 +184,7 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
       // caller values win verbatim.
       const filled = events.map<NewEvent>((e) => ({
         ...e,
-        causation_id: e.causation_id ?? commandId,
+        causation_id: e.causation_id ?? causationDefault,
         correlation_id: e.correlation_id ?? correlationId,
       }));
 
@@ -274,13 +287,21 @@ async function loadAggregate<S, C, E extends DomainEvent>(
     // No snapshot: start from initialState() at version 0.
   }
 
-  // 2. Page forward from version + 1, folding apply.
+  // 2. Page forward from version + 1, folding apply. A fresh stream
+  // (no snapshot, no events yet) raises IS003 here; treat that as an
+  // empty stream so runCommand can be the first writer.
   while (true) {
-    const page = await client.readStream<unknown>(
-      streamUuid,
-      version + 1n,
-      LOAD_PAGE_SIZE,
-    );
+    let page: RecordedEvent<unknown>[];
+    try {
+      page = await client.readStream<unknown>(
+        streamUuid,
+        version + 1n,
+        LOAD_PAGE_SIZE,
+      );
+    } catch (err) {
+      if (err instanceof StreamNotFound && version === 0n) break;
+      throw err;
+    }
     if (page.length === 0) break;
     for (const row of page) {
       state = def.apply(state, recordedToDomain<E>(row));

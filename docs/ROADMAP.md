@@ -321,15 +321,23 @@ with tests against the docker-compose Postgres).
   before escalating, handler-throws backoff = [250,500,1k,2k,4k,8k,16k]
   capped at 30s with no max-attempts in v1.
 
+- **Step 4/8 — done.** `process-manager.ts` (Layer 3) +
+  single-event smoke test. PM routes per-event-type, loads instance
+  state from a snapshot, runs `handle` outside any SDK tx (D-0016),
+  dispatches each command via `runCommand` on the separate
+  `dispatchClient` (D-0011 / D-0012) with causation = triggering
+  event id and correlation propagated (§11.8 / D-0017), then
+  writes snapshot + advance in one short SDK-internal tx via the
+  new `internal/with-transaction.ts` helper. `{kind:'start'}` is
+  lenient (§11.4); same-`Client` persist/dispatch throws at
+  construction (D-0011 / D-0012). Causation override hook added to
+  `RunCommandOptions` (§11.8). Aggregate runner now treats
+  `StreamNotFound` during load as an empty stream when
+  `version == 0` so PMs can drive first-ever commands to fresh
+  aggregates. Choices recorded in D-0020.
+
 **Remaining:**
 
-- **Step 4/8.** `process-manager.ts` (Layer 3) + single-event smoke
-  test. PM = projection that loads PM-instance state from a snapshot,
-  runs `handle` (outside any SDK tx), dispatches returned commands on
-  a separate session (D-0011 / D-0012 lock-set disjointness), and
-  then writes snapshot + advance cursor in one short SDK-internal
-  transaction. §3 layer 3 / §11.4 (`start` is lenient) / §11.7
-  (by-value or by-name dispatch).
 - **Step 5/8.** `consistency.ts` (Layer 4) `waitForProjection` +
   timeout test. Polls `readSubscriptionPosition` until each named
   subscription's `lastSeen >= target`, throws `ConsistencyTimeout`

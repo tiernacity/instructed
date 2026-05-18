@@ -26,5 +26,14 @@ export {
   type HandlerContext,
   type RunningWorker,
 } from "./subscription.ts";
+export {
+  startProcessManager,
+  type ProcessManagerDefinition,
+  type ProcessManagerHandlerResult,
+  type ProcessManagerWorkerOptions,
+  type RouteFn,
+  type RouteResult,
+  type DispatchedCommand,
+} from "./process-manager.ts";
 export * from "./errors.ts";
 export * from "./types.ts";
