@@ -286,28 +286,77 @@ cases, and lock ordering.
 
 ---
 
-## Phase 8 — Reference SDK
+## Phase 8 — Reference SDK — **in progress**
 
-**Goal:** a single-language SDK that exercises the SQL contract and lets
-us write the first end-to-end example (bank account, the canonical CQRS
-demo).
+Design signed off (D-0013 — TypeScript / Node 18+ / pg 8.x;
+D-0015 — API shape; D-0016 — handlers opaque to SDK; D-0017 —
+causation/correlation defaulting; D-0018 — worker lifecycle).
+`docs/sdk-design.md` is the authoritative design; `sql/instructed.sql`
+is the spec it wraps. Implementation sequencing comes from
+`sdk-design.md` §10 (eight steps; each lands as its own commit
+with tests against the docker-compose Postgres).
 
-**Language:** to be decided in Phase 7 or early Phase 8. Likely
-TypeScript or Python to match absurd's existing stack.
+**Status:**
 
-**Scope:**
+- **Step 1/8 — done.** `Client` (Layer 0) + `errors.ts`. Dual ESM/CJS
+  build wiring, one method per stored procedure, SQLSTATE → typed
+  `Error` subclass translation. 28 cases covering every procedure and
+  every SQLSTATE in the closed catalogue (IS001–IS010, IS020–IS022,
+  IS006, 22023).
+- **Step 2/8 — done.** `aggregate.ts` (Layer 1) + OCC-retry test.
+  `runCommand` snapshot-load → page through events folding `apply` →
+  `execute` → `appendToStream(expected.exact(V))` with retry on IS001
+  (D-0005 / mapping.md AGG-010). Causation/correlation defaulting
+  (§11.8); `apply` receives the §11.3 DomainEvent shape;
+  `everyN(n)` snapshot policy. D-0019 records four non-obvious
+  choices (retryBudget semantics, explicit-expectedVersion no-retry,
+  snapshot-write-failure non-fatal, internal page size = 500).
+- **Step 3/8 — done.** `subscription.ts` (Layer 2) +
+  heartbeat-lease-loss test. `startProjection` realises §3 layer 2 /
+  §8 / §11.1 / §11.5 / §11.9 / D-0016 / D-0018: handler opaque
+  (`ctx = { workerId, position, signal }`), two short SDK-owned
+  transactions bracket the handler, abort fires immediately on
+  `close()` / lease loss while the SDK still awaits the in-flight
+  handler, no advance after abort, heartbeat retries once with 250ms
+  before escalating, handler-throws backoff = [250,500,1k,2k,4k,8k,16k]
+  capped at 30s with no max-attempts in v1.
 
-- Aggregate load-execute-append loop with optimistic-locking retry.
-- Snapshot policy hook.
-- Subscription worker loop (claim/process/advance/release).
-- Process manager worker (subscription + state + emit commands).
-- Polling-based wait-for-projection helper for pseudo-strong-consistency
-  on dispatch.
+**Remaining:**
 
-**Artifact:** `sdks/<lang>/` plus a worked example.
+- **Step 4/8.** `process-manager.ts` (Layer 3) + single-event smoke
+  test. PM = projection that loads PM-instance state from a snapshot,
+  runs `handle` (outside any SDK tx), dispatches returned commands on
+  a separate session (D-0011 / D-0012 lock-set disjointness), and
+  then writes snapshot + advance cursor in one short SDK-internal
+  transaction. §3 layer 3 / §11.4 (`start` is lenient) / §11.7
+  (by-value or by-name dispatch).
+- **Step 5/8.** `consistency.ts` (Layer 4) `waitForProjection` +
+  timeout test. Polls `readSubscriptionPosition` until each named
+  subscription's `lastSeen >= target`, throws `ConsistencyTimeout`
+  on timeout. No `:strong` shorthand (D-0010).
+- **Step 6/8.** `instructed.ts` (Layer 5 facade). Thin composition
+  over 0–4: `registerAggregate` / `registerProjection` /
+  `registerProcessManager`, `dispatch` (by-name aggregate lookup),
+  `startWorker` (fans out to one subscription loop per registered
+  projection/PM). Lazy dispatch-pool materialisation; registry
+  lookup; default propagation. Tests cover only facade-specific
+  behaviour.
+- **Step 7/8 — done-criterion.** `sdks/typescript/examples/bank-account/`
+  with a `Balances` projection and a `TransferProcessManager`
+  (compensation per D-0011: `WithdrawalRefused` stops the PM, no
+  compensating command needed; `Withdrawn` → `Deposited` is the
+  forward path).
+- **Step 8/8.** Update repo `README.md` to point at the example and
+  the SDK.
 
-**Done when:** the bank account example runs against Postgres, with
-projections and at least one process manager.
+**Language:** TypeScript / Node 18+, `pg` 8.x peer dependency
+(recorded as D-0013).
+
+**Artifact:** `sdks/typescript/` plus `sdks/typescript/examples/bank-account/`.
+
+**Done when:** the bank-account example runs against Postgres, with
+the `Balances` projection and the `TransferProcessManager` working
+end-to-end, and `README.md` points at both.
 
 ---
 
