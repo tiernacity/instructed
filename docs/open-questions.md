@@ -20,4 +20,8 @@ the SDK does not expose transaction-boundary ownership to handlers.
 SDK (see NG-0015). OQ-0003 was resolved in Phase 8 by adopting
 **SDK-side selectors** for v1 (option 1 from its original entry);
 server-side JSONB-predicate selectors remain a deliberate future
-option \u2014 see `maybe-later.md` ML-0003.
+option — see `maybe-later.md` ML-0003. OQ-0004..OQ-0007 were
+resolved in Phase 9's design pass by D-0021..D-0024 respectively:
+SQL-only harness in `tests/conformance/`, hand-rewrite by INV-*,
+adapter-line scope only, partitioned-consumer cases parked as
+`test.skip` with ML-0001 tags.

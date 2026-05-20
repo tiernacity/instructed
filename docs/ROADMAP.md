@@ -401,6 +401,83 @@ guarantees from Phase 4 cause real problems.
 **Done when:** the harness runs green, and any deviations from the
 Commanded conformance set are explained in `non-goals.md`.
 
+**Design pass — done.** Four shape decisions landed as D-0021..D-0024
+(resolving OQ-0004..OQ-0007):
+
+- **D-0021** — SQL-only harness in `tests/conformance/`, TypeScript +
+  `node --test` + `pg`, no SDK in the loop. The conformance contract
+  belongs to the store.
+- **D-0022** — Hand-rewrite cases organised by INV-* identifier; the
+  Elixir `*_test_case.ex` files act as a coverage checklist in
+  `tests/conformance/COVERAGE.md`. INV-coverage matrix printed on
+  green run.
+- **D-0023** — Adapter-line scope only (Parts B–F of `invariants.md`).
+  AGG-* / HND-* / PM-* / CON-* / DSP-* stay in the SDK test suite.
+- **D-0024** — INV-SUB-P-040..042 (partitioned consumers) land as
+  `test.skip` with `// deferred — ML-0001 / D-0002` tags so the
+  coverage matrix distinguishes deferred from missing.
+
+**Sub-step sequencing.** Each step lands as its own commit, tagged
+with the INV-* identifiers it covers.
+
+- **Step 1/8.** `tests/conformance/` workspace package skeleton:
+  `package.json`, `tsconfig.json`, `fixtures.ts` (lifted pattern
+  from `sdks/typescript/test/fixtures.ts`), an empty
+  `coverage-report.ts` reporter, and an initial `COVERAGE.md`
+  cross-referencing the three Elixir `*_test_case.ex` files. One
+  smoke test that runs `truncateAll` and asserts the schema is
+  installed. No invariant cases yet.
+- **Step 2/8.** Part B — Append. `append.test.ts` covers
+  INV-APPEND-001..007 (identity, ordering, atomicity),
+  INV-APPEND-010..014 (expected-version semantics, all four shapes),
+  INV-APPEND-020..022 (concurrent appends — two-session
+  tests against the docker-compose Postgres),
+  INV-APPEND-030 (duplicate `event_id`),
+  INV-APPEND-040..041 (immutability triggers, no hard-delete in v1).
+- **Step 3/8.** Part C — Read. `read.test.ts` covers
+  INV-READ-001..004 (`stream_not_found`, order, inclusive start,
+  exhaustiveness),
+  INV-READ-005..008 (`$all` semantics — original stream identity
+  echoed via `read_all`, global ordering by `event_number`),
+  INV-READ-020 (reader/append concurrency, MVCC behaviour).
+- **Step 4/8.** Part D — Snapshots. `snapshot.test.ts` covers
+  INV-SNAP-001..006 (at-most-one-per-source, upsert semantics,
+  `snapshot_not_found`, idempotent delete, no history, advisory).
+- **Step 5/8.** Part E persistent — `subscription-persistent.test.ts`
+  covers INV-SUB-P-001..002 (identity + idempotent re-subscribe),
+  INV-SUB-P-010..012 (single-active-subscriber under the lease
+  model; failover after TTL),
+  INV-SUB-P-020..021 (`start_from` honoured on first create, ignored
+  thereafter),
+  INV-SUB-P-030..034 (strictly-increasing delivery, at-least-once,
+  cursor advance, monotonicity, out-of-order ack absorption),
+  INV-SUB-P-060..062 (release — cursor stays; delete — cursor gone;
+  delete-missing returns IS020 per D-0009).
+- **Step 6/8.** Part E partitioned —
+  `subscription-partitioned.test.ts` lands the three INV-SUB-P-040..042
+  cases as `test.skip(...)` per D-0024.
+- **Step 7/8.** Part E transient and Part F cross-cutting —
+  `subscription-transient.test.ts` records INV-SUB-T-001..005 as
+  *dropped* (NG-0006 / D-0007) via a single annotated case that
+  documents the omission and asserts the omission shape (no
+  `subscribe` procedure exists); the coverage reporter renders them
+  as "dropped". INV-SUB-P-050 (selector) is annotated
+  *above-adapter-line* in the same file — realised SDK-side per
+  `mapping.md` Pass 2 / ML-0003 — and rendered separately in the
+  coverage report. `cross-cutting.test.ts` covers INV-META-001
+  (causation / correlation persisted and echoed), INV-META-010..011
+  (event_type opaque, JSONB round-trip per the tighter v1
+  encoding), INV-STREAM-001..003 (`$all` reserved at the schema
+  level), INV-LINK-001 + INV-DELETE-001 as *dropped*.
+- **Step 8/8.** Coverage report rendering + final green-run pass.
+  `coverage-report.ts` walks the INV-* annotations from all test
+  files, emits the B–F matrix (covered / deferred / dropped /
+  missing), and exits non-zero if any "missing" rows remain.
+  Cross-check pass: every "dropped" / "looser" verdict in
+  `mapping.md` has a corresponding entry in `non-goals.md`; any
+  divergence discovered during steps 2–7 is recorded there.
+  Update `README.md` status; mark Phase 9 done.
+
 ---
 
 ## Beyond

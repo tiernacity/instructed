@@ -12,6 +12,223 @@ tracked in [`maybe-later.md`](maybe-later.md).
 
 ---
 
+## D-0024 — Phase 9 conformance harness: skip-slot the partitioned-consumer cases (resolves OQ-0007)
+
+**Date:** 2026-05-18
+
+**Context:** ML-0001 / D-0002 defer partitioned subscriptions to a
+future version. INV-SUB-P-040..042 nonetheless live in the invariant
+catalogue; the conformance harness needs a position for them so that
+turning partitioning on later does not require rewriting the
+unpartitioned cases. OQ-0007 enumerated three options: write them now
+as `test.skip` (α), omit them entirely (β), or leave a placeholder
+file (γ).
+
+**Decided:** **(α)**. The three cases land in
+`tests/conformance/subscription-partitioned.test.ts` as `test.skip(...)`
+with `// deferred — ML-0001 / D-0002` tags. The INV-coverage report
+distinguishes "deferred" from "missing".
+
+**Case shape (recorded here so the parking is auditable):**
+
+- **INV-SUB-P-040** — N=3 workers claim `(stream, name)` with
+  `concurrency_limit = 3`; K events appended; assert union of
+  delivered events across workers == K, intersection empty, and a
+  4th claim returns `IS021 too_many_subscribers`.
+- **INV-SUB-P-041** — same setup with a `partition_by` selector;
+  append events tagged with partition keys A,A,B,A,B; assert
+  (i) every A-event went to the same worker and every B-event to
+  the same worker, (ii) intra-partition `event_number` order is
+  preserved per worker. Rebalance variant: the A-worker releases
+  its lease; a fresh claim picks up the A partition and resumes
+  from A's last-acked position.
+- **INV-SUB-P-042** — N workers, no `partition_by`; assert only the
+  weaker contract (union == K, intersection empty), no stickiness
+  or order across workers. Documents what we are *not* promising.
+
+**Consequences:**
+
+- The setup line for INV-SUB-P-041 depends on the as-yet-undecided
+  partition-selector API shape (server-side selector row vs. a
+  `partition_key` arg on `read_subscription_batch`; same design
+  space as ML-0003 / former OQ-0003). When partitioning lands, the
+  test will be **re-written**, not unskipped — its setup line is
+  the only thing tied to that API; the assertions are stable.
+- INV-SUB-P-040 and INV-SUB-P-042 assertions are stable today; only
+  the lease-claim concurrency primitive needs to grow a
+  `concurrency_limit > 1` mode (currently fixed at 1 per D-0002).
+
+**Sources:** OQ-0007, ML-0001, D-0002. Forward-link: any future
+Phase that lights up partitioning must also resolve the
+partition-selector API question and update D-0024's test shapes.
+
+---
+
+## D-0023 — Phase 9 conformance scope: adapter-line only (resolves OQ-0006)
+
+**Date:** 2026-05-18
+
+**Context:** OQ-0006 asked whether the conformance harness covers
+(i) the adapter-line invariants only (Parts B–F of `invariants.md`)
+or (ii) everything that has an INV-* / AGG-* / HND-* / PM-* / CON-* /
+DSP-* identifier.
+
+**Decided:** **(i)**, adapter-line only. The harness covers Append
+(Part B, INV-APPEND-*), Read (Part C, INV-READ-*), Snapshots
+(Part D, INV-SNAP-*), Subscriptions (Part E, INV-SUB-*), and
+cross-cutting (Part F, INV-META-* / INV-STREAM-* / INV-LINK-* /
+INV-DELETE-*). AGG-* / HND-* / PM-* / CON-* / DSP-* are out of
+scope.
+
+**Reasoning:**
+
+- Phase 2's invariant boundary is the adapter line. Commanded's
+  `*_test_case.ex` files target the `EventStore.Adapter` callbacks
+  directly — they do not go through command/handler/PM layers.
+- AGG-* / HND-* / PM-* / CON-* / DSP-* are intrinsically SDK-shaped
+  (load-execute-append loop, OCC retry, polling consistency, PM
+  state-as-snapshot, etc.) and already exercised by the 77 cases
+  in `sdks/typescript/test/`.
+- A future Python or Go SDK inherits adapter-line conformance by
+  pointing at a conformant store. Its own test suite covers its
+  own AGG-* / HND-* / PM-* / CON-* / DSP-* realisations in that
+  SDK's language.
+
+**Consequences:**
+
+- The INV-coverage matrix the harness prints is a B–F matrix.
+- SDK-layer behaviour regressions are caught only by the SDK's
+  own test suite; the conformance harness will not surface them.
+- If a future invariant comes to live *below* the adapter line
+  (e.g. a future server-side selector, ML-0003), it belongs in
+  the conformance harness from the start.
+
+**Sources:** OQ-0006, `invariants.md` Part G (things the adapter
+contract does NOT specify), `mapping.md` Pass-2/Pass-3 verdicts.
+
+---
+
+## D-0022 — Phase 9 conformance port strategy: hand-rewrite by INV-* (resolves OQ-0005)
+
+**Date:** 2026-05-18
+
+**Context:** OQ-0005 asked whether to (I) mechanically port the
+Commanded `*_test_case.ex` files case-by-case, preserving Elixir
+test names, or (II) hand-rewrite the cases organised by INV-*
+identifier, using the Elixir files as a coverage checklist.
+
+**Decided:** **(II)**. Cases are organised by INV-* with inline
+`// INV-APPEND-013: …` annotations. A printed INV-coverage matrix
+at end-of-run distinguishes covered / deferred / dropped / missing.
+The Elixir files act as a coverage checklist (we keep, in
+`tests/conformance/COVERAGE.md`, an explicit list of every Elixir
+`test "…"` block and the INV-* identifier(s) it maps to, so any
+gap is auditable).
+
+**Reasoning:**
+
+- The Elixir subscription model (`subscribe → receive {:events, _} →
+  ack_event(pid, event)`) does not map to our claim-lease +
+  `read_subscription_batch` + `advance_subscription` model. A
+  mechanical port would either re-implement Commanded's push
+  semantics on top of our pull primitives in the harness (sunk
+  cost, brittle, tests the wrong layer) or annotate every case
+  "this is what the equivalent looks like in pull form" (which is
+  just (II) wearing a different hat).
+- Append and snapshot cases port more naturally, but they too
+  benefit from being organised by INV-* (so coverage is on the
+  invariant, not on the source-file line number).
+- The INV-coverage matrix is the artifact that makes deviations
+  auditable — e.g. INV-SUB-T-* renders as "dropped — see NG-0006"
+  rather than "missing".
+
+**Consequences:**
+
+- Every case file lives under `tests/conformance/` organised by
+  invariant family (`append.test.ts`, `read.test.ts`,
+  `snapshot.test.ts`, `subscription-persistent.test.ts`, etc.),
+  not by Elixir source file.
+- Each `test(...)` block carries one or more INV-* tags in a
+  comment on the line above; the coverage reporter scrapes them.
+- `tests/conformance/COVERAGE.md` is the cross-reference back to
+  the Elixir files, maintained by hand. Drift between the
+  checklist and the actual case set is acceptable as long as it
+  is recorded.
+
+**Sources:** OQ-0005, the three referenced `_test_case.ex` files
+(`commanded/test/event_store/support/{append_events,subscription,snapshot}_test_case.ex`),
+the INV-* catalogue in `invariants.md`.
+
+---
+
+## D-0021 — Phase 9 conformance harness substrate: SQL-only, in `tests/conformance/` (resolves OQ-0004)
+
+**Date:** 2026-05-18
+
+**Context:** OQ-0004 enumerated two viable shapes for Phase 9's
+harness — (b) SDK-driven (a standalone TS package that imports the
+reference SDK and drives procedures through `Client`), or (c)
+SQL-only (drives the stored procedures directly via `pg`). Option
+(a) — running ported cases inside `sdks/typescript/test/` — was
+ruled out on artifact-location grounds by ROADMAP Phase 9.
+
+**Decided:** **(c)**, SQL-only harness in `tests/conformance/`,
+TypeScript + node `--test` + `pg`. No `Client`, no SDK in the loop.
+The `getPool` / `installSchema` / `truncateAll` fixture pattern is
+lifted from `sdks/typescript/test/fixtures.ts` into
+`tests/conformance/fixtures.ts`. SQLSTATE assertions are made
+against `err.code` directly against the closed catalogue
+documented in `docs/sql-contract.md` (`IS001..IS006`, `IS010`,
+`IS020`..`IS022`, `22023`).
+
+**Reasoning, in priority order:**
+
+1. The conformance contract belongs to the store. In our model the
+   adapter line *is* the SQL procedure surface — every INV-* in
+   Parts B–F is realised by a procedure call or a schema
+   constraint. Driving the procedures directly tests exactly the
+   contract the invariants document.
+2. Future Python / Go / Elixir SDKs inherit conformance without
+   porting cases. A future SDK's own test suite covers its own
+   SDK-layer behaviour (D-0023); pointing at a conformant store is
+   all it needs to inherit B–F.
+3. SQLSTATE assertions go straight to `err.code` against the
+   documented closed catalogue, with no SDK error-translation
+   layer in between. A bug or naming drift in `Client` cannot
+   create a false conformance failure (or, worse, hide a real
+   contract regression).
+4. The remaining SDK-layer behaviours already have a home in
+   `sdks/typescript/test/` (77 cases).
+
+**Tooling rationale:** TypeScript + `node --test` + `pg` is not a
+language preference for the contract — it reuses the toolchain that
+already exists in the repo (same Postgres fixture, same runner,
+same `pg` peer). The cases are pure SQL-call scripts; a future
+port to a different runner is mechanical if ever needed.
+
+**Consequences:**
+
+- `tests/conformance/` is a separate workspace package (its own
+  `package.json`, its own `tsconfig.json`, its own `node --test`
+  invocation). The SDK is not a dependency.
+- The harness uses the same docker-compose Postgres at
+  `instructed_test`, with fresh-schema-per-process and
+  `truncateAll` between cases, identical to the SDK fixture.
+- The harness emits an INV-coverage report on green run
+  (D-0022). Shape TBD when the first cases land; likely a printed
+  matrix per Part, with covered / deferred / dropped / missing
+  columns.
+- Going forward, any SDK-layer test that creeps into
+  `tests/conformance/` is a smell: it belongs in the SDK's own
+  suite. The boundary is enforced by D-0023.
+
+**Sources:** OQ-0004, ROADMAP Phase 9, `invariants.md` Part G
+(adapter-contract boundary), `docs/sql-contract.md` (closed
+SQLSTATE catalogue), `sdks/typescript/test/fixtures.ts` (fixture
+pattern to lift).
+
+---
+
 ## D-0020 — Process-manager worker: `{kind:'start'}` discards in-place; load-time `StreamNotFound` is empty stream; same-`Client` is a construction error
 
 **Date:** 2026-05-18
