@@ -23,12 +23,12 @@ above) is the authoritative source.
 
 | Step | Scope                                  | Status         |
 |------|----------------------------------------|----------------|
-| 1/8  | Harness skeleton, fixtures, smoke      | **this commit**|
-| 2/8  | Part B — Append (INV-APPEND-*)         | pending        |
-| 3/8  | Part C — Read (INV-READ-*)             | pending        |
-| 4/8  | Part D — Snapshots (INV-SNAP-*)        | pending        |
-| 5/8  | Part E persistent (INV-SUB-P-*)        | pending        |
-| 6/8  | Part E partitioned (skipped, D-0024)   | pending        |
+| 1/8  | Harness skeleton, fixtures, smoke      | done           |
+| 2/8  | Part B — Append (INV-APPEND-*)         | done           |
+| 3/8  | Part C — Read (INV-READ-*)             | done           |
+| 4/8  | Part D — Snapshots (INV-SNAP-*)        | done           |
+| 5/8  | Part E persistent (INV-SUB-P-*)        | done           |
+| 6/8  | Part E partitioned (skipped, D-0024)   | **this commit**|
 | 7/8  | Part E transient + Part F cross-cutting| pending        |
 | 8/8  | Coverage reporter + non-goals reconcile| pending        |
 
