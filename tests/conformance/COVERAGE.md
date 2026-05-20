@@ -29,7 +29,7 @@ above) is the authoritative source.
 | 4/8  | Part D — Snapshots (INV-SNAP-*)        | done           |
 | 5/8  | Part E persistent (INV-SUB-P-*)        | done           |
 | 6/8  | Part E partitioned (skipped, D-0024)   | **this commit**|
-| 7/8  | Part E transient + Part F cross-cutting| pending        |
+| 7/8  | Part E transient + Part F cross-cutting| **this commit**|
 | 8/8  | Coverage reporter + non-goals reconcile| pending        |
 
 ---
