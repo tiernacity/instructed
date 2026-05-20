@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
+import { rejectsWithCode } from "./_helpers.ts";
 
 let pool: pg.Pool;
 
@@ -93,16 +94,6 @@ async function snapshotRowCount(): Promise<bigint> {
     `SELECT COUNT(*)::text AS n FROM instructed.snapshots`,
   );
   return BigInt(r.rows[0].n);
-}
-
-async function rejectsWithCode(
-  fn: () => Promise<unknown>,
-  code: string,
-): Promise<void> {
-  await assert.rejects(fn, (err: unknown) => {
-    const e = err as { code?: unknown };
-    return typeof e.code === "string" && e.code === code;
-  });
 }
 
 // =============================================================================

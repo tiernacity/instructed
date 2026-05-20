@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
+import { appendAny, type InputEvent, rejectsWithCode } from "./_helpers.ts";
 
 let pool: pg.Pool;
 
@@ -30,18 +31,9 @@ beforeEach(async () => {
 });
 
 // -----------------------------------------------------------------------------
-// Helpers (mirror append.test.ts; promotion to a shared module deferred to a
-// later step if a third caller appears).
+// Per-procedure helpers. Shared `appendAny` / `rejectsWithCode` come from
+// ./_helpers.ts; only the read-row mapping stays local.
 // -----------------------------------------------------------------------------
-
-interface InputEvent {
-  event_id?: string;
-  event_type: string;
-  data?: unknown;
-  metadata?: unknown;
-  causation_id?: string | null;
-  correlation_id?: string | null;
-}
 
 interface ReadRow {
   event_id: string;
@@ -56,25 +48,8 @@ interface ReadRow {
   created_at: Date;
 }
 
-async function append(
-  streamUuid: string,
-  events: InputEvent[],
-  q: pg.ClientBase | pg.Pool = pool,
-): Promise<void> {
-  const payload = events.map((e) => ({
-    event_id: e.event_id ?? randomUUID(),
-    event_type: e.event_type,
-    data: e.data ?? {},
-    ...(e.metadata !== undefined ? { metadata: e.metadata } : {}),
-    ...(e.causation_id !== undefined ? { causation_id: e.causation_id } : {}),
-    ...(e.correlation_id !== undefined
-      ? { correlation_id: e.correlation_id }
-      : {}),
-  }));
-  await q.query(
-    `SELECT * FROM instructed.append_to_stream($1, 'any', NULL, $2::jsonb)`,
-    [streamUuid, JSON.stringify(payload)],
-  );
+function append(streamUuid: string, events: InputEvent[]): Promise<void> {
+  return appendAny(pool, streamUuid, events);
 }
 
 function asReadRow(row: {
@@ -126,16 +101,6 @@ async function readAll(
   );
   // deno-lint-ignore no-explicit-any
   return r.rows.map((row: any) => asReadRow(row));
-}
-
-async function rejectsWithCode(
-  fn: () => Promise<unknown>,
-  code: string,
-): Promise<void> {
-  await assert.rejects(fn, (err: unknown) => {
-    const e = err as { code?: unknown };
-    return typeof e.code === "string" && e.code === code;
-  });
 }
 
 // =============================================================================
