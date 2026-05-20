@@ -146,8 +146,17 @@ describe("append_to_stream — identity, ordering, atomicity", () => {
     assert.equal(rows[0].stream_version, 1n);
     assert.equal(rows[0].event_number, 1n);
     assert.ok(rows[0].created_at instanceof Date);
+    // INV-APPEND-005 explicitly tolerates clock skew. We assert the
+    // timestamp is *roughly* current (±60s window absorbs realistic
+    // Postgres-vs-node drift, including dockerised Postgres on
+    // virtualised macOS) rather than tight bracketing. The
+    // monotonicity property has its own case below.
     const t = rows[0].created_at.getTime();
-    assert.ok(t >= before && t <= after, `created_at ${t} outside [${before}, ${after}]`);
+    const SKEW_MS = 60_000;
+    assert.ok(
+      t >= before - SKEW_MS && t <= after + SKEW_MS,
+      `created_at ${new Date(t).toISOString()} far outside [${new Date(before).toISOString()}, ${new Date(after).toISOString()}]`,
+    );
   });
 
   // INV-APPEND-002: contiguous per-stream stream_version starting at 1
