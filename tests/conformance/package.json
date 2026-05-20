@@ -1,0 +1,24 @@
+{
+  "name": "instructed-conformance",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SQL-only conformance harness for the instructed contract (Phase 9, D-0021).",
+  "type": "module",
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "test": "node --test --test-concurrency=1 'test/*.test.ts'",
+    "test:watch": "node --test --test-concurrency=1 --watch 'test/*.test.ts'",
+    "coverage": "node --test --test-reporter=spec --test-reporter-destination=stdout 'test/*.test.ts' && node coverage-report.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.9.3"
+  }
+}
