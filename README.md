@@ -13,6 +13,27 @@ guarantees required from the host (no BEAM, no OTP).
 
 ## Status
 
+**Phase 9 — Conformance harness — done.**
+
+- A SQL-only conformance harness lives in
+  [`tests/conformance/`](tests/conformance/) (D-0021). It drives the
+  procedures in `sql/instructed.sql` directly via `pg`, with no SDK
+  in the loop — the conformance contract belongs to the store, so a
+  future Python/Go/Elixir SDK inherits adapter-line conformance for
+  free by pointing at a conformant Postgres.
+- 113 active cases organised by INV-* (D-0022) across
+  `append.test.ts`, `read.test.ts`, `snapshot.test.ts`,
+  `subscription-persistent.test.ts`, `cross-cutting.test.ts`, plus
+  three `test.skip` slots for INV-SUB-P-040..042 (deferred per
+  D-0024 / ML-0001) and an omission shell for the dropped INV-SUB-T-*
+  family (NG-0005). Scope is adapter-line only (D-0023); SDK-layer
+  behaviours stay in `sdks/typescript/test/`.
+- Coverage of the Phase 2 invariant catalogue (Parts B–F) is
+  complete: 54 covered, 3 deferred, 7 dropped, 1 above-line, 0
+  missing. The `npm run coverage` reporter prints the matrix and
+  exits non-zero if anything regresses. Annotation grammar is
+  documented in `tests/conformance/README.md`.
+
 **Phase 8 — Reference SDK — done.**
 
 - The SQL contract is the spec: see [`sql/instructed.sql`](sql/instructed.sql).
@@ -50,8 +71,9 @@ guarantees required from the host (no BEAM, no OTP).
   aggregate-runner semantics, and D-0020 — PM-worker / runner
   fresh-stream details).
 
-Phase 9 (the cross-language conformance harness) is the next major
-milestone.
+Beyond Phase 9: additional SDKs (Python, Go, Elixir),
+`instructedctl` tool, performance work — see
+[`docs/ROADMAP.md`](docs/ROADMAP.md) "Beyond".
 
 ## Layout
 
@@ -63,6 +85,11 @@ sdks/
   typescript/            -- reference SDK (Node 18+, pg 8.x peer dep)
     src/                 -- layers 0..5 of the design
     test/                -- node --test fixtures against docker-compose
+tests/
+  conformance/           -- Phase 9 SQL-only conformance harness (D-0021)
+    test/                -- one *.test.ts per INV-* family
+    coverage-report.ts   -- INV-coverage matrix reporter (D-0022)
+    COVERAGE.md          -- Elixir-source <-> INV-* checklist
 docs/
   ROADMAP.md             -- phase-by-phase plan and status
   sdk-design.md          -- the SDK design (authoritative)
@@ -93,6 +120,20 @@ npm test
 The fixtures connect to `instructed_test`, create the database if missing,
 install [`sql/instructed.sql`](sql/instructed.sql), and truncate the
 `instructed.*` tables between cases.
+
+## Running the conformance harness
+
+```sh
+docker compose up -d
+cd tests/conformance
+npm install
+npm test            # 113 active cases + 3 skipped (deferred)
+npm run coverage    # INV-* matrix, exits non-zero on any 'missing' row
+```
+
+The harness uses the same `instructed_test` database as the SDK
+tests, with a fresh schema per process and `truncateAll` between
+cases. No SDK dependency.
 
 ## Running the bank-account example
 

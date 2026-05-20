@@ -389,7 +389,7 @@ end-to-end, and `README.md` points at both.
 
 ---
 
-## Phase 9 — Conformance harness
+## Phase 9 — Conformance harness — **done**
 
 **Goal:** port (or mirror) the Commanded adapter conformance tests so
 that we can demonstrate `instructed` provides the invariants from
@@ -399,7 +399,26 @@ guarantees from Phase 4 cause real problems.
 **Artifact:** `tests/conformance/`.
 
 **Done when:** the harness runs green, and any deviations from the
-Commanded conformance set are explained in `non-goals.md`.
+Commanded conformance set are explained in `non-goals.md`. ✅
+
+**Status:**
+
+- 113 active cases + 3 skipped (deferred per D-0024) green and stable
+  across repeated runs. Total `node --test` line: 116 tests, 113
+  pass, 3 skipped, 0 fail.
+- INV-coverage matrix (`npm run coverage`): 54 covered, 3 deferred,
+  7 dropped, 1 above-line, 0 missing across Parts B–F. The reporter
+  exits non-zero on any "missing" row so regressions surface in CI.
+- Non-goals reconcile: the existing cross-check table in
+  `non-goals.md` already accounted for every dropped / looser-by-
+  elimination verdict in `mapping.md`; the harness surfaced no new
+  divergences and no NG-* entries needed to be added.
+- D-0021..D-0024 (the design pass) survived implementation
+  unchanged. The hand-rewrite-by-INV approach (D-0022) paid off:
+  organising cases by invariant rather than by Elixir source-file
+  made the coverage matrix mechanical, and the SQL-only substrate
+  (D-0021) means future SDKs inherit adapter-line conformance with
+  zero porting work.
 
 **Design pass — done.** Four shape decisions landed as D-0021..D-0024
 (resolving OQ-0004..OQ-0007):
@@ -472,11 +491,33 @@ with the INV-* identifiers it covers.
 - **Step 8/8.** Coverage report rendering + final green-run pass.
   `coverage-report.ts` walks the INV-* annotations from all test
   files, emits the B–F matrix (covered / deferred / dropped /
-  missing), and exits non-zero if any "missing" rows remain.
+  above-line / missing), and exits non-zero if any "missing" rows
+  remain. Annotation grammar (frozen in step 1/8): comment lines
+  whose body starts with `INV-` are annotations; an optional
+  `[parenthetical]` and an optional `:`-prefixed suffix follow.
+  Multiple INV-* identifiers on the same line all receive the
+  same classification. The grammar tolerates narrative mentions
+  of an INV-* mid-line without false-positive-covering it.
+
   Cross-check pass: every "dropped" / "looser" verdict in
-  `mapping.md` has a corresponding entry in `non-goals.md`; any
-  divergence discovered during steps 2–7 is recorded there.
-  Update `README.md` status; mark Phase 9 done.
+  `mapping.md` already had a corresponding entry in
+  `non-goals.md` (the table at the bottom of NG already covered
+  it); the harness surfaced no new divergences and no NG-*
+  additions were needed.
+
+  Final scoreboard (per `npm run coverage`):
+
+  | Part | Identifiers | Covered | Deferred | Dropped | Above-line |
+  |------|-------------|---------|----------|---------|------------|
+  | B    | 18          | 18      | 0        | 0       | 0          |
+  | C    | 9           | 9       | 0        | 0       | 0          |
+  | D    | 6           | 6       | 0        | 0       | 0          |
+  | E-T  | 5           | 0       | 0        | 5       | 0          |
+  | E-P  | 19          | 15      | 3        | 0       | 1          |
+  | F    | 8           | 6       | 0        | 2       | 0          |
+  | **Σ**| **65**      | **54**  | **3**    | **7**   | **1**      |
+
+  README pointed at the harness; Phase 9 marked done.
 
 ---
 

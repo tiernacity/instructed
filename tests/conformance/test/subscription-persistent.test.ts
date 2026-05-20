@@ -544,6 +544,31 @@ describe("subscriptions — advance and monotonicity", () => {
 });
 
 // =============================================================================
+// Selector (INV-SUB-P-050) — above adapter line
+// =============================================================================
+//
+// INV-SUB-P-050: above adapter line — see D-0023 / ML-0003 / mapping.md Pass 2
+//
+// In Commanded, an optional `selector` predicate filters delivery; the
+// subscription server still acks filtered-out events. In `instructed`
+// v1, selectors are realised entirely SDK-side (the SDK reads a batch,
+// runs the predicate, calls the handler on matches, and advances the
+// cursor to the highest *fetched* event_number regardless of how many
+// matched). The SQL surface deliberately exposes no selector
+// parameter on `read_subscription_batch` and no selector column on
+// `subscriptions`. Server-side selector evaluation is reserved for
+// ML-0003.
+//
+// The omission is documented (rather than asserted as a behavioural
+// case) because there is nothing for the SQL layer to assert: the
+// invariant lives in the SDK and is covered by
+// `sdks/typescript/test/subscription.test.ts` :: "selector (SDK-side)".
+// The annotation above is what the step-8/8 coverage reporter
+// recognises as "above adapter line", distinguishing it from "dropped"
+// (a deliberate elimination, like INV-SUB-T-*) and from "missing" (a
+// real gap).
+
+// =============================================================================
 // Lifecycle — release / delete / position (INV-SUB-P-060, 061, 062)
 // =============================================================================
 
