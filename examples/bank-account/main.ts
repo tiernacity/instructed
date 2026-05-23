@@ -23,7 +23,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { Instructed, type RunningWorker } from "../../src/index.ts";
+import { Instructed, type RunningWorker } from "../../sdks/typescript/src/index.ts";
 import { Account } from "./account.ts";
 import { Transfer } from "./transfer.ts";
 import {

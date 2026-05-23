@@ -29,18 +29,18 @@ Procedures follow three conventions, borrowed from absurd:
   SQLSTATEs in class `IS` (table below). SDKs translate each
   SQLSTATE to a language-native error type.
 - **Locks are documented in lock-acquisition order**, and procedure
-  lock sets are deliberately disjoint where possible (per D-0011
-  Phase 7 input #6).
+  lock sets are deliberately disjoint where possible (per
+  [D-0011](decisions.md#d-0011) / [D-0016](decisions.md#d-0016)).
 
 ## Schema at a glance
 
 | Table             | Purpose | Invariants |
 |-------------------|---------|------------|
-| `streams`         | One row per logical event stream. Seeded row `(stream_id = 0, stream_uuid = '$all')` is the global stream. | INV-APPEND-002/003, INV-STREAM-001..003, D-0012 |
+| `streams`         | One row per logical event stream. Seeded row `(stream_id = 0, stream_uuid = '$all')` is the global stream. | INV-APPEND-002/003, INV-STREAM-001..003, [D-0012](decisions.md#d-0012) |
 | `events`          | Caller-keyed event rows. Append-only. | INV-APPEND-001, INV-APPEND-030, INV-APPEND-040 |
-| `stream_events`   | (event, stream) join. Carries per-stream + original-stream positions. Unique `(stream_id, stream_version)` is the OCC mechanism (D-0005). | INV-APPEND-002/022, INV-READ-005..008 |
+| `stream_events`   | (event, stream) join. Carries per-stream + original-stream positions. Unique `(stream_id, stream_version)` is the OCC mechanism ([D-0005](decisions.md#d-0005)). | INV-APPEND-002/022, INV-READ-005..008 |
 | `snapshots`       | At most one per `source_uuid`. Used by aggregates and PMs (PM-020..024). | INV-SNAP-001..004 |
-| `subscriptions`   | Persistent leased cursors. Identity `(stream_id, name, shard)`; `shard` reserved at v1 default 0 for ML-0001. | INV-SUB-P-001/002, D-0006 |
+| `subscriptions`   | Persistent leased cursors. Identity `(stream_id, name, shard)`; `shard` reserved at v1 default 0 for ML-0001. | INV-SUB-P-001/002, [D-0006](decisions.md#d-0006) |
 
 Triggers `events_no_update / events_no_delete /
 stream_events_no_update / stream_events_no_delete` enforce
@@ -62,9 +62,9 @@ raises it. SDKs that see it have bypassed the contract.
 | `extend_subscription_claim`     | `(claim_expires_at)`     | Heartbeat |
 | `release_subscription`          | `void`                   | Clean release; cursor preserved |
 | `read_subscription_batch`       | `setof recorded_event`   | Lock + read batch from cursor; does NOT advance |
-| `advance_subscription`          | `(last_seen)`            | Monotone cursor advance; called in SDK's own short tx after the handler returns (D-0016) |
-| `read_subscription_position`    | `(last_seen)`            | Read cursor for strong-consistency-on-dispatch polling (D-0010) |
-| `delete_subscription`           | `void`                   | Removes row; raises `IS020` on missing (D-0009) |
+| `advance_subscription`          | `(last_seen)`            | Monotone cursor advance; called in SDK's own short tx after the handler returns ([D-0016](decisions.md#d-0016)) |
+| `read_subscription_position`    | `(last_seen)`            | Read cursor for strong-consistency-on-dispatch polling ([D-0010](decisions.md#d-0010)) |
+| `delete_subscription`           | `void`                   | Removes row; raises `IS020` on missing ([D-0009](decisions.md#d-0009)) |
 
 `recorded_event` is shorthand for the eleven columns: `event_id`,
 `event_number`, `stream_uuid`, `stream_version`, `event_type`,
@@ -86,13 +86,13 @@ error type.
 | `IS001`  | `wrong_expected_version`      | `append_to_stream`                                                        | INV-APPEND-013, INV-APPEND-020 |
 | `IS002`  | `stream_exists`               | `append_to_stream` (with `expected_version_type = 'no_stream'`)           | INV-APPEND-011 |
 | `IS003`  | `stream_not_found`            | `append_to_stream` (with `'stream_exists'`), `read_stream`, `claim_subscription` | INV-APPEND-012, INV-READ-001 |
-| `IS004`  | `duplicate_event`             | `append_to_stream`                                                        | INV-APPEND-030, D-0011 Phase 7 input #3 |
-| `IS005`  | `reserved_stream_uuid`        | `append_to_stream`, `read_stream` (on `'$all'`)                           | INV-STREAM-003, NG-0011 |
-| `IS006`  | append-only violation         | triggers on `events` / `stream_events` direct UPDATE/DELETE only          | INV-APPEND-040, NG-0008 — **never** raised by a procedure |
+| `IS004`  | `duplicate_event`             | `append_to_stream`                                                        | INV-APPEND-030 |
+| `IS005`  | `reserved_stream_uuid`        | `append_to_stream`, `read_stream` (on `'$all'`)                           | INV-STREAM-003 |
+| `IS006`  | append-only violation         | triggers on `events` / `stream_events` direct UPDATE/DELETE only          | INV-APPEND-040 — **never** raised by a procedure |
 | `IS010`  | `snapshot_not_found`          | `read_snapshot`                                                           | INV-SNAP-003 |
-| `IS020`  | `subscription_not_found`      | `extend_subscription_claim`, `release_subscription`, `read_subscription_batch`, `advance_subscription`, `read_subscription_position`, `delete_subscription` | INV-SUB-P-062, D-0009 |
-| `IS021`  | `subscription_already_claimed` | (reserved; v1 surfaces this case as a non-error `result = 'already_claimed'` row from `claim_subscription`. The SQLSTATE is retained in the catalogue for forward use if a future variant of `claim_subscription` chooses to raise.) | D-0006 |
-| `IS022`  | `subscription_lease_lost`     | `extend_subscription_claim`, `release_subscription`, `read_subscription_batch`, `advance_subscription` | D-0006 |
+| `IS020`  | `subscription_not_found`      | `extend_subscription_claim`, `release_subscription`, `read_subscription_batch`, `advance_subscription`, `read_subscription_position`, `delete_subscription` | INV-SUB-P-062, [D-0009](decisions.md#d-0009) |
+| `IS021`  | `subscription_already_claimed` | (reserved; v1 surfaces this case as a non-error `result = 'already_claimed'` row from `claim_subscription`. The SQLSTATE is retained in the catalogue for forward use if a future variant of `claim_subscription` chooses to raise.) | [D-0006](decisions.md#d-0006) |
+| `IS022`  | `subscription_lease_lost`     | `extend_subscription_claim`, `release_subscription`, `read_subscription_batch`, `advance_subscription` | [D-0006](decisions.md#d-0006) |
 | `22023`  | `invalid_parameter_value`     | every procedure, on null / malformed / out-of-range input                 | (standard SQLSTATE) |
 | `0A000`  | `feature_not_supported`       | reserved; not raised by any v1 procedure                                  | (standard SQLSTATE) |
 
@@ -146,7 +146,7 @@ calling `append_to_stream` and vice versa.
 These are the canonical SDK shapes. The SQL file is agnostic to which
 one the SDK adopts; both are supported.
 
-### Aggregate command (D-0004, D-0005)
+### Aggregate command ([D-0004](decisions.md#d-0004), [D-0005](decisions.md#d-0005))
 
 ```text
 load:
@@ -167,7 +167,7 @@ append:
 Per D-0005, retry on `IS001` is the per-aggregate serialisation
 mechanism; there is no advisory lock.
 
-### Subscription worker (D-0016, supersedes D-0008)
+### Subscription worker ([D-0016](decisions.md#d-0016))
 
 The handler is opaque to the SDK; it runs outside any SDK
 transaction. The SDK opens two short transactions per batch —
@@ -201,13 +201,13 @@ old worker's eventual `advance_subscription` call will raise IS022).
 The handler is application-domain; it may write to Postgres,
 Elasticsearch, Redis, an external API, or anywhere else. The SDK does
 not pass it a connection. Idempotency on redelivery is the handler's
-concern (NG-0015). An SDK that genuinely wants the historical
-D-0008 co-transactional pattern — same Postgres database, projection
-write atomic with cursor advance — may still call
-`advance_subscription` inside its own transaction; the SQL contract
-supports it. v1 SDKs do not exercise that capability.
+concern. An SDK that genuinely wants a co-transactional
+pattern — same Postgres database, projection write atomic with
+cursor advance — may still call `advance_subscription` inside
+its own transaction; the SQL contract supports it. v1 SDKs do
+not exercise that capability (see [ML-0004](maybe-later.md#ml-0004)).
 
-### Process manager worker (PM-020..024, D-0011, D-0016)
+### Process manager worker (PM-020..024, [D-0011](decisions.md#d-0011), [D-0016](decisions.md#d-0016))
 
 Same shape as the subscription worker, but the SDK runs an
 additional persist-and-ack pair (snapshot + cursor advance) in
@@ -235,10 +235,10 @@ loop:
 `dispatch(c)` is whatever the SDK exposes to call `append_to_stream`
 on the target aggregate. It opens its own connection (and thus its own
 transaction); the PM's snapshot+ack transaction does not nest inside
-it. This is the lock-set disjointness D-0011 Phase 7 input #6
+it. This is the lock-set disjointness [D-0011](decisions.md#d-0011)
 relies on.
 
-### Strong-consistency-on-dispatch wait (D-0010)
+### Strong-consistency-on-dispatch wait ([D-0010](decisions.md#d-0010))
 
 ```text
 result = append_to_stream(...)
@@ -248,10 +248,10 @@ for sub_name in consistency_list:
   or until consistency_timeout elapses
 ```
 
-`consistency_list` is the explicit list per D-0010 (no `:strong`
-shorthand); polling cadence is the SDK's responsibility.
+`consistency_list` is the explicit list per [D-0010](decisions.md#d-0010)
+(no `:strong` shorthand); polling cadence is the SDK's responsibility.
 
-## Implementation notes (Pass 3 lessons)
+## Implementation notes
 
 Three small Postgres-specific points discovered while filling in the
 bodies that future maintainers will hit:
@@ -272,13 +272,12 @@ bodies that future maintainers will hit:
    duplicate_event`. Only the unique on `stream_events
    (stream_id, stream_version)` is mapped to `IS001
    wrong_expected_version`.
-3. **D-0012 holds at runtime.** Two sessions doing concurrent
-   `'any_version'` appends to the same fresh stream are serialised
-   by the row lock taken by `INSERT ... ON CONFLICT DO UPDATE` on
-   the target `streams` row, and the `$all` row lock guarantees
+3. **[D-0012](decisions.md#d-0012) holds at runtime.** Two sessions doing
+   concurrent `'any_version'` appends to the same fresh stream are
+   serialised by the row lock taken by `INSERT ... ON CONFLICT DO UPDATE`
+   on the target `streams` row, and the `$all` row lock guarantees
    contiguous global numbers. Validated by running two parallel
-   psql sessions during Pass 3 and inspecting the final
-   `stream_events` ordering.
+   psql sessions and inspecting the final `stream_events` ordering.
 
 ## Migration story
 
@@ -294,17 +293,15 @@ will be cut alongside the first tagged release.
 
 ## Cross-references
 
-- [`docs/invariants.md`](invariants.md) — abstract contract this
-  schema realises (Parts B–E carry the closed error sets).
-- [`docs/mapping.md`](mapping.md) — every Commanded invariant's
-  realisation; the entries cite the SQL artifact that implements them.
-- [`docs/decisions.md`](decisions.md) — D-0005 (OCC retry), D-0006
-  (leased subscriptions), D-0016 (handler-opaque ack; supersedes D-0008), D-0009
-  (strict delete), D-0010 (explicit consistency list), D-0011
-  (saga = PM + commands), D-0012 (`$all`-as-stream lock).
-- [`docs/non-goals.md`](non-goals.md) — NG-0008 (no row-level
-  delete), NG-0010 (no bytea), NG-0011 (no user `'$all'`).
+- [`docs/invariants.md`](invariants.md) — the formal catalogue this
+  schema realises (closed error sets per procedure).
+- [`docs/architecture.md`](architecture.md) — how the procedures fit
+  together; lock-set disjointness; worker loops.
+- [`docs/decisions.md`](decisions.md) — the ADRs the contract
+  reflects, particularly D-0005, D-0006, D-0009, D-0010, D-0011,
+  D-0012, D-0016.
+- [`docs/non-goals.md`](non-goals.md) — positioning statements on
+  hard-delete, JSONB-only payloads, the reserved `$all` name, etc.
 - [`docs/maybe-later.md`](maybe-later.md) — ML-0001 (`shard`
-  column), ML-0002 (`LISTEN`/`NOTIFY` wake-up).
-- [`docs/open-questions.md`](open-questions.md) — OQ-0002, OQ-0003
-  (SDK-level questions deferred to Phase 8).
+  column), ML-0002 (`LISTEN`/`NOTIFY` wake-up), ML-0003
+  (server-side selectors), ML-0004 (`bindToConnection`).

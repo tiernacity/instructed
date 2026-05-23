@@ -1,5 +1,5 @@
 /**
- * TransferProcessManager — the Phase 8 done-criterion PM.
+ * TransferProcessManager — the canonical money-transfer saga.
  *
  * Routing (D-0011 compensation via refusal, no compensating command):
  *
@@ -14,7 +14,7 @@
  * the PM confusing their state.
  */
 
-import type { ProcessManagerDefinition } from "../../src/index.ts";
+import type { ProcessManagerDefinition } from "../../sdks/typescript/src/index.ts";
 import { Account } from "./account.ts";
 
 export type TransferStage =

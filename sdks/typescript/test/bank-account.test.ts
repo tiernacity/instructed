@@ -15,13 +15,13 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Instructed, SnapshotNotFound } from "../src/index.ts";
-import { Account } from "../examples/bank-account/account.ts";
-import { Transfer } from "../examples/bank-account/transfer.ts";
+import { Account } from "../../../examples/bank-account/account.ts";
+import { Transfer } from "../../../examples/bank-account/transfer.ts";
 import {
   balancesProjection,
   newBalancesView,
-} from "../examples/bank-account/balances.ts";
-import { transferProcessManager } from "../examples/bank-account/transfer-pm.ts";
+} from "../../../examples/bank-account/balances.ts";
+import { transferProcessManager } from "../../../examples/bank-account/transfer-pm.ts";
 import type pg from "pg";
 
 let pool: pg.Pool;

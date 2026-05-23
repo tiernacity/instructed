@@ -4,7 +4,7 @@
  * example never appends events outside an aggregate.
  */
 
-import type { AggregateDefinition } from "../../src/index.ts";
+import type { AggregateDefinition } from "../../sdks/typescript/src/index.ts";
 
 export interface TransferState {
   requested: boolean;

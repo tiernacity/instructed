@@ -1,6 +1,5 @@
 /**
- * Account aggregate — the canonical bank-account example from
- * docs/sdk-usage-sketch.md §2.
+ * Account aggregate — the canonical bank-account example.
  *
  * Pure domain folds. The SDK tracks version; the user code reads no
  * connection / transaction handle. `WithdrawalRefused` is an emitted
@@ -8,7 +7,7 @@
  * and refused so the TransferProcessManager can react via its routes.
  */
 
-import type { AggregateDefinition } from "../../src/index.ts";
+import type { AggregateDefinition } from "../../sdks/typescript/src/index.ts";
 
 export interface AccountState {
   opened: boolean;

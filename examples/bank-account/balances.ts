@@ -8,7 +8,7 @@
  * Idempotency: the `lastEventByAccount` guard skips redeliveries.
  */
 
-import type { ProjectionDefinition, RecordedEvent } from "../../src/index.ts";
+import type { ProjectionDefinition, RecordedEvent } from "../../sdks/typescript/src/index.ts";
 
 export interface BalancesView {
   /** account stream uuid -> current balance */
