@@ -1,0 +1,23 @@
+{
+  "name": "instructed-soak",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Load / soak harness for the instructed contract — performance gauge + invariant fuzzer over time (TODO #3b).",
+  "type": "module",
+  "scripts": {
+    "type-check": "tsc --noEmit",
+    "start": "node --experimental-strip-types soak.ts",
+    "soak": "node --experimental-strip-types soak.ts"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.9.3"
+  }
+}

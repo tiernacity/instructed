@@ -66,6 +66,18 @@ npm test            # 113 active cases + 3 deferred
 npm run coverage    # INV-* coverage matrix
 ```
 
+The soak harness (performance gauge + invariant fuzzer over time;
+not per-PR, runs on demand):
+
+```sh
+cd tests/soak
+npm install
+npm start -- --duration 30
+```
+
+See [`tests/soak/README.md`](tests/soak/README.md) for the flag
+list and interpretation guide.
+
 ## Repository layout
 
 ```
@@ -77,6 +89,7 @@ examples/                  -- worked examples
 sdks/typescript/           -- the reference SDK (Node 18+, pg 8.x)
 sql/                       -- the spec (schema + stored procedures)
 tests/conformance/         -- SQL-only conformance harness
+tests/soak/                -- load/soak harness (invariant fuzzer + perf gauge)
 docker-compose.yaml        -- the test Postgres
 ```
 

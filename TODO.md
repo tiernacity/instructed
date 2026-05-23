@@ -172,75 +172,47 @@ in the same commit. See item #9 for the docs follow-up.
 Lives in `sdks/typescript/test/concurrent.test.ts` (or split if it
 grows). Uses the existing fixtures and docker-compose Postgres.
 
-### 3b. Load / soak harness (lower priority, performance-focused)
+### 3b. Load / soak harness — **DONE**
 
-The original sketch of TODO #3 was really this: a longer-running
-workload generator + worker farm + failure injection that runs
-continuous invariant checks. Reframe its purpose as **performance
-gauge + invariant fuzzer over time**, not the primary correctness
-story. Runs nightly / on demand, not per-PR.
+Landed in `tests/soak/`. CLI-driven workload generator + worker farm
++ failure injection + continuous-and-final invariant checks. See
+`tests/soak/README.md` for the interpretation guide. Exits 0 on no
+violations and 1 otherwise; performance facts (commands/sec, events/sec,
+respawn count, lease theft count, $all head) always print.
 
-The SQL contract (`tests/conformance/`)
-tests *correctness*: two appenders race, one wins, one gets `IS001`.
-It doesn't test correctness *at scale*. We want a soak harness that
-runs N dispatchers, M projectors, K process managers, optional
-crashing nodes, against a representative workload, and asserts no
-invariant violations occur (no gaps in `event_number`, no out-of-order
-deliveries, no double-acked events past the cursor, no two workers
-holding the same lease at the same time).
+What the harness exercises:
 
-**Initial sketch (subject to design).**
+- Counter aggregate × OCC retry under `--dispatchers` concurrent
+  writers, plus a `--any-version-fraction` knob mixing exact-version
+  and `:any_version` appends.
+- Multi-slot competition for one subscription with short leases
+  (default 3s) and periodic lease theft via direct SQL.
+- Forwarder PM on `$all` dispatching to the same accounts the
+  dispatchers write to, so PM acks against `Added` events become a
+  measurable share of the load (ML-0005 surfaces here as PM lag).
+- Worker respawn injection: a random slot is bounced every
+  `--respawn-every-ms`; a keep-alive supervisor re-creates it with a
+  250ms minimum lifetime so a perpetually-losing slot doesn't busy-loop.
 
-- Lives in `tests/smoke/`.
-- Workload generator: configurable rate of `Transfer` commands against
-  N accounts; configurable mix of `:any_version` and exact-version
-  appends.
-- Worker farm: M concurrent projector processes claiming the same
-  subscription (only one wins at a time per the lease model);
-  K process managers; lease TTLs short enough to force regular
-  rebalances.
-- Failure injection: kill workers mid-batch; kill workers between
-  read-batch and advance; partition the network (sleep their tx
-  before commit).
-- Invariant checks (run at end and continuously):
-  - `event_number` is gapless across the global stream.
-  - For every stream, `stream_version` is gapless and starts at 1.
-  - For every subscription, `last_seen` is monotone over time.
-  - For every event, the projector saw it at most once *past the
-    cursor* (i.e. redeliveries are fine, but the durable cursor
-    never went backward and never advanced past an event the
-    handler did not see).
-  - For every PM, snapshot `source_version` equals the
-    subscription's `last_seen` (PM-024).
-  - No event was permanently undelivered to a healthy projector.
+Invariants checked (final + continuous sampler), each tagged with its
+`docs/invariants.md` ID:
 
-**Output (3b only — 3a is done).**
+- `INV-APPEND-003` — `$all` event_number gapless 1..head.
+- `INV-APPEND-022` — per-stream stream_version gapless.
+- `INV-SUB-P-008` — subscription `last_seen` monotone and ≤ head.
+- `INV-SUB-P-LEASE-UNIQ` — ≤ 1 unexpired claim per (stream, name)
+  at every sample tick.
+- `PM-024` — PM `source_version` ≤ `last_seen`.
+- `PM-FORWARD-TOTAL` — total PM `forwarded` count equals trigger count.
+- `REFOLD-MATCH` — projector's running balance equals a fresh re-fold.
 
-- A `tests/soak/` (or `tests/load/`) harness with its own README
-  and an interpretation guide for each invariant check.
-- Should reuse the SDK test fixtures' Postgres setup and the
-  invariant IDs from `docs/invariants.md` so a soak-detected
-  failure can be cross-referenced to a contract clause.
-- Performance numbers (commands/sec, projector lag at
-  steady-state, lease churn rate) reported alongside the
-  invariant report — the soak harness doubles as a perf gauge.
+Follow-ups deferred (out of scope for the first cut, documented in
+`tests/soak/README.md` § Known gaps):
 
-**Starting points for a new session on 3b.**
-
-- The 3a composed tests in `sdks/typescript/test/concurrent.test.ts`
-  are the closest existing analogue; the soak harness scales them
-  out, adds time, and adds failure injection.
-- ML-0005 (just added to `maybe-later.md`) notes that PMs currently
-  ack each ignored event individually. The soak harness should
-  measure ignored-event ack overhead so we know whether ML-0005 is
-  worth implementing or just theoretical.
-- The composed-test scenarios that bit me on first run (OCC
-  retry-budget exhaustion at N=12, PM-024 wording) are the kind of
-  thing the soak harness should surface at higher N. Worth
-  parametrising N as a CLI flag.
-
-**Depends on.** 3b benefits from the doc tidy settling invariant
-wording first so the soak checks reference stable IDs.
+- Network partition injection (`sleep tx before commit`).
+- Direct OCC retry-count surfacing — the SDK doesn't expose them
+  yet; visible indirectly via attempted-vs-completed delta.
+- Multi-process orchestration (everything runs in one Node process).
 
 ---
 
