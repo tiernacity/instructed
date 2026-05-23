@@ -142,22 +142,49 @@ export async function sampleOnce(
 
 export interface FinalReport {
   violations: InvariantViolation[];
+  /** Findings that would be violations at quiescence but the harness drained incomplete. */
+  inconclusive: InvariantViolation[];
   facts: {
     allHead: bigint;
     streamCount: number;
     triggersTotal: number;
     addedTotal: number;
+    /**
+     * Count of Added events on aggregate streams whose causation_id
+     * is a Triggered event — i.e. PM dispatches that actually
+     * committed. Compared against triggers_total + forwardedTotal +
+     * the SDK-side handleCalls/handleReturns counters by the
+     * harness's PM-FORWARD diagnostic block.
+     */
+    dispatchedViaCausation: number;
+    /** Sum of `forwarded` across every Forwarder PM snapshot. */
+    forwardedTotal: number;
     /** projector's running balance per account, if collected by the harness */
     projectorBalances?: Map<string, number>;
   };
+}
+
+export interface FinalCheckOptions {
+  /**
+   * When false, the harness skips invariants that only hold at
+   * quiescence (PM-FORWARD-TOTAL, REFOLD-MATCH). The harness's
+   * report surfaces them under INCONCLUSIVE instead.
+   */
+  quiesced: boolean;
 }
 
 export async function runFinalChecks(
   ctx: CheckContext,
   sampler: SamplerState,
   projectorBalances: Map<string, number> | undefined,
+  options: FinalCheckOptions = { quiesced: true },
 ): Promise<FinalReport> {
   const violations: InvariantViolation[] = [...sampler.violations];
+  const inconclusive: InvariantViolation[] = [];
+  const recordQuiescenceFinding = (v: InvariantViolation): void => {
+    if (options.quiesced) violations.push(v);
+    else inconclusive.push(v);
+  };
 
   // --- $all event_number gapless 1..head --------------------------------
   // The seed row stream_id=0 has stream_version = head. If
@@ -270,7 +297,7 @@ export async function runFinalChecks(
       WHERE source_type = $1`,
     [ctx.forwarderName],
   );
-  let forwardedTotal = 0;
+  let forwardedTotalLocal = 0;
   for (const r of snaps.rows) {
     const sv = BigInt(r.source_version);
     if (sv > pmPos.lastSeen) {
@@ -286,8 +313,9 @@ export async function runFinalChecks(
       `SELECT data FROM instructed.snapshots WHERE source_uuid = $1`,
       [r.source_uuid],
     );
-    forwardedTotal += dataR.rows[0]?.data?.forwarded ?? 0;
+    forwardedTotalLocal += dataR.rows[0]?.data?.forwarded ?? 0;
   }
+  const forwardedTotal = forwardedTotalLocal;
 
   // --- triggers vs forwarded --------------------------------------------
   const triggersR = await ctx.pool.query<{ n: string }>(
@@ -296,7 +324,7 @@ export async function runFinalChecks(
   );
   const triggersTotal = Number(triggersR.rows[0]!.n);
   if (forwardedTotal !== triggersTotal) {
-    violations.push({
+    recordQuiescenceFinding({
       code: "PM-FORWARD-TOTAL",
       message:
         `PM forwarded ${forwardedTotal} triggers but ${triggersTotal} ` +
@@ -324,7 +352,7 @@ export async function runFinalChecks(
       const refolded = Number(r.rows[0]?.total ?? "0");
       const projected = projectorBalances.get(acct) ?? 0;
       if (refolded !== projected) {
-        violations.push({
+        recordQuiescenceFinding({
           code: "REFOLD-MATCH",
           message:
             `account ${acct}: refold=${refolded} projector=${projected}`,
@@ -338,13 +366,31 @@ export async function runFinalChecks(
       WHERE event_type = 'Added'`,
   );
 
+  // Count of Added events whose causation_id is a Triggered event:
+  // the number of PM dispatches that actually landed on an aggregate
+  // stream. If this matches `forwardedTotal`, dispatch is consistent
+  // with the snapshot count; if it differs, persistence and dispatch
+  // disagree about how many forwards happened.
+  const dispatchedR = await ctx.pool.query<{ n: string }>(
+    `SELECT count(*)::text AS n
+       FROM instructed.events a
+      WHERE a.event_type = 'Added'
+        AND a.causation_id IN (
+          SELECT t.event_id FROM instructed.events t
+           WHERE t.event_type = 'Triggered'
+        )`,
+  );
+
   return {
     violations,
+    inconclusive,
     facts: {
       allHead,
       streamCount: perStream.rows.length,
       triggersTotal,
       addedTotal: Number(addedR.rows[0]!.n),
+      dispatchedViaCausation: Number(dispatchedR.rows[0]!.n),
+      forwardedTotal,
       projectorBalances,
     },
   };

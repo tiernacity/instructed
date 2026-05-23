@@ -33,7 +33,7 @@ import {
   type RecordedEvent,
 } from "../../sdks/typescript/src/index.ts";
 import { dbConfigFromEnv, makePool, resetSchema } from "./fixtures.ts";
-import { counter, forwarder } from "./domain.ts";
+import { forwarder, newForwarderCounters } from "./domain.ts";
 import {
   newMetrics,
   pickRandom,
@@ -68,6 +68,7 @@ interface Cli {
   pollIntervalMs: number;
   thinkTimeMs: number;
   sampleIntervalMs: number;
+  drainTimeoutSec: number;
   /** ms between respawn injections; 0 disables */
   respawnEveryMs: number;
   /** ms between lease theft injections; 0 disables */
@@ -111,6 +112,7 @@ function parseCli(argv: string[]): Cli {
     pollIntervalMs: num("poll-interval-ms", 50),
     thinkTimeMs: num("think-time-ms", 20),
     sampleIntervalMs: num("sample-interval-ms", 100),
+    drainTimeoutSec: num("drain-timeout-sec", 300),
     respawnEveryMs: num("respawn-every-ms", 2000),
     stealEveryMs: num("steal-every-ms", 3000),
     anyVersionFraction: num("any-version-fraction", 0.2),
@@ -121,12 +123,65 @@ function parseCli(argv: string[]): Cli {
 // Drain logic
 // ---------------------------------------------------------------------------
 
+export interface DrainState {
+  /** True if drain reached steady state before timeout. */
+  completed: boolean;
+  /** $all event_number at end of drain (whether completed or not). */
+  head: bigint;
+  /** Per-subscription final last_seen and lag relative to its head. */
+  subscriptions: Array<{
+    stream: string;
+    name: string;
+    lastSeen: bigint;
+    head: bigint;
+    lag: bigint;
+  }>;
+}
+
+async function snapshotDrainState(
+  pool: pg.Pool,
+  client: Client,
+  subscriptions: Array<{ stream: string; name: string }>,
+  completed: boolean,
+): Promise<DrainState> {
+  const r = await pool.query<{ head: string }>(
+    `SELECT stream_version::text AS head FROM instructed.streams WHERE stream_id = 0`,
+  );
+  const head = BigInt(r.rows[0]!.head);
+  const subs: DrainState["subscriptions"] = [];
+  for (const sub of subscriptions) {
+    let lastSeen = 0n;
+    let subHead = head;
+    try {
+      const pos = await client.readSubscriptionPosition(sub.stream, sub.name);
+      lastSeen = pos.lastSeen;
+    } catch {
+      // Subscription not yet created; treat as fully behind.
+    }
+    if (sub.stream !== "$all") {
+      const r2 = await pool.query<{ head: string }>(
+        `SELECT stream_version::text AS head FROM instructed.streams WHERE stream_uuid = $1`,
+        [sub.stream],
+      );
+      subHead = BigInt(r2.rows[0]?.head ?? "0");
+    }
+    subs.push({
+      stream: sub.stream,
+      name: sub.name,
+      lastSeen,
+      head: subHead,
+      lag: subHead - lastSeen,
+    });
+  }
+  return { completed, head, subscriptions: subs };
+}
+
 async function waitForDrain(
   pool: pg.Pool,
   client: Client,
   subscriptions: Array<{ stream: string; name: string }>,
   timeoutMs: number,
-): Promise<void> {
+): Promise<boolean> {
   // Drain = $all head stable for two consecutive ticks AND every
   // subscription's last_seen >= head. The PM creates new events
   // while processing triggers, so head keeps growing until the PM
@@ -170,12 +225,13 @@ async function waitForDrain(
         // No subscription row yet; treat as caught up (nothing to do).
       }
     }
-    if (stableTicks >= 2 && allCaught) return;
+    if (stableTicks >= 2 && allCaught) return true;
     await new Promise((r) => setTimeout(r, 250));
   }
   console.warn(
-    `[soak] drain timeout after ${timeoutMs}ms; running final checks anyway`,
+    `[soak] drain timeout after ${timeoutMs}ms; quiescence-dependent checks will be reported as INCONCLUSIVE`,
   );
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +275,8 @@ async function main(): Promise<number> {
     };
 
     const forwarderName = "pm-forwarder";
-    const pmDef = forwarder(forwarderName);
+    const pmCounters = newForwarderCounters();
+    const pmDef = forwarder(forwarderName, pmCounters);
 
     // Subscription registry for invariant checks.
     const subscriptions = [
@@ -342,7 +399,18 @@ async function main(): Promise<number> {
 
     // Drain.
     console.log("[soak] draining");
-    await waitForDrain(pool, client, subscriptions, 60_000);
+    const drainCompleted = await waitForDrain(
+      pool,
+      client,
+      subscriptions,
+      cli.drainTimeoutSec * 1000,
+    );
+    const drainState = await snapshotDrainState(
+      pool,
+      client,
+      subscriptions,
+      drainCompleted,
+    );
 
     // Take a final sample so monotonicity check sees the steady-state value.
     await sampleOnce(checkCtx, samplerState);
@@ -357,6 +425,7 @@ async function main(): Promise<number> {
       checkCtx,
       samplerState,
       balanceProj.balances,
+      { quiesced: drainCompleted },
     );
 
     // -------------------------------------------------------------------
@@ -383,11 +452,54 @@ async function main(): Promise<number> {
       `events/sec ($all):          ${(Number(report.facts.allHead) / elapsedSec).toFixed(1)}`,
     );
 
+    // PM-FORWARD diagnostic: localises any forwarded-vs-triggered
+    // discrepancy to a single SDK code path. See domain.ts for the
+    // counter semantics; ideal steady-state has every column >= the
+    // one above it (redeliveries can inflate route/handle counts).
+    const routeTriggered = pmCounters.routeCalls.get("Triggered") ?? 0;
+    console.log("");
+    console.log("PM-FORWARD diagnostic:");
+    console.log(`  triggers_total          ${report.facts.triggersTotal}`);
+    console.log(`  route(Triggered) calls  ${routeTriggered}`);
+    console.log(`  handle calls            ${pmCounters.handleCalls}`);
+    console.log(`  handle returns          ${pmCounters.handleReturns}`);
+    console.log(`  dispatched (causation)  ${report.facts.dispatchedViaCausation}`);
+    console.log(`  forwarded (snapshots)   ${report.facts.forwardedTotal}`);
+
+    // Drain state: visible regardless of whether drain completed.
+    // Lag > 0 at end-of-run means a subscription was still working
+    // through its backlog; quiescence-dependent checks (PM-FORWARD-
+    // TOTAL, REFOLD-MATCH) only hold when every lag is 0.
+    console.log("");
+    console.log(
+      `drain:                      ${drainState.completed ? "completed" : "INCOMPLETE (timeout)"}`,
+    );
+    for (const s of drainState.subscriptions) {
+      console.log(
+        `  ${s.stream === "$all" ? "$all" : s.stream.slice(0, 8)}/${s.name.padEnd(14)} lastSeen=${s.lastSeen} head=${s.head} lag=${s.lag}`,
+      );
+    }
+
+    if (report.inconclusive.length > 0) {
+      console.log("");
+      console.log(`INCONCLUSIVE (${report.inconclusive.length}) — drain did not complete; these only hold at quiescence:`);
+      for (const v of report.inconclusive) {
+        console.log(`  [${v.code}] ${v.message}`);
+      }
+    }
+
     if (report.violations.length === 0) {
       console.log("");
-      console.log("OK — no invariant violations observed.");
+      if (drainState.completed) {
+        console.log("OK — no invariant violations observed.");
+      } else {
+        console.log(
+          "INCOMPLETE — no invariant violations observed, but drain timed out. " +
+            "Re-run with --drain-timeout-sec set higher, or reduce workload.",
+        );
+      }
       console.log("===================================================================");
-      return 0;
+      return drainState.completed ? 0 : 0;
     }
 
     console.log("");

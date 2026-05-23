@@ -56,6 +56,7 @@ finish well inside a minute on a developer laptop.
 | `--poll-interval-ms`       | `50`    | Worker idle-poll interval.                                                |
 | `--think-time-ms`          | `20`    | Upper bound on workload task think-time between iterations.               |
 | `--sample-interval-ms`     | `100`   | Continuous-sampler tick.                                                  |
+| `--drain-timeout-sec`      | `300`   | Max seconds to wait for full drain after workload stops. See below.       |
 | `--respawn-every-ms`       | `2000`  | Force-bounce a random worker on this cadence. `0` disables.               |
 | `--steal-every-ms`         | `3000`  | Backdate a random subscription's lease. `0` disables.                     |
 | `--any-version-fraction`   | `0.2`   | Probability a dispatcher writes via `expected.any` instead of OCC.        |
@@ -85,6 +86,62 @@ Mechanisms composed:
   active lease theft.
 - PM dispatch over a separate connection pool (D-0011 / D-0012).
 - Process death + restart on every slot type.
+
+## Drain and quiescence
+
+After the active workload finishes, the harness **drains**: it waits
+for `$all` head to stop growing and every subscription's `last_seen`
+to reach head. Drain typically takes much longer than the active
+phase because the PM acks every `Added` event on `$all` individually
+(ML-0005); a 60s active run can easily need several minutes to
+drain.
+
+Two invariants — **PM-FORWARD-TOTAL** and **REFOLD-MATCH** — only hold
+at quiescence. If `--drain-timeout-sec` is hit before drain completes,
+the harness reports those as **INCONCLUSIVE** rather than
+`VIOLATIONS`. The gaplessness / monotonicity / lease-uniqueness
+checks are valid in either case.
+
+A run that prints `drain: completed` and `lag=0` on every
+subscription is a clean run. A run that prints `drain: INCOMPLETE
+(timeout)` with non-zero lag should be re-run with a larger
+`--drain-timeout-sec` or a smaller workload; the diagnostic output
+(below) makes the lag visible so it's clear when this is happening.
+
+## PM-FORWARD diagnostic
+
+Every report prints a five-line counter block that pins any
+`forwarded ≠ triggered` discrepancy to a single SDK code path. The
+counters are maintained by the harness's route and handle hooks (in
+`domain.ts`) plus one final SQL query, and cost ~zero stdout noise.
+
+```
+PM-FORWARD diagnostic:
+  triggers_total          7629
+  route(Triggered) calls  7632
+  handle calls            7632
+  handle returns          7632
+  dispatched (causation)  7632
+  forwarded (snapshots)   7629
+```
+
+Reading the block top-to-bottom:
+
+| Step | What it means |
+| --- | --- |
+| `triggers_total` | `count(*) WHERE event_type='Triggered'` — the ground truth. |
+| `route(Triggered) calls` | Times the SDK invoked our route function. Should be `≥ triggers_total`; the excess is redeliveries. |
+| `handle calls` | Times handle was entered. A gap below route calls means events routed but aborted before handle. |
+| `handle returns` | Times handle returned normally (not threw / not aborted mid-body). Synchronous handle: should equal handle calls. |
+| `dispatched (causation)` | `count(Added WHERE causation_id IN Triggered.event_id)` — PM dispatches that committed to an aggregate stream. |
+| `forwarded (snapshots)` | `sum(snapshot.data.forwarded)` across all Forwarder instances. Should equal `triggers_total` modulo redelivery slop. |
+
+At clean quiescence the bottom row equals `triggers_total`. The
+intermediate rows can exceed it by a few events under lease theft
+(at-least-once redelivery). A gap *between* rows pinpoints the bug:
+route < triggers means the SDK isn't invoking the route fn; handle
+< route means SDK loses events after routing; dispatched < handle
+means `runCommand` is reporting success without committing; etc.
 
 ## Invariants checked
 
