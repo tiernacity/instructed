@@ -142,41 +142,9 @@ cases:
 
 ## ML-0005 — Coalesce `advance_subscription` for runs of ignored events
 
-A PM (or any worker, but PMs feel it most because they're
-typically subscribed to `$all`) currently ack's every event in
-a fetched batch with its own `advance_subscription` round-trip:
-the routed ones inside the persist-and-ack tx, the ignored ones
-as standalone calls. A PM that routes 1-in-100 event types on a
-busy `$all` pays 99 ignored-event round-trips per useful one.
-
-The optimisation: walk the batch in order and accumulate a
-"pending ignored run". On hitting a routed event (or the end
-of the batch), flush the pending run as a single
-`advance_subscription(last_ignored.event_number)`, then process
-the routed event normally. Runs of N ignored events become one
-round-trip instead of N.
-
-**Why deferred:**
-
-- v1 is single-active-worker per subscription with modest
-  batch sizes; the constant factor is not currently a problem.
-- The optimisation is purely SDK-side and additive; no SQL
-  contract change is needed.
-- We want to measure under the soak harness (TODO #3b) before
-  optimising blindly.
-
-**Forward-compat constraints on v1:**
-
-- The semantics are identical to the per-event acks: cursor
-  monotone, no state change for ignored events, redelivery on
-  crash mid-run is absorbed by the route function returning
-  "ignore" again. So no v1 invariant or SQL change is required
-  to preserve compatibility.
-- The optimisation belongs in the SDK's worker loop, not in
-  the SQL surface. `advance_subscription` already accepts an
-  arbitrary `position` so the underlying primitive is in
-  place.
-
-**Where it lives:** `sdks/typescript/src/process-manager.ts`
-(and `subscription.ts` if projections want the same
-treatment for SDK-side selectors that skip events).
+**Promoted to [TODO #10](../TODO.md).** The soak harness measured
+~3x drain-time overhead from per-event acks; that promoted this
+from "theoretical optimisation" to an active task. See the TODO
+entry for the implementation plan, edge cases, and acceptance
+baseline. This stub stays so existing inbound references resolve;
+delete once #10 ships.

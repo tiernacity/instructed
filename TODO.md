@@ -461,6 +461,230 @@ example language in every code snippet.
 
 ---
 
+## 10. PM ignored-event ack coalescing (ex-ML-0005)
+
+**Why this exists.** The soak harness (TODO #3b) measured PM drain
+throughput at ~140 events/sec sustained against a local docker
+Postgres. Profiling the run pinned the bottleneck at the
+`advance_subscription` round-trip cost: the PM acks **every**
+event on its subscription individually, both the routed ones
+(inside the persist-and-ack tx) and the ignored ones (a
+standalone `ackOnly` round-trip each).
+
+For a PM subscribed to `$all` on a busy store this is brutal. The
+soak's reported workload — 7629 routed `Triggered` events plus
+~22000 ignored `Added` events from concurrent dispatchers —
+produced ~30000 advance round-trips in the drain phase, which is
+why the harness needs ~216s of drain after a 60s active workload.
+The projection code path already coalesces (one
+`advance_subscription` per batch); only the PM is per-event.
+
+Promoted from `docs/maybe-later.md` ML-0005 with the soak
+measurement as the trigger.
+
+### Observation that makes the change cheap
+
+A routed event's persist-and-ack tx already advances the cursor
+to that event's position. That advance **implicitly covers every
+ignored event at a smaller position** because
+`advance_subscription` is monotone (`last_seen = greatest(last_seen,
+p_up_to_position)`). So the optimisation is not "batch ignored
+acks together" — it's **"don't ack ignored events at all when a
+routed event follows them in the same batch; the routed event's
+tx covers them for free"**. The only remaining round-trip is one
+standalone `advance_subscription` per batch for the tail of
+ignored events that have no routed event following them in this
+batch.
+
+### Worked example
+
+Batch of 5 events on `$all`, position numbers in brackets:
+
+```
+  E[100]  Added      (ignored by PM)
+  E[101]  Added      (ignored by PM)
+  E[102]  Triggered  (routed)
+  E[103]  Added      (ignored)
+  E[104]  Triggered  (routed)
+```
+
+Today (5 round-trips):
+
+```
+  advance_subscription(100)                       ← ackOnly
+  advance_subscription(101)                       ← ackOnly
+  BEGIN; record_snapshot(sv=102);
+         advance_subscription(102); COMMIT        ← routed tx
+  advance_subscription(103)                       ← ackOnly
+  BEGIN; record_snapshot(sv=104);
+         advance_subscription(104); COMMIT        ← routed tx
+```
+
+After ML-0005 (2 round-trips):
+
+```
+  (E[100], E[101]: tracked as pendingIgnoredTo=101, no round-trip)
+  BEGIN; record_snapshot(sv=102);
+         advance_subscription(102); COMMIT        ← covers 100..102
+  (E[103]: pendingIgnoredTo=103, no round-trip)
+  BEGIN; record_snapshot(sv=104);
+         advance_subscription(104); COMMIT        ← covers 103..104
+```
+
+Trailing-ignored case: same batch, but E[104] is also ignored.
+After routing E[100..103] as above (1 routed tx covering 100..102),
+E[103] and E[104] are both ignored and at the end of the batch —
+flush them with one `advance_subscription(104)` after the loop.
+Total 2 round-trips for 5 events instead of 5.
+
+### Implementation plan
+
+All changes are in `sdks/typescript/src/process-manager.ts`. No
+SQL contract change, no invariant change.
+
+1. **Split `processEvent`.** The current function does both route
+   resolution and the routed work. Extract the
+   handle/dispatch/persist-and-ack body into
+   `processRoutedEvent(event, routed): Promise<boolean>` so the
+   poll loop can call it directly when a routed event is found.
+2. **Replace the per-event loop with a coalescing walker.** In
+   the existing poll loop where today we do
+   `for (const event of batch) { await processEvent(event); }`,
+   carry a `pendingIgnoredTo: bigint | null` across iterations:
+
+   ```ts
+   let pendingIgnoredTo: bigint | null = null;
+   const positionOf = (e: RecordedEvent<E>) =>
+     stream === "$all" ? e.event_number : e.stream_version;
+
+   for (const event of batch) {
+     if (closing || aborted) break;
+     const routeFn = def.routes[event.event_type];
+     const routed = routeFn
+       ? normaliseRoute(routeFn(event))
+       : { kind: "ignore" as const };
+     if (routed.kind === "ignore") {
+       pendingIgnoredTo = positionOf(event);
+       continue;
+     }
+     const ok = await processRoutedEvent(event, routed);
+     if (!ok) break;
+     pendingIgnoredTo = null; // covered by routed tx's advance
+   }
+
+   // End-of-batch trailing ignored flush.
+   if (pendingIgnoredTo !== null && !aborted) {
+     try {
+       await client.advanceSubscription(
+         stream, def.name, workerId, pendingIgnoredTo,
+       );
+     } catch (err) {
+       if (isLeaseLoss(err)) markAborted(err as Error);
+       else safeOnError(err as Error);
+     }
+   }
+   ```
+
+3. **Delete `ackOnly`.** After step 2 it has no remaining caller.
+   (Keep the import-graph clean rather than leave dead code.)
+4. **Projections are unchanged.** `subscription.ts` already does
+   one advance per batch at the end of the loop.
+
+### Edge cases to verify in tests
+
+- **Crash mid-batch with `pendingIgnoredTo` not yet flushed.** The
+  cursor stays at the last-flushed position. On redelivery the
+  ignored events re-arrive, the route fn returns ignore again,
+  the pending pointer accumulates again, flush on the new
+  worker's batch boundary. No data loss, no double-handle.
+- **Lease loss during the end-of-batch flush.** `advance` raises
+  IS022 → `markAborted` → next iteration's `if (closing ||
+  aborted) break` exits the poll loop. Same semantics as today's
+  ackOnly lease-loss path.
+- **Pure-ignored batch (no routed event).** Walker accumulates
+  `pendingIgnoredTo` through the whole batch; one flush at end.
+  This is the case where the optimisation pays the most.
+- **Routed-then-ignored at end of batch.** After the routed tx,
+  `pendingIgnoredTo` is null; the trailing ignored events set
+  it; end-of-batch flush issues one advance. One routed tx + one
+  flush.
+- **Ignored-then-routed (no trailing ignored).** Walker
+  accumulates `pendingIgnoredTo`, then the routed event's tx
+  covers it; reset to null; end of batch; no flush. One routed
+  tx, zero extra calls.
+
+### Invariants that must still hold
+
+- **INV-SUB-P-008** (`last_seen` monotone): unchanged.
+  `advance_subscription` is monotone and the walker only ever
+  moves the cursor forward.
+- **PM-020** (snapshot `source_version` equals the event_number
+  of the last routed event): unchanged. The routed event's tx
+  still sets `source_version = routed_event.event_number`.
+- **PM-024** (`source_version <= last_seen`): unchanged but the
+  inequality becomes strict more often. After ML-0005, once a PM
+  has seen any ignored event after its last routed event,
+  `last_seen > source_version`. This is already permitted by
+  PM-024 ("<=", not "=="); the existing `concurrent.test.ts` PM
+  scenario uses `assert.ok(snap.sourceVersion <= pmPos.lastSeen)`
+  which still holds.
+- **At-least-once delivery**: unchanged. The contract was always
+  "redelivery is acceptable"; ML-0005 makes ignored-event
+  redelivery slightly more likely (a crash between the last
+  routed event and the end-of-batch flush will redeliver the
+  intervening ignored run) but the route fn returning ignore is
+  idempotent by construction.
+
+### Test additions
+
+All in `sdks/typescript/test/subscription.test.ts` or a new
+`sdks/typescript/test/pm-ack-coalescing.test.ts`:
+
+- **All-ignored batch advances cursor to last event.** Append N
+  events of a type the PM doesn't route. Start the PM. Assert
+  `last_seen` reaches event N after one batch, with exactly **one**
+  `advance_subscription` call (instrument the client or count via
+  `pg_stat_statements` / a wrapped Client).
+- **Routed event covers prior ignored.** Append `[ignored, ignored,
+  routed, ignored, ignored, routed]`. Assert exactly two
+  `advance_subscription` calls happen (both inside routed txs); no
+  standalone advance.
+- **Trailing ignored flush.** Append `[routed, ignored, ignored]`.
+  Assert one routed tx + one standalone advance. Assert
+  `last_seen` reaches the trailing ignored.
+- **Crash between routed tx and trailing flush.** Use
+  `subscription.test.ts`'s heartbeat-lease-loss fixture: hold the
+  PM right after the routed tx commits and before the flush; steal
+  the lease; assert the trailing ignored events get redelivered and
+  flushed by the new worker, with `last_seen` ultimately reaching
+  the head.
+
+### Acceptance check
+
+The soak harness already measures this. After ML-0005:
+
+- A 60s active run with the default workload should drain in
+  **≈70s** (down from ~216s). That's the soak's pre/post baseline.
+- The PM-FORWARD diagnostic block's `dispatched (causation)`
+  and `forwarded (snapshots)` rows are unchanged (correctness is
+  invariant); only the *time to reach* those numbers changes.
+- Re-running the full SDK + conformance suites passes unchanged
+  (no contract surface changes).
+
+### Once shipped
+
+- Delete the ML-0005 entry from `docs/maybe-later.md`.
+- Add a one-line note in `docs/architecture.md` under the PM
+  section: "ignored events on a PM's subscription are not
+  individually acked; the next routed event's persist-and-ack tx
+  covers them implicitly, and a single trailing
+  `advance_subscription` per batch covers any tail of unrouted
+  events."
+- Update `tests/soak/README.md` *Performance baselining* section
+  with the new expected drain time.
+
+---
+
 ## Done items (delete on confirmation)
 
 *(none yet — log resolutions here as TODO items close)*
