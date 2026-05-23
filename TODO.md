@@ -220,6 +220,177 @@ whatever doc replaces `guarantees.md` that says "this is your problem".
 
 ---
 
+## 6. Additional language SDKs
+
+**Why this exists.** The TypeScript SDK is the reference. The
+library's value is multiplied by SDKs in each language an
+application might be written in. The conformance harness lives
+SQL-side, so each new SDK inherits adapter-line conformance for
+free by pointing at a conformant Postgres; the work is the SDK
+shape itself.
+
+**Initial language list (rough priority order):**
+
+- **Python** — ubiquitous, common pairing with Postgres-native
+  services, idiomatic to write async or sync depending on the
+  caller.
+- **Go** — popular for service workloads; `pgx` is the obvious
+  driver; goroutines map well to the polling worker loop.
+- **Elixir** — the natural home of CQRS/ES (Commanded users
+  might bridge here); `postgrex` is the driver; the worker loop
+  is a `GenServer`-shaped fit.
+- **Rust** — candidate if there's demand from systems-level
+  workloads.
+
+**Depends on.** TODO #2 (SDK core vs. conveniences split). Each
+language SDK should implement the **core** in a shape idiomatic
+to its ecosystem; conveniences are optional and may differ per
+language. The core surface (procedure wrappers + aggregate loop
++ subscription worker + snapshot primitives + consistency-wait
+read) is the porting checklist.
+
+**Output per language:** a package in `sdks/<lang>/` with its
+own README documenting the core/convenience layout, tests
+running against the docker-compose Postgres, and at least one
+worked example under `examples/<lang>/`.
+
+---
+
+## 7. `instructedctl` — administrative CLI
+
+**Why this exists.** Operators need to inspect and manage an
+`instructed` deployment without writing ad-hoc SQL. Modelled on
+[`absurdctl`](https://github.com/earendil-works/absurd) which
+provides the analogous surface for absurd.
+
+**Likely functionality (first cut):**
+
+- **Schema lifecycle:** install / migrate / status. Reports the
+  installed schema version and any pending migrations under
+  `sql/migrations/`.
+- **Stream inspection:** list streams, show stream head /
+  version, read a range of events from a stream (or from `$all`)
+  in a human-readable form.
+- **Subscription inspection:** list subscriptions with their
+  cursors, claimed-by, lease-expires-at; show how far behind a
+  subscription is relative to `$all`'s head.
+- **Subscription lifecycle:** `release` a stuck claim (where the
+  worker is known dead but lease hasn't expired); `delete` a
+  subscription by name; `claim` for diagnostic purposes.
+- **Snapshot inspection:** show a snapshot by `source_uuid`.
+- **Health:** a quick "is the store sound" check — `$all`
+  contiguous, no orphaned `stream_events` rows, no expired-lease
+  zombies.
+
+**Likely shape:** a small Go or Rust binary so it can be
+distributed as a single static executable. Connects directly to
+Postgres; does not depend on any application SDK.
+
+**Output.** A `tools/instructedctl/` directory with the source,
+build instructions, and a short user guide. The tool should be
+able to do everything a production operator currently does by
+opening psql.
+
+---
+
+## 8. Examples — reorganise by language and cross-language
+
+**Why this exists.** The current `examples/bank-account/` is
+TypeScript-only and lives flat at the top level. With more SDKs
+coming (TODO #6), we need an organising scheme.
+
+**What to do:**
+
+- **Re-shape to `examples/<language>/<example-name>/`.** Move
+  `examples/bank-account/` to `examples/typescript/bank-account/`.
+  Add equivalents for each new SDK as they land.
+- **Add cross-language / mixed-language examples** under
+  `examples/mixed/<scenario>/` for cases where two SDKs cooperate
+  through the same Postgres (typical workload: a TypeScript web
+  service dispatches commands; a Python worker runs a heavy
+  projection; a Go scheduler runs the process managers).
+- **Drop relative imports.** Currently `examples/bank-account/`
+  imports from `../../sdks/typescript/src/index.ts`. Move every
+  example to importing the SDK as a package
+  (`import { Instructed } from "instructed-sdk"`, or the
+  language-equivalent). This makes examples real consumer-style
+  references and removes the implicit tie to repo layout.
+- **Lean on docker where needed.** Mixed-language examples and
+  any example that needs multiple long-running processes should
+  ship a `docker-compose.yaml` of their own (or extend the
+  repo-root one), so running an example is one `docker compose
+  up`. The repo-root `docker-compose.yaml` stays as the test
+  database for the SDK and conformance suites.
+
+**Output.** Reorganised `examples/` tree, a top-level
+`examples/README.md` that indexes by scenario, and every example
+runnable with a documented one-liner. Each SDK's tests that
+currently import from `examples/` (e.g. `bank-account.test.ts`)
+move to using the SDK's own test fixtures and stop crossing the
+example boundary.
+
+**Depends on.** Publishing the SDK as a package (or at least
+workspace-linking it under a stable name) so examples can
+import without relative paths.
+
+---
+
+## 9. Documentation — next pass
+
+**Why this exists.** The 2026-05-23 tidy collapsed work-in-
+progress framing and got the doc set down to a workable size,
+but a serious next pass is warranted on writing quality, depth,
+and worked content.
+
+**What to do:**
+
+- **More examples in the docs.** `concepts.md` introduces the
+  primitives but mostly in prose; `architecture.md` describes
+  mechanisms but rarely shows code. Add concrete code snippets
+  to every concept ("here's what an aggregate looks like";
+  "here's what an apply function returns when an event arrives";
+  "here's the worker loop in pseudocode and in TypeScript").
+  Aim for at least one code block per concept introduction.
+- **Writing quality pass.** Tighten the prose. Remove residual
+  designed-by-committee phrasing. Read each doc aloud and edit
+  for flow. Use shorter sentences where the technical content
+  allows. Consistent terminology ("event log" vs. "event store"
+  vs. "the store" — pick one per audience and stick to it).
+- **Definitions and glossary.** A `docs/glossary.md` (or a
+  glossary section in `concepts.md`) defining every term used
+  load-bearing in the docs: aggregate, command, event, stream,
+  `$all`, projection, process manager, subscription, cursor,
+  lease, snapshot, causation, correlation, OCC, dispatch.
+  Cross-link from first mention in every doc.
+- **Context and motivation.** Each doc currently starts "this is
+  X"; add a paragraph or two of "and why you'd care" up front.
+  `architecture.md` particularly would benefit from a "when you
+  would choose this design vs. a coordinator-based one" framing.
+- **Cleaner separation by audience.** The README points each
+  audience at the right docs, but the docs themselves still mix
+  audiences in places. `invariants.md` is for porters and the
+  conformance harness, but it's the densest doc and could lose a
+  casual reader who arrived from `concepts.md`. Consider
+  per-audience entry pages (a "start here" for each: app
+  developer, library evaluator, SDK porter) that thread the
+  reader through the right sequence of docs.
+- **End-to-end walkthrough.** A `docs/walkthrough.md` or
+  similar: build a small application from scratch, step by step,
+  exercising every concept. The bank-account example is good but
+  it's a finished artifact; a step-by-step has different value.
+
+**Output.** A docs revision that a first-time reader can use to
+go from "never heard of CQRS" to "I just shipped an aggregate"
+in a focused afternoon, plus a separate path from "I write Go,
+show me what to port" to "my Go SDK passes the conformance
+harness".
+
+**Depends on.** TODO #6 partially — once a second SDK exists,
+writing will need to stop using TypeScript as the default
+example language in every code snippet.
+
+---
+
 ## Done items (delete on confirmation)
 
 *(none yet — log resolutions here as TODO items close)*
