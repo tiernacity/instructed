@@ -389,9 +389,18 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
   `"<pm_name>-<process_uuid>"` with `source_version =
   triggering_event.event_number`.
 - **PM-022** — On `stop`, the PM's snapshot MUST be deleted.
-- **PM-024** — The snapshot's `source_version` doubles as the
-  PM's `last_seen` marker, used to absorb redelivery on
-  restart.
+- **PM-024** — A PM tracks two positions, not one. The
+  subscription's `last_seen` is the cursor: it determines where
+  to resume reading on re-claim. The snapshot's `source_version`
+  is the state-version marker: it is the `event_number` of the
+  most recent *routed* event folded into state. Both advance
+  together in the ack tx when a routed event is processed. Only
+  `last_seen` advances when an ignored event is ack'd. So
+  `source_version <= last_seen` always, with equality iff the
+  most recent ack'd event was routed. On re-claim, redelivered
+  events with `event_number <= source_version` are already
+  folded into state and the SDK skips them before calling
+  `handle`.
 
 ### Strong consistency on dispatch (CON-\*)
 

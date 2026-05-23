@@ -123,11 +123,66 @@ from `tests/conformance/` which tests the *store*.
 
 ---
 
-## 3. Taxing concurrent smoke test
+## 3. Concurrent correctness + load/soak harness
 
-**Why this exists.** The conformance harness (`tests/conformance/`)
+**Why this exists.** Previous Commanded ports passed point-by-point
+conformance and then fell over the moment real concurrent traffic
+showed up. The fear is a bug class that only surfaces when several
+mechanisms race against each other — aggregate OCC retries happening
+at the same time as projector lease churn happening at the same time
+as PM dispatch. The existing conformance and SDK suites *do* cover
+concurrency, but each test exercises one verb at a time (two
+appenders race; two claims race; two writers race for an aggregate).
+Nothing currently runs the composed system.
+
+This splits into two pieces of work with different value:
+
+### 3a. Composed-concurrency correctness tests — **DONE**
+
+Landed in `sdks/typescript/test/concurrent.test.ts`. Three
+deterministic-ish scenarios that wire several mechanisms together
+and assert end-to-end invariants, all running in well under a
+second:
+
+- **Aggregate OCC × projector.** N=12 concurrent dispatchers force
+  OCC retries on one aggregate; a projector on `$all` follows.
+  Asserts the projector's folded value equals the re-folded
+  aggregate value, stream is gapless 1..N, projector saw monotone
+  `event_number`.
+- **Two projectors, one subscription.** Two workers compete for
+  the same `(stream, name)`; short leases; mid-flight lease theft
+  via direct SQL. Asserts `last_seen` monotone (sampled
+  continuously), every event ack'd at least once across the union,
+  no two handlers ran the same `event_id` concurrently.
+- **PM × appender × projector.** PM dispatches `add` commands to
+  aggregate B while a concurrent appender fires `Triggered` events;
+  projector on `$all`. Asserts B's re-folded value equals sum of
+  triggers, projector saw `2N` events monotone, **PM-020** holds
+  (`snapshot.source_version` == event_number of last Triggered),
+  **PM-024** holds (`source_version <= last_seen`).
+
+Writing these caught a real wording bug in the PM-024 invariant
+("doubles as last_seen" overstated the relationship) — fix landed
+in the same commit. See item #9 for the docs follow-up.
+- **Crash-mid-handler.** Already partially covered by
+  `subscription.test.ts` "heartbeat-lease-loss"; the composed
+  version is harder to add value to and may be subsumed by the two
+  scenarios above.
+
+Lives in `sdks/typescript/test/concurrent.test.ts` (or split if it
+grows). Uses the existing fixtures and docker-compose Postgres.
+
+### 3b. Load / soak harness (lower priority, performance-focused)
+
+The original sketch of TODO #3 was really this: a longer-running
+workload generator + worker farm + failure injection that runs
+continuous invariant checks. Reframe its purpose as **performance
+gauge + invariant fuzzer over time**, not the primary correctness
+story. Runs nightly / on demand, not per-PR.
+
+The SQL contract (`tests/conformance/`)
 tests *correctness*: two appenders race, one wins, one gets `IS001`.
-It doesn't test correctness *at scale*. We want a smoke test that
+It doesn't test correctness *at scale*. We want a soak harness that
 runs N dispatchers, M projectors, K process managers, optional
 crashing nodes, against a representative workload, and asserts no
 invariant violations occur (no gaps in `event_number`, no out-of-order
@@ -159,12 +214,33 @@ holding the same lease at the same time).
     subscription's `last_seen` (PM-024).
   - No event was permanently undelivered to a healthy projector.
 
-**Output.** A runnable smoke harness that surfaces any failed/missing
-invariants under load, plus an interpretation guide for each invariant
-check.
+**Output (3b only — 3a is done).**
 
-**Depends on.** Doc tidy ideally settles the wording on each invariant
-first so the smoke test's checks reference stable IDs.
+- A `tests/soak/` (or `tests/load/`) harness with its own README
+  and an interpretation guide for each invariant check.
+- Should reuse the SDK test fixtures' Postgres setup and the
+  invariant IDs from `docs/invariants.md` so a soak-detected
+  failure can be cross-referenced to a contract clause.
+- Performance numbers (commands/sec, projector lag at
+  steady-state, lease churn rate) reported alongside the
+  invariant report — the soak harness doubles as a perf gauge.
+
+**Starting points for a new session on 3b.**
+
+- The 3a composed tests in `sdks/typescript/test/concurrent.test.ts`
+  are the closest existing analogue; the soak harness scales them
+  out, adds time, and adds failure injection.
+- ML-0005 (just added to `maybe-later.md`) notes that PMs currently
+  ack each ignored event individually. The soak harness should
+  measure ignored-event ack overhead so we know whether ML-0005 is
+  worth implementing or just theoretical.
+- The composed-test scenarios that bit me on first run (OCC
+  retry-budget exhaustion at N=12, PM-024 wording) are the kind of
+  thing the soak harness should surface at higher N. Worth
+  parametrising N as a CLI flag.
+
+**Depends on.** 3b benefits from the doc tidy settling invariant
+wording first so the soak checks reference stable IDs.
 
 ---
 
@@ -336,6 +412,28 @@ import without relative paths.
 ---
 
 ## 9. Documentation — next pass
+
+**Outstanding follow-ups from the 2026-05-23 concurrent-tests work:**
+
+- PM-024 was reworded in `invariants.md`, `architecture.md`, and
+  `sql-contract.md` during the 3a work to fix the "doubles as
+  last_seen" misstatement. A short *worked example* in
+  `architecture.md` or `concepts.md` showing the two markers
+  (`last_seen`, `source_version`) diverging across a couple of
+  ignored events would help the reader internalise the new
+  wording. Currently the new wording is correct but abstract.
+- `architecture.md` now mentions that a PM's subscription is
+  shared across all its process instances and a poison event
+  stalls the whole PM type. This is a one-paragraph callout; if
+  it gets reader feedback as surprising, promote it to a sized
+  section with a recovery-pattern recipe ("how to skip a poison
+  event in practice").
+- ML-0005 (coalesce ignored-event acks) was added to
+  `maybe-later.md`. If the soak harness (3b) shows it matters,
+  promote it from ML-0005 to an implementation task.
+
+---
+
 
 **Why this exists.** The 2026-05-23 tidy collapsed work-in-
 progress framing and got the doc set down to a workable size,

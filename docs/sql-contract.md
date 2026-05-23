@@ -212,9 +212,11 @@ not exercise that capability (see [ML-0004](maybe-later.md#ml-0004)).
 Same shape as the subscription worker, but the SDK runs an
 additional persist-and-ack pair (snapshot + cursor advance) in
 the ack tx after the user's `handle` returns. The PM snapshot is
-SDK-owned bookkeeping (PM-024 absorption depends on it staying
-consistent with `last_seen`), so it stays inside the SDK's ack tx
-alongside `advance_subscription`. Dispatch happens in a separate
+SDK-owned bookkeeping (PM-024 absorption depends on its
+`source_version` advancing in lock-step with `last_seen` on
+every routed-event ack), so it stays inside the SDK's ack tx
+alongside `advance_subscription`. Ignored events advance only
+the cursor, leaving `source_version` unchanged. Dispatch happens in a separate
 session via `append_to_stream` per the lock-set disjointness above.
 
 ```text

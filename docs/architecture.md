@@ -147,11 +147,17 @@ redelivery. This is at-least-once delivery; handlers are
 idempotent.
 
 Process-manager workers run an extra step in the ack tx:
-they upsert the PM's state snapshot keyed by the instance id
-in the same short transaction that advances the cursor. The
-snapshot's `source_version` always equals the subscription's
-`last_seen` — that's how redelivery is absorbed when a PM
-restarts and re-reads its state.
+for each *routed* event they upsert the PM's state snapshot,
+keyed by the instance id, in the same short transaction that
+advances the cursor. The snapshot's `source_version` is set to
+that event's `event_number`. For *ignored* events the ack tx
+only advances the cursor — no snapshot write. So the two
+markers diverge by exactly the number of ignored events since
+the last routed event: `source_version <= last_seen` always.
+On restart the SDK reads from `last_seen + 1`; redelivered
+events with `event_number <= source_version` are already folded
+into state and the SDK skips them before calling `handle`
+(PM-024).
 
 PMs dispatch commands as part of handling an event. Dispatch
 opens its own connection — the persist-and-ack transaction and
@@ -159,6 +165,18 @@ the dispatch transaction run on different sessions, so their
 lock sets stay disjoint. (The dispatch path locks `streams` and
 the events tables; the persist-and-ack path locks
 `subscriptions` and `snapshots`.)
+
+One subtle consequence of the worker shape: a PM's subscription
+is shared across *all* of that PM's process instances. There is
+one cursor on `$all` (or on the chosen stream) regardless of
+how many `process_uuid`s the PM is juggling. If instance A's
+`handle` is a poison pill that keeps throwing, the
+handler-throws backoff (§11.5) retries that event forever and
+instance B can make no progress — even though it's a different
+process. This is by design (the cursor is what makes
+at-least-once delivery composable with snapshot upsert in one
+tx) and matches Commanded, but it surprises people. A poison
+event stalls the PM type, not just the failing instance.
 
 ## How leases work
 
