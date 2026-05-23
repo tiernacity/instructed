@@ -209,23 +209,21 @@ export function startProcessManager<S, E = unknown>(
   }
 
   /**
-   * Process a single event. Returns true on success (cursor advanced
-   * in the ack tx), false on lease loss / shutdown (caller breaks out
-   * of the batch). Throws nothing — handler errors are converted to
-   * exponential-backoff retries (§11.5).
+   * Process one routed event. Returns true on success (cursor advanced
+   * in the persist-and-ack tx), false on lease loss / shutdown (caller
+   * breaks out of the batch). Throws nothing — handler errors are
+   * converted to exponential-backoff retries (§11.5).
+   *
+   * Note: callers must filter `{kind: 'ignore'}` upstream. Ignored
+   * events are *not* individually acked; the next routed event's tx
+   * advances the cursor past them implicitly (TODO #10), and a single
+   * trailing `advance_subscription` per batch covers any unrouted
+   * tail.
    */
-  async function processEvent(event: RecordedEvent<E>): Promise<boolean> {
-    // ---- route ----
-    const routeFn = def.routes[event.event_type];
-    if (!routeFn) {
-      // Not interested: advance the cursor and move on (no snapshot
-      // change). The ack still runs in its short transaction so the
-      // lock-acquisition pattern is uniform.
-      return ackOnly(event);
-    }
-    const routed = normaliseRoute(routeFn(event));
-    if (routed.kind === "ignore") return ackOnly(event);
-
+  async function processRoutedEvent(
+    event: RecordedEvent<E>,
+    routed: Exclude<RouteResult, { kind: "ignore" }>,
+  ): Promise<boolean> {
     const sourceUuid = `${def.name}-${routed.processId}`;
 
     // ---- handle (with backoff on throw) ----
@@ -346,25 +344,8 @@ export function startProcessManager<S, E = unknown>(
     return false;
   }
 
-  /** Advance the cursor past an event we have no interest in. */
-  async function ackOnly(event: RecordedEvent<E>): Promise<boolean> {
-    try {
-      await client.advanceSubscription(
-        stream,
-        def.name,
-        workerId,
-        stream === "$all" ? event.event_number : event.stream_version,
-      );
-      return true;
-    } catch (err) {
-      if (isLeaseLoss(err)) {
-        markAborted(err as Error);
-        return false;
-      }
-      safeOnError(err as Error);
-      return false;
-    }
-  }
+  const positionOf = (e: RecordedEvent<E>): bigint =>
+    stream === "$all" ? e.event_number : e.stream_version;
 
   async function backoff(idx: number): Promise<void> {
     const delay =
@@ -435,10 +416,45 @@ export function startProcessManager<S, E = unknown>(
             continue;
           }
 
+          // Coalescing walker (TODO #10 / ex-ML-0005). Ignored events
+          // are not individually acked; the next routed event's
+          // persist-and-ack tx covers them implicitly because
+          // `advance_subscription` is monotone. Any tail of ignored
+          // events at the end of the batch is flushed with one
+          // `advance_subscription` after the loop.
+          let pendingIgnoredTo: bigint | null = null;
           for (const event of batch) {
             if (closing || aborted) break;
-            const ok = await processEvent(event);
+            const routeFn = def.routes[event.event_type];
+            const routed = routeFn
+              ? normaliseRoute(routeFn(event))
+              : ({ kind: "ignore" } as const);
+            if (routed.kind === "ignore") {
+              pendingIgnoredTo = positionOf(event);
+              continue;
+            }
+            const ok = await processRoutedEvent(event, routed);
             if (!ok) break;
+            // The routed tx's advance covers any prior ignored run.
+            pendingIgnoredTo = null;
+          }
+
+          // End-of-batch trailing-ignored flush.
+          if (pendingIgnoredTo !== null && !closing && !aborted) {
+            try {
+              await client.advanceSubscription(
+                stream,
+                def.name,
+                workerId,
+                pendingIgnoredTo,
+              );
+            } catch (err) {
+              if (isLeaseLoss(err)) {
+                markAborted(err as Error);
+              } else {
+                safeOnError(err as Error);
+              }
+            }
           }
         }
       } finally {

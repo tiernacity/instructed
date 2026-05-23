@@ -15,9 +15,11 @@
  *
  * **Forwarder PM.** Subscribed to `$all`. Routes `Triggered{n,target}`
  * events to a per-target process instance; the handler dispatches
- * `add{n}` to the target account stream. Lets us measure ignored-
- * event ack overhead (ML-0005) — the PM acks every `Added` event it
- * doesn't route.
+ * `add{n}` to the target account stream. After TODO #10 (ex-ML-0005)
+ * the PM coalesces ignored-event acks: each routed event's
+ * persist-and-ack tx covers prior ignored events implicitly, and a
+ * trailing run of ignored events is flushed with one
+ * `advance_subscription` per batch.
  */
 
 import type {

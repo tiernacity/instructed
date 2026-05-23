@@ -91,10 +91,12 @@ Mechanisms composed:
 
 After the active workload finishes, the harness **drains**: it waits
 for `$all` head to stop growing and every subscription's `last_seen`
-to reach head. Drain typically takes much longer than the active
-phase because the PM acks every `Added` event on `$all` individually
-(ML-0005); a 60s active run can easily need several minutes to
-drain.
+to reach head. Drain time is dominated by PM throughput on a busy
+`$all`: a 60s active run with the default workload drains in roughly
+the same wall time as the active phase (down from ~3x before the
+ignored-event ack coalescing landed — see TODO #10 / ex-ML-0005). A
+larger workload or `--drain-timeout-sec` may still be needed if
+you crank `--trigger-appenders` and `--dispatchers` together.
 
 Two invariants — **PM-FORWARD-TOTAL** and **REFOLD-MATCH** — only hold
 at quiescence. If `--drain-timeout-sec` is hit before drain completes,
@@ -216,17 +218,23 @@ npm start -- --duration 60 --accounts 12 --dispatchers 8 \
 cost). Record `commands/sec (completed)` and `events/sec ($all)` per
 run; these are the gauge.
 
-To stress ignored-event ack overhead (relevant to ML-0005), bump the
-trigger appender count and watch PM throughput vs. trigger count:
+The PM used to ack every `Added` event it ignored; the coalescing
+optimisation (TODO #10 / ex-ML-0005) replaced that with one
+`advance_subscription` per batch tail of ignored events, with
+routed-event txs covering prior ignored runs implicitly. The
+ignored-event ack overhead is therefore bounded by batch boundary
+count rather than ignored event count. To stress PM throughput end
+to end, bump the trigger appender count and watch PM throughput vs.
+trigger count:
 
 ```sh
 npm start -- --duration 60 --trigger-appenders 6 --trigger-streams 8 \
              --dispatchers 12 --any-version-fraction 0.5
 ```
 
-The PM acks every `Added` event it ignores; if that overhead matters
-in practice, this configuration will surface it as PM lag relative
-to `$all` head.
+If PM lag relative to `$all` head grows under this load, the
+remaining cost is in the routed-event path (handle + dispatch +
+persist-and-ack tx), not in ignored-event acks.
 
 ## Known gaps
 

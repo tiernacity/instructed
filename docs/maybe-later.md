@@ -138,13 +138,3 @@ cases:
   lock-set disjointness; ML-0004 will not cover PMs in a first
   cut. Aggregates and projections only.
 
----
-
-## ML-0005 — Coalesce `advance_subscription` for runs of ignored events
-
-**Promoted to [TODO #10](../TODO.md).** The soak harness measured
-~3x drain-time overhead from per-event acks; that promoted this
-from "theoretical optimisation" to an active task. See the TODO
-entry for the implementation plan, edge cases, and acceptance
-baseline. This stub stays so existing inbound references resolve;
-delete once #10 ships.

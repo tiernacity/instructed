@@ -123,99 +123,6 @@ from `tests/conformance/` which tests the *store*.
 
 ---
 
-## 3. Concurrent correctness + load/soak harness
-
-**Why this exists.** Previous Commanded ports passed point-by-point
-conformance and then fell over the moment real concurrent traffic
-showed up. The fear is a bug class that only surfaces when several
-mechanisms race against each other — aggregate OCC retries happening
-at the same time as projector lease churn happening at the same time
-as PM dispatch. The existing conformance and SDK suites *do* cover
-concurrency, but each test exercises one verb at a time (two
-appenders race; two claims race; two writers race for an aggregate).
-Nothing currently runs the composed system.
-
-This splits into two pieces of work with different value:
-
-### 3a. Composed-concurrency correctness tests — **DONE**
-
-Landed in `sdks/typescript/test/concurrent.test.ts`. Three
-deterministic-ish scenarios that wire several mechanisms together
-and assert end-to-end invariants, all running in well under a
-second:
-
-- **Aggregate OCC × projector.** N=12 concurrent dispatchers force
-  OCC retries on one aggregate; a projector on `$all` follows.
-  Asserts the projector's folded value equals the re-folded
-  aggregate value, stream is gapless 1..N, projector saw monotone
-  `event_number`.
-- **Two projectors, one subscription.** Two workers compete for
-  the same `(stream, name)`; short leases; mid-flight lease theft
-  via direct SQL. Asserts `last_seen` monotone (sampled
-  continuously), every event ack'd at least once across the union,
-  no two handlers ran the same `event_id` concurrently.
-- **PM × appender × projector.** PM dispatches `add` commands to
-  aggregate B while a concurrent appender fires `Triggered` events;
-  projector on `$all`. Asserts B's re-folded value equals sum of
-  triggers, projector saw `2N` events monotone, **PM-020** holds
-  (`snapshot.source_version` == event_number of last Triggered),
-  **PM-024** holds (`source_version <= last_seen`).
-
-Writing these caught a real wording bug in the PM-024 invariant
-("doubles as last_seen" overstated the relationship) — fix landed
-in the same commit. See item #9 for the docs follow-up.
-- **Crash-mid-handler.** Already partially covered by
-  `subscription.test.ts` "heartbeat-lease-loss"; the composed
-  version is harder to add value to and may be subsumed by the two
-  scenarios above.
-
-Lives in `sdks/typescript/test/concurrent.test.ts` (or split if it
-grows). Uses the existing fixtures and docker-compose Postgres.
-
-### 3b. Load / soak harness — **DONE**
-
-Landed in `tests/soak/`. CLI-driven workload generator + worker farm
-+ failure injection + continuous-and-final invariant checks. See
-`tests/soak/README.md` for the interpretation guide. Exits 0 on no
-violations and 1 otherwise; performance facts (commands/sec, events/sec,
-respawn count, lease theft count, $all head) always print.
-
-What the harness exercises:
-
-- Counter aggregate × OCC retry under `--dispatchers` concurrent
-  writers, plus a `--any-version-fraction` knob mixing exact-version
-  and `:any_version` appends.
-- Multi-slot competition for one subscription with short leases
-  (default 3s) and periodic lease theft via direct SQL.
-- Forwarder PM on `$all` dispatching to the same accounts the
-  dispatchers write to, so PM acks against `Added` events become a
-  measurable share of the load (ML-0005 surfaces here as PM lag).
-- Worker respawn injection: a random slot is bounced every
-  `--respawn-every-ms`; a keep-alive supervisor re-creates it with a
-  250ms minimum lifetime so a perpetually-losing slot doesn't busy-loop.
-
-Invariants checked (final + continuous sampler), each tagged with its
-`docs/invariants.md` ID:
-
-- `INV-APPEND-003` — `$all` event_number gapless 1..head.
-- `INV-APPEND-022` — per-stream stream_version gapless.
-- `INV-SUB-P-008` — subscription `last_seen` monotone and ≤ head.
-- `INV-SUB-P-LEASE-UNIQ` — ≤ 1 unexpired claim per (stream, name)
-  at every sample tick.
-- `PM-024` — PM `source_version` ≤ `last_seen`.
-- `PM-FORWARD-TOTAL` — total PM `forwarded` count equals trigger count.
-- `REFOLD-MATCH` — projector's running balance equals a fresh re-fold.
-
-Follow-ups deferred (out of scope for the first cut, documented in
-`tests/soak/README.md` § Known gaps):
-
-- Network partition injection (`sleep tx before commit`).
-- Direct OCC retry-count surfacing — the SDK doesn't expose them
-  yet; visible indirectly via attempted-vs-completed delta.
-- Multi-process orchestration (everything runs in one Node process).
-
----
-
 ## 4. OCC enforcement in SQL — review the strength of what we enforce
 
 **Why this exists.** Conversation surfaced the question: optimistic
@@ -461,230 +368,30 @@ example language in every code snippet.
 
 ---
 
-## 10. PM ignored-event ack coalescing (ex-ML-0005)
-
-**Why this exists.** The soak harness (TODO #3b) measured PM drain
-throughput at ~140 events/sec sustained against a local docker
-Postgres. Profiling the run pinned the bottleneck at the
-`advance_subscription` round-trip cost: the PM acks **every**
-event on its subscription individually, both the routed ones
-(inside the persist-and-ack tx) and the ignored ones (a
-standalone `ackOnly` round-trip each).
-
-For a PM subscribed to `$all` on a busy store this is brutal. The
-soak's reported workload — 7629 routed `Triggered` events plus
-~22000 ignored `Added` events from concurrent dispatchers —
-produced ~30000 advance round-trips in the drain phase, which is
-why the harness needs ~216s of drain after a 60s active workload.
-The projection code path already coalesces (one
-`advance_subscription` per batch); only the PM is per-event.
-
-Promoted from `docs/maybe-later.md` ML-0005 with the soak
-measurement as the trigger.
-
-### Observation that makes the change cheap
-
-A routed event's persist-and-ack tx already advances the cursor
-to that event's position. That advance **implicitly covers every
-ignored event at a smaller position** because
-`advance_subscription` is monotone (`last_seen = greatest(last_seen,
-p_up_to_position)`). So the optimisation is not "batch ignored
-acks together" — it's **"don't ack ignored events at all when a
-routed event follows them in the same batch; the routed event's
-tx covers them for free"**. The only remaining round-trip is one
-standalone `advance_subscription` per batch for the tail of
-ignored events that have no routed event following them in this
-batch.
-
-### Worked example
-
-Batch of 5 events on `$all`, position numbers in brackets:
-
-```
-  E[100]  Added      (ignored by PM)
-  E[101]  Added      (ignored by PM)
-  E[102]  Triggered  (routed)
-  E[103]  Added      (ignored)
-  E[104]  Triggered  (routed)
-```
-
-Today (5 round-trips):
-
-```
-  advance_subscription(100)                       ← ackOnly
-  advance_subscription(101)                       ← ackOnly
-  BEGIN; record_snapshot(sv=102);
-         advance_subscription(102); COMMIT        ← routed tx
-  advance_subscription(103)                       ← ackOnly
-  BEGIN; record_snapshot(sv=104);
-         advance_subscription(104); COMMIT        ← routed tx
-```
-
-After ML-0005 (2 round-trips):
-
-```
-  (E[100], E[101]: tracked as pendingIgnoredTo=101, no round-trip)
-  BEGIN; record_snapshot(sv=102);
-         advance_subscription(102); COMMIT        ← covers 100..102
-  (E[103]: pendingIgnoredTo=103, no round-trip)
-  BEGIN; record_snapshot(sv=104);
-         advance_subscription(104); COMMIT        ← covers 103..104
-```
-
-Trailing-ignored case: same batch, but E[104] is also ignored.
-After routing E[100..103] as above (1 routed tx covering 100..102),
-E[103] and E[104] are both ignored and at the end of the batch —
-flush them with one `advance_subscription(104)` after the loop.
-Total 2 round-trips for 5 events instead of 5.
-
-### Implementation plan
-
-All changes are in `sdks/typescript/src/process-manager.ts`. No
-SQL contract change, no invariant change.
-
-1. **Split `processEvent`.** The current function does both route
-   resolution and the routed work. Extract the
-   handle/dispatch/persist-and-ack body into
-   `processRoutedEvent(event, routed): Promise<boolean>` so the
-   poll loop can call it directly when a routed event is found.
-2. **Replace the per-event loop with a coalescing walker.** In
-   the existing poll loop where today we do
-   `for (const event of batch) { await processEvent(event); }`,
-   carry a `pendingIgnoredTo: bigint | null` across iterations:
-
-   ```ts
-   let pendingIgnoredTo: bigint | null = null;
-   const positionOf = (e: RecordedEvent<E>) =>
-     stream === "$all" ? e.event_number : e.stream_version;
-
-   for (const event of batch) {
-     if (closing || aborted) break;
-     const routeFn = def.routes[event.event_type];
-     const routed = routeFn
-       ? normaliseRoute(routeFn(event))
-       : { kind: "ignore" as const };
-     if (routed.kind === "ignore") {
-       pendingIgnoredTo = positionOf(event);
-       continue;
-     }
-     const ok = await processRoutedEvent(event, routed);
-     if (!ok) break;
-     pendingIgnoredTo = null; // covered by routed tx's advance
-   }
-
-   // End-of-batch trailing ignored flush.
-   if (pendingIgnoredTo !== null && !aborted) {
-     try {
-       await client.advanceSubscription(
-         stream, def.name, workerId, pendingIgnoredTo,
-       );
-     } catch (err) {
-       if (isLeaseLoss(err)) markAborted(err as Error);
-       else safeOnError(err as Error);
-     }
-   }
-   ```
-
-3. **Delete `ackOnly`.** After step 2 it has no remaining caller.
-   (Keep the import-graph clean rather than leave dead code.)
-4. **Projections are unchanged.** `subscription.ts` already does
-   one advance per batch at the end of the loop.
-
-### Edge cases to verify in tests
-
-- **Crash mid-batch with `pendingIgnoredTo` not yet flushed.** The
-  cursor stays at the last-flushed position. On redelivery the
-  ignored events re-arrive, the route fn returns ignore again,
-  the pending pointer accumulates again, flush on the new
-  worker's batch boundary. No data loss, no double-handle.
-- **Lease loss during the end-of-batch flush.** `advance` raises
-  IS022 → `markAborted` → next iteration's `if (closing ||
-  aborted) break` exits the poll loop. Same semantics as today's
-  ackOnly lease-loss path.
-- **Pure-ignored batch (no routed event).** Walker accumulates
-  `pendingIgnoredTo` through the whole batch; one flush at end.
-  This is the case where the optimisation pays the most.
-- **Routed-then-ignored at end of batch.** After the routed tx,
-  `pendingIgnoredTo` is null; the trailing ignored events set
-  it; end-of-batch flush issues one advance. One routed tx + one
-  flush.
-- **Ignored-then-routed (no trailing ignored).** Walker
-  accumulates `pendingIgnoredTo`, then the routed event's tx
-  covers it; reset to null; end of batch; no flush. One routed
-  tx, zero extra calls.
-
-### Invariants that must still hold
-
-- **INV-SUB-P-008** (`last_seen` monotone): unchanged.
-  `advance_subscription` is monotone and the walker only ever
-  moves the cursor forward.
-- **PM-020** (snapshot `source_version` equals the event_number
-  of the last routed event): unchanged. The routed event's tx
-  still sets `source_version = routed_event.event_number`.
-- **PM-024** (`source_version <= last_seen`): unchanged but the
-  inequality becomes strict more often. After ML-0005, once a PM
-  has seen any ignored event after its last routed event,
-  `last_seen > source_version`. This is already permitted by
-  PM-024 ("<=", not "=="); the existing `concurrent.test.ts` PM
-  scenario uses `assert.ok(snap.sourceVersion <= pmPos.lastSeen)`
-  which still holds.
-- **At-least-once delivery**: unchanged. The contract was always
-  "redelivery is acceptable"; ML-0005 makes ignored-event
-  redelivery slightly more likely (a crash between the last
-  routed event and the end-of-batch flush will redeliver the
-  intervening ignored run) but the route fn returning ignore is
-  idempotent by construction.
-
-### Test additions
-
-All in `sdks/typescript/test/subscription.test.ts` or a new
-`sdks/typescript/test/pm-ack-coalescing.test.ts`:
-
-- **All-ignored batch advances cursor to last event.** Append N
-  events of a type the PM doesn't route. Start the PM. Assert
-  `last_seen` reaches event N after one batch, with exactly **one**
-  `advance_subscription` call (instrument the client or count via
-  `pg_stat_statements` / a wrapped Client).
-- **Routed event covers prior ignored.** Append `[ignored, ignored,
-  routed, ignored, ignored, routed]`. Assert exactly two
-  `advance_subscription` calls happen (both inside routed txs); no
-  standalone advance.
-- **Trailing ignored flush.** Append `[routed, ignored, ignored]`.
-  Assert one routed tx + one standalone advance. Assert
-  `last_seen` reaches the trailing ignored.
-- **Crash between routed tx and trailing flush.** Use
-  `subscription.test.ts`'s heartbeat-lease-loss fixture: hold the
-  PM right after the routed tx commits and before the flush; steal
-  the lease; assert the trailing ignored events get redelivered and
-  flushed by the new worker, with `last_seen` ultimately reaching
-  the head.
-
-### Acceptance check
-
-The soak harness already measures this. After ML-0005:
-
-- A 60s active run with the default workload should drain in
-  **≈70s** (down from ~216s). That's the soak's pre/post baseline.
-- The PM-FORWARD diagnostic block's `dispatched (causation)`
-  and `forwarded (snapshots)` rows are unchanged (correctness is
-  invariant); only the *time to reach* those numbers changes.
-- Re-running the full SDK + conformance suites passes unchanged
-  (no contract surface changes).
-
-### Once shipped
-
-- Delete the ML-0005 entry from `docs/maybe-later.md`.
-- Add a one-line note in `docs/architecture.md` under the PM
-  section: "ignored events on a PM's subscription are not
-  individually acked; the next routed event's persist-and-ack tx
-  covers them implicitly, and a single trailing
-  `advance_subscription` per batch covers any tail of unrouted
-  events."
-- Update `tests/soak/README.md` *Performance baselining* section
-  with the new expected drain time.
-
----
+Item numbers are stable: closed items are removed from the body and
+recorded below rather than renumbered, so existing in-tree references
+(e.g. `TODO #3a`, `TODO #10` in code comments and docs) keep their
+meaning. Gaps in the numbering are expected.
 
 ## Done items (delete on confirmation)
 
-*(none yet — log resolutions here as TODO items close)*
+- **#3 Concurrent correctness + load/soak harness.**
+  - **#3a composed-concurrency correctness tests** — landed in
+    `sdks/typescript/test/concurrent.test.ts` (aggregate OCC ×
+    projector; two projectors / one subscription with lease theft;
+    PM × appender × projector). Also caught a PM-024 wording bug
+    that was fixed in the same commit.
+  - **#3b load / soak harness** — landed in `tests/soak/` with a
+    CLI workload generator, worker farm, failure injection, and
+    continuous + final invariant checks (INV-APPEND-003,
+    INV-APPEND-022, INV-SUB-P-008, INV-SUB-P-LEASE-UNIQ, PM-024,
+    PM-FORWARD-TOTAL, REFOLD-MATCH). Interpretation guide in
+    `tests/soak/README.md`. Deferred follow-ups (network partition
+    injection, OCC retry-count surfacing, multi-process
+    orchestration) are documented in that README's *Known gaps*.
+- **#10 PM ignored-event ack coalescing (ex-ML-0005)** — shipped
+  in `sdks/typescript/src/process-manager.ts`; new tests in
+  `sdks/typescript/test/pm-ack-coalescing.test.ts`; ML-0005 stub
+  removed from `docs/maybe-later.md`; architecture / soak docs
+  updated. Full TS SDK suite (84 tests) green. Soak re-baseline
+  deferred to next harness run.

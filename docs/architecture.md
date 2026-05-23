@@ -150,8 +150,13 @@ Process-manager workers run an extra step in the ack tx:
 for each *routed* event they upsert the PM's state snapshot,
 keyed by the instance id, in the same short transaction that
 advances the cursor. The snapshot's `source_version` is set to
-that event's `event_number`. For *ignored* events the ack tx
-only advances the cursor — no snapshot write. So the two
+that event's `event_number`. For *ignored* events on a PM's
+subscription, the SDK does not issue a per-event
+`advance_subscription`: the next routed event's persist-and-ack
+tx advances the cursor past every preceding ignored event
+implicitly (because `advance_subscription` is monotone), and a
+single trailing `advance_subscription` per batch covers any tail
+of ignored events after the last routed event. So the two
 markers diverge by exactly the number of ignored events since
 the last routed event: `source_version <= last_seen` always.
 On restart the SDK reads from `last_seen + 1`; redelivered
