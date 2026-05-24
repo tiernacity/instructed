@@ -320,3 +320,46 @@ primitives.
 - No SDK signature change required; the SDK already exposes
   `record_snapshot`. `instructedctl` consumes the same
   primitive.
+
+---
+
+## ML-0012 — Routing-worker `close()` strategy: flush vs drop
+
+The SUB-A routing worker (slice 4 of the SUB-A
+implementation) drops the partial batch when `close()` or a
+lease-loss abort fires mid-batch: no `route_batch` call, no
+cursor advance, no work-item INSERTs. The relaunched worker
+re-reads from `lastSeen` and the work-items PK (`ON CONFLICT
+DO NOTHING`) absorbs any duplicates.
+
+The alternative — "flush on close": run `route_batch` with
+the decisions accumulated so far, advance the cursor part-way
+through the batch — is also defensible. It would shorten the
+re-route window on graceful shutdown by exactly the number of
+events already processed at close time.
+
+Both behaviours are observationally equivalent for
+correctness (the catch-up predicate doesn't care which one
+you pick; the PK constraint makes either crash-safe). The
+choice is a UX call about operator expectations:
+
+- *Drop* (current default): "close is an abort". Simpler
+  mental model. Slightly more re-route work on relaunch.
+  Matches the worker's own crash-recovery semantics, so the
+  graceful and ungraceful paths look identical from outside.
+- *Flush*: "close is a checkpoint". Shorter re-route window.
+  Introduces a class of partial-batch boundaries that only
+  exist on graceful close.
+
+**Why deferred:** no concrete user pain yet. Revisit if soak
+runs or a real operator complains about re-route overhead on
+restart, or if a per-worker option `closeBehaviour: 'drop' |
+'flush'` becomes a clear win.
+
+**Forward-compat constraints on v1:**
+
+- No schema or procedure change required; both behaviours sit
+  entirely inside the worker loop.
+- A future per-worker option (`closeBehaviour`, or a callback
+  the worker invokes at close time deciding flush vs drop)
+  is additive; current callers see no behaviour change.
