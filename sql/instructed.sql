@@ -35,7 +35,17 @@
 --                      `(stream_id, subscription_name, shard)`. The `shard`
 --                      column is reserved at v1 with default 0 so that
 --                      ML-0001 (partitioned consumers) can be added without
---                      breaking v1 callers.
+--                      breaking v1 callers. Under SUB-A the `last_seen`
+--                      column is conceptually the *routing cursor*: it is
+--                      advanced by the routing worker as it inserts work
+--                      items, not by per-event ack.
+--   subscription_work_items
+--                   -- SUB-A work queue. One row per `(subscription, partition,
+--                      event_number)` decision emitted by the routing worker.
+--                      Processing workers claim, complete, or fail rows here;
+--                      per-partition ordering is enforced by a NOT EXISTS
+--                      predicate against the same table. See the table
+--                      docstring below for the full lifecycle contract.
 --
 -- Procedures (full docstrings on each):
 --   append_to_stream, read_stream, read_all,
@@ -239,6 +249,140 @@ create table instructed.subscriptions (
 create index subscriptions_claim_expires_idx
   on instructed.subscriptions (claim_expires_at)
   where claimed_by is not null;
+
+
+-- subscription_work_items
+--
+-- SUB-A work queue. One row per routing decision: the routing worker reads
+-- the next batch from `$all`, runs the user-supplied `RouteFn` per event,
+-- and inserts one row here for every event that routed to a partition
+-- (`"ignore"` decisions produce no row). The cursor advance on
+-- `subscriptions.last_seen` and the work-item INSERTs commit together --
+-- that same-tx atomicity is what makes the SUB-A catch-up predicate
+-- (`waitForProjection`) race-safe at the start: once `last_seen >= N` is
+-- observable, the corresponding work-item rows (if any) are observable too.
+--
+-- Processing workers claim rows here via `claim_work_item`, run the
+-- user-supplied handler, and transition the row to a terminal state. The
+-- partial index below excludes `done` rows from the hot claim path; see the
+-- SUB-A "Processing worker -- claim and complete" section for the claim
+-- query shape.
+--
+-- Per-partition ordering: a row is claimable only if no earlier row for the
+-- same `(subscription_id, partition_key)` is still in a non-terminal state
+-- (`pending` / `claimed` / `failed`). This gives concurrent claims *across*
+-- partitions and serial claims *within* a partition. A `failed` row blocks
+-- subsequent work for its partition only; other partitions are unaffected.
+-- `failed` rows are never auto-skipped or auto-deleted: operator action
+-- (deferred to `instructedctl`) is required to clear them.
+--
+-- Lifecycle by subscription kind (SUB-A "Work-item lifecycle by subscription
+-- kind"):
+--
+--   Projection (PRJ-E): on handler success the row is DELETEd in the same tx
+--     as the handler's read-model write. `done` rows do not exist for
+--     projections. The framework neither reads nor writes projection state
+--     beyond the in-flight rows.
+--
+--   Process manager (PM-C / PM-F): on non-terminal success the row is
+--     UPDATEd to `state = 'done'` in the same tx as the snapshot upsert.
+--     `done` rows accumulate per partition for the life of the PM instance
+--     because PM-C's snapshot rebuild via `apply` reads them. When `handle`
+--     returns `{ complete: true }` the snapshot and every work-item for the
+--     partition (including the triggering one) are DELETEd in one tx.
+--
+-- Columns:
+--   subscription_id   FK into `subscriptions`; identifies the owning
+--                       subscription. Composite FK on
+--                       `(stream_id, subscription_name, shard)` because that
+--                       is `subscriptions`' PK (no synthetic id at v1; see
+--                       "Note on `subscription_id`" in the table body).
+--   partition_key     opaque string chosen by `RouteFn`. For projections the
+--                       three `PartitionBy` modes (PRJ-A) reduce to:
+--                         sequential  -> the literal `'_default'`
+--                         per-event   -> the event_number as text
+--                         per-key     -> the user's key(event)
+--                       For PMs it is the PM instance identifier.
+--   event_number      the global `event_number` from `$all` that this work
+--                       item refers to. The event payload is fetched by
+--                       processing workers via primary-key lookup on
+--                       `stream_events` (stream_id = 0, stream_version = N).
+--   state             one of:
+--                         'pending' -- routed, not yet claimed.
+--                         'claimed' -- a worker holds a lease (see
+--                                      `lease_expires_at`). On lease expiry
+--                                      another worker may take it (the claim
+--                                      query has a takeover branch).
+--                         'failed'  -- handler raised; SUB-B error policy
+--                                      requested no further retries (or the
+--                                      core gave up). Blocks the partition
+--                                      until an operator clears it.
+--                         'done'    -- terminal-success for PMs only.
+--                                      Projections DELETE on success, so
+--                                      `done` rows are PM-only in practice;
+--                                      the CHECK still admits the value
+--                                      uniformly across kinds.
+--   claimed_by        opaque worker identifier supplied by the SDK; NULL
+--                       when state is not `'claimed'`.
+--   lease_expires_at  wall-clock expiry of the current claim; NULL when
+--                       state is not `'claimed'`. The claim query's takeover
+--                       branch treats `state = 'claimed' AND lease_expires_at
+--                       < now()` as eligible.
+--   failed_at         set when the row transitions to `'failed'`; NULL
+--                       otherwise. Diagnostic only.
+--   error_text        SUB-B error message; NULL when state is not `'failed'`.
+--                       Diagnostic only; not parsed by the framework.
+--
+-- Identity / PK: `(subscription_id_components..., partition_key,
+-- event_number)` is the natural key. Routing is crash-safe via this PK: a
+-- routing worker that crashes mid-batch and retries hits `ON CONFLICT DO
+-- NOTHING` on the INSERT, then re-attempts the cursor advance.
+--
+-- Note on `subscription_id`: the SUB-A design sketch uses a synthetic
+-- `subscription_id INT` for brevity. At v1 the `subscriptions` table has a
+-- composite PK `(stream_id, subscription_name, shard)` and no surrogate id
+-- column. We expand the FK / PK accordingly here rather than retrofit a
+-- surrogate id onto `subscriptions` in this slice. If a surrogate id is
+-- introduced later (e.g. for cross-table joins or ML-0001 ergonomics) this
+-- table's PK shrinks to `(subscription_id, partition_key, event_number)`
+-- with no semantic change.
+create table instructed.subscription_work_items (
+  stream_id         bigint   not null,
+  subscription_name text     not null,
+  shard             smallint not null,
+  partition_key     text     not null,
+  event_number      bigint   not null,
+  state             text     not null
+    check (state in ('pending','claimed','failed','done')),
+  claimed_by        text,
+  lease_expires_at  timestamptz,
+  failed_at         timestamptz,
+  error_text        text,
+  primary key (stream_id, subscription_name, shard, partition_key, event_number),
+  foreign key (stream_id, subscription_name, shard)
+    references instructed.subscriptions (stream_id, subscription_name, shard)
+    on delete cascade,
+  -- Per-state column invariants. These are mechanism-level; the procedure
+  -- contract is the user-facing surface, but the CHECKs document the shape
+  -- the procedures will maintain and catch direct-SQL bugs early.
+  check (
+    (state = 'claimed') = (claimed_by is not null and lease_expires_at is not null)
+  ),
+  check (
+    (state = 'failed') = (failed_at is not null)
+  ),
+  check (
+    error_text is null or state = 'failed'
+  )
+);
+
+-- Hot-path partial index for the claim query (SUB-A "Processing worker --
+-- claim and complete"). Excludes `done` rows so the per-partition NOT
+-- EXISTS subquery stays cheap as PMs accumulate completed work items.
+create index subscription_work_items_claimable
+  on instructed.subscription_work_items
+     (stream_id, subscription_name, shard, event_number)
+  where state in ('pending','claimed','failed');
 
 
 -- ============================================================================

@@ -94,6 +94,7 @@ export async function getPool(): Promise<pg.Pool> {
 export async function truncateAll(p: pg.Pool): Promise<void> {
   await p.query(`
     TRUNCATE
+      instructed.subscription_work_items,
       instructed.stream_events,
       instructed.events,
       instructed.snapshots,
