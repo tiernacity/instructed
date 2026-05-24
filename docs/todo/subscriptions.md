@@ -17,8 +17,12 @@ Status legend: **Decided** / **Designed, awaiting confirmation** /
 
 ## SUB-A — Routing-vs-processing architecture (the work-queue model)
 
-**Status:** Open. User leans toward the decoupled router + work-queue
-design (Design 3); decision deferred pending a dedicated design pass.
+**Status:** Decided. Design 3 (decoupled router + work queue),
+with the PM-F routing shape and one-mechanism-for-everything
+(no separate cursor-only path for strict-sequential). The
+"Proposed design" subsection below is the canonical reference;
+the Three designs / Cost trade / Current state of the decision
+subsections above are retained as the reasoning trail.
 **Release-relevance:** Pre-release.
 
 ### The question
@@ -182,7 +186,7 @@ Two ways to handle this:
 
 - **One mechanism for everything.** Always work-queue. Simpler
   architecture; uniform operator surface; perf cost accepted as
-  the price of unification. Lean: this.
+  the price of unification.
 - **Two mechanisms, application chooses.** Cursor-based for the
   strict-sequential case; work-queue for everything else. Two
   code paths in the SDK, two operator surfaces.
@@ -192,6 +196,13 @@ far has the router read in the source stream"). It's
 single-active-worker and leased, identical in shape to today's
 subscription. The application doesn't see it; it sees only the
 work queue.
+
+**Decided: one mechanism for everything.** A strict-sequential
+subscription pays one INSERT + one UPDATE per event for the
+uniformity. The cost is bounded by the routing rate and is
+acceptable at the throughputs the library targets. Operator
+surface, SDK code paths, and conformance tests all collapse to
+one shape.
 
 ### Comparison on the user-facing contract
 
@@ -235,7 +246,11 @@ caught up). The cursor disambiguates.
 
 ### Current state of the decision
 
-Parked pending further design thought. Acknowledged factors:
+**Resolved**: Design 3 chosen, with the PM-F routing shape and
+one-mechanism-for-everything. See the "Proposed design"
+subsection below for the canonical write-up. The factors
+acknowledged during the parked period (retained below for the
+reasoning trail):
 
 - The initial framing of "Designs 1 and 2" was anchored on
   patterns inherited from other event-sourcing libraries; Design 3
@@ -264,6 +279,365 @@ The next pass should at minimum:
 - Note: ML-0001 as a separately planned feature dissolves into
   this decision. Partitioned consumers are not a separate thing to
   build; they are the shape of every subscription.
+
+### Proposed design (Design 3 with the PM-F routing shape)
+
+This subsection promotes Design 3 from candidate to **proposed**
+design and fleshes it out under PM-F's simplified routing shape
+(`RouteFn → { partitionKey } | "ignore"`; see
+[`process-manager.md`](./process-manager.md) PM-F for rationale).
+The remaining artifacts in the "next pass should at minimum"
+checklist (three-way SQL comparison, operator surface,
+`INV-SUB-*` triage, `waitForProjection` SDK shape +
+cross-stream guard) build on this section and follow as
+separate artifacts. The one-mechanism-vs-two decision is
+resolved: one mechanism (see "Cost trade for strict-sequential
+subscriptions" above).
+
+Designs 1 and 2 are kept in this file above for reference. The
+short version of why Design 3 is proposed: read amplification
+(D1 and D2 both pay O(N partitions) per event read; D3 pays
+O(1) by storing matched positions), and first-class failure
+observability (D3's `state = 'failed'` row vs. D1/D2's implicit
+"this cursor isn't advancing"). D2-with-positions is
+isomorphic to D3.
+
+#### Schema additions
+
+```sql
+CREATE TABLE subscription_work_items (
+  subscription_id INT     NOT NULL REFERENCES subscriptions(subscription_id),
+  partition_key   TEXT    NOT NULL,
+  event_number    BIGINT  NOT NULL,
+  state           TEXT    NOT NULL
+    CHECK (state IN ('pending','claimed','failed','done')),
+  claimed_by      TEXT,
+  lease_expires_at TIMESTAMPTZ,
+  failed_at       TIMESTAMPTZ,
+  error_text      TEXT,
+  PRIMARY KEY (subscription_id, partition_key, event_number)
+);
+
+-- Hot-path index for the claim query (excludes done rows).
+CREATE INDEX subscription_work_items_claimable
+  ON subscription_work_items (subscription_id, event_number)
+  WHERE state IN ('pending','claimed','failed');
+```
+
+`subscriptions` retains a single cursor column; it is now
+conceptually the **routing cursor**, advanced only by the
+routing worker.
+
+#### Routing worker — hot path
+
+One routing worker per subscription. Holds a lease on the
+subscription row. Reads a batch from `$all`, runs `RouteFn` on
+each event, inserts a work item per matched event, advances the
+routing cursor — all in one transaction.
+
+```sql
+-- (a) Read next batch from $all.
+SELECT event_number /* , payload */
+FROM stream_events_all
+WHERE event_number > (
+  SELECT last_seen FROM subscriptions WHERE subscription_id = $1
+)
+ORDER BY event_number ASC
+LIMIT $batch_size;
+```
+
+Application runs `RouteFn` on each row of the batch in memory,
+collecting routed `(partition_key, event_number)` pairs.
+`"ignore"` decisions are dropped.
+
+```sql
+-- (b) In one tx: insert all routed pairs, advance routing cursor.
+INSERT INTO subscription_work_items
+  (subscription_id, partition_key, event_number, state)
+VALUES
+  ($1, $pk_1, $en_1, 'pending'),
+  ($1, $pk_2, $en_2, 'pending'),
+  /* ... */ ;
+
+UPDATE subscriptions
+SET last_seen = $max_event_number_in_batch
+WHERE subscription_id = $1;
+```
+
+Atomic batch advance: the cursor only moves past events whose
+routing decisions are durably recorded. Routing is crash-safe —
+the worker may re-read a partially-routed batch on restart, but
+`(subscription_id, partition_key, event_number)` is the primary
+key so re-inserts hit the unique constraint and the second
+attempt completes the batch. (Equivalent: use `INSERT ... ON
+CONFLICT DO NOTHING`; the cursor advance is the commit point
+either way.)
+
+Routing calls only `RouteFn` — no instance state, no aggregate
+loads, no user handlers. The work it does is bounded by
+`O(batch_size)` plus one round-trip per batch (SUB-C).
+
+#### Processing worker — claim and complete
+
+Any number of processing workers per subscription. Each polls
+for a claimable work item, runs the user handler, marks the
+item terminal.
+
+The claim query enforces per-partition ordering: a work item is
+claimable only if no earlier work item for the same partition
+is still in a non-terminal state.
+
+```sql
+-- (c) Claim next work item, enforcing per-partition ordering.
+UPDATE subscription_work_items w
+SET state            = 'claimed',
+    claimed_by       = $worker_id,
+    lease_expires_at = now() + interval '30 seconds'
+FROM (
+  SELECT wi.subscription_id, wi.partition_key, wi.event_number
+  FROM   subscription_work_items wi
+  WHERE  wi.subscription_id = $1
+    AND  wi.state = 'pending'
+    AND  NOT EXISTS (
+      SELECT 1 FROM subscription_work_items earlier
+      WHERE earlier.subscription_id = wi.subscription_id
+        AND earlier.partition_key   = wi.partition_key
+        AND earlier.event_number    < wi.event_number
+        AND earlier.state IN ('pending','claimed','failed')
+    )
+  ORDER BY wi.event_number ASC
+  FOR UPDATE SKIP LOCKED
+  LIMIT 1
+) c
+WHERE w.subscription_id = c.subscription_id
+  AND w.partition_key   = c.partition_key
+  AND w.event_number    = c.event_number
+RETURNING w.*;
+
+-- Worker then reads the event payload by primary key:
+SELECT /* payload */
+FROM stream_events_all
+WHERE event_number = $work_item.event_number;
+```
+
+The `NOT EXISTS` subquery is the per-partition ordering
+enforcement. Combined with `FOR UPDATE SKIP LOCKED`, this gives
+concurrent claims **across** partitions and serial claims
+**within** a partition. The partial index
+(`subscription_work_items_claimable`) keeps the subquery cheap
+by excluding `done` rows from the scan.
+
+Terminal transitions on the just-claimed item depend on the
+subscription kind — see "Work-item lifecycle by subscription
+kind" below for the full contract. Failure is symmetric across
+kinds:
+
+```sql
+-- Failure (per SUB-B error policy).
+UPDATE subscription_work_items
+SET state      = 'failed',
+    failed_at  = now(),
+    error_text = $err,
+    claimed_by = NULL,
+    lease_expires_at = NULL
+WHERE subscription_id = $1
+  AND partition_key   = $2
+  AND event_number    = $3;
+```
+
+A `failed` row blocks subsequent items **for its partition
+only** (via the `NOT EXISTS` subquery). Other partitions are
+unaffected. `failed` rows are not subject to retention.
+
+Success transitions differ by kind:
+
+```sql
+-- Success, projection (PRJ-E): DELETE in the same tx as the handler's
+-- read-model write.
+DELETE FROM subscription_work_items
+WHERE subscription_id = $1
+  AND partition_key   = $2
+  AND event_number    = $3;
+
+-- Success, PM (non-terminal): UPDATE to 'done' alongside snapshot upsert.
+UPDATE subscription_work_items
+SET state = 'done', claimed_by = NULL, lease_expires_at = NULL
+WHERE subscription_id = $1
+  AND partition_key   = $2
+  AND event_number    = $3;
+
+-- Success, PM (terminal: handle returned { complete: true }):
+-- in one tx, DELETE the snapshot AND every work-item for the partition
+-- (including the triggering one).
+DELETE FROM aggregate_snapshots
+WHERE source_uuid = $pm_snapshot_uuid;
+DELETE FROM subscription_work_items
+WHERE subscription_id = $1
+  AND partition_key   = $2;
+```
+
+#### Lease takeover
+
+If a worker dies mid-claim, `lease_expires_at` is in the past
+and the next claim attempt for that subscription will treat
+`claimed` rows with expired leases as eligible. Concretely the
+claim query above changes its inner predicate to:
+
+```sql
+AND (
+  wi.state = 'pending'
+  OR (wi.state = 'claimed' AND wi.lease_expires_at < now())
+)
+```
+
+— with the rest unchanged. Spelled out separately here so the
+default hot path stays simple.
+
+#### Catch-up predicate (for `waitForProjection`)
+
+Subscription `S` is caught up to target `event_number` `T` iff
+**both**:
+
+```sql
+SELECT
+  (SELECT last_seen FROM subscriptions WHERE subscription_id = $S) >= $T
+  AND NOT EXISTS (
+    SELECT 1 FROM subscription_work_items
+    WHERE subscription_id = $S
+      AND event_number <= $T
+      AND state IN ('pending','claimed','failed')
+  );
+```
+
+The routing cursor disambiguates the "no rows" case (events
+≤ T were routed and produced nothing, vs. routing hasn't
+reached T yet). The work-items check guarantees that what was
+routed has been processed. Rationale in the SUB-A "Catch-up
+predicate" subsection above.
+
+Works uniformly for both kinds. For projections (PRJ-E
+immediate-delete), the `state IN (...)` filter is logically
+redundant (`done` rows don't exist) but harmless. For PMs the
+filter excludes the retained `done` rows from blocking
+catch-up.
+
+**Race safety at the start of `waitForProjection`.** A caller
+that appends event N and immediately calls
+`waitForProjection(S, N)` must not observe a spurious
+"caught-up" before the routing worker has processed N. The
+safety property holds **iff the routing cursor advance and the
+work-item INSERTs commit in a single transaction** — which is
+what the routing hot path above does. Without that atomicity,
+a window would exist where `last_seen >= N` is observable but
+the corresponding work-items haven't yet been inserted, and
+the predicate would falsely report caught-up. Load-bearing
+invariant.
+
+#### Work-item lifecycle by subscription kind
+
+Retention is not a global age-based policy with knobs. The unit
+of retention is the subscription kind, because the *reason* the
+framework keeps a `done` row differs:
+
+| Kind        | Why we'd retain a `done` row                                          | Lifecycle on success                                                              |
+| ----------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Projection  | Nothing depends on it. Read model is the state; framework neither reads nor writes projection state. | DELETE in the same tx as the handler write.                                       |
+| PM          | The set of `done` rows for a partition IS the durable "which events were routed to me" record. PM-C's snapshot rebuild via `apply` reads it. | UPDATE to `done` in the same tx as the snapshot upsert. Retained until `complete: true`, at which point snapshot and ALL work-items for the partition are DELETEd in one tx. |
+
+This gives a clean per-kind contract:
+
+- **Projection** `done` rows do not exist as persisted state.
+  The framework can be queried for in-flight work
+  (`pending`/`claimed`/`failed`) only.
+- **PM** `done` rows accumulate per partition until the PM
+  explicitly signals it's finished. The promise to the
+  application is: *until you tell us a PM instance is complete,
+  we keep enough to reconstruct its state from origin via
+  `apply`. When you say complete, we discard everything for
+  the instance.*
+
+Consequences:
+
+- Long-running PM instances accumulate one work-item row per
+  routed event for the life of the instance. Storage cost is
+  real but bounded by routing rate; the alternative (silent
+  unrecoverability on snapshot-version-mismatch) is worse.
+- Snapshot cadence and work-item retention are *independent*:
+  taking a snapshot doesn't release work-items; deleting one
+  doesn't affect work-items. The only releaser is
+  `complete: true`.
+- `failed` rows are never subject to retention regardless of
+  kind. Operator action required.
+
+A configurable post-success retention window for projections
+("keep `done` rows for K minutes for ops visibility") is
+recorded as a maybe-later item; default ships as immediate
+DELETE.
+
+#### PM-B constraints — how they're satisfied
+
+| Constraint                                                | Mechanism                                                                 |
+| --------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Per-instance progress                                     | Each `(subscription_id, partition_key)` slice of work items has its own state. |
+| Stuck instance stalls only itself                         | `NOT EXISTS` per-partition ordering blocks the partition; others run.     |
+| Throughput scales with workers                            | Workers compete on the same `subscription_work_items` table; `SKIP LOCKED` distributes claims. |
+| SDK MUST NOT silently skip an event for any instance      | No code path deletes or skips a `failed` row implicitly; operator action required (see below). |
+| Operator skip is per-event per-instance, audited          | `instructedctl` command (deferred artifact) explicitly transitions a single `(subscription_id, partition_key, event_number)` row from `failed` to `done` and writes an audit row. |
+
+#### What survives unchanged
+
+- The store contract for `$all`, `stream_events`, `streams`,
+  `aggregate_snapshots`. Untouched.
+- The aggregate path (`runCommand`, OCC, `IS001`). Untouched.
+- The subscription concept as the application sees it in the
+  SDK convenience layer — projections still register handlers,
+  PMs still declare `RouteFn` plus `apply`/`handle`.
+- `LISTEN/NOTIFY` plumbing (ML-0002): routing worker can use
+  it to wake on new `$all` events instead of polling;
+  processing workers can use it to wake on new
+  `subscription_work_items` rows.
+
+#### What changes
+
+- `subscriptions.last_seen` is renamed conceptually to the
+  *routing cursor*. Per-event ack at the SQL layer is replaced
+  by per-work-item state transition.
+- New core procedure surface (the porting checklist gains
+  these):
+  - `route_batch(subscription_id, decisions[], new_cursor)` —
+    atomic INSERT-of-work-items + cursor advance.
+  - `claim_work_item(subscription_id, worker_id, lease_seconds)`
+    — the claim query with the per-partition `NOT EXISTS`
+    predicate; includes lease-takeover branch.
+  - `complete_work_item_projection(subscription_id,
+    partition_key, event_number)` — DELETEs the row.
+  - `complete_work_item_pm(subscription_id, partition_key,
+    event_number, snapshot_data)` — UPDATEs the row to `done`,
+    UPSERTs the snapshot. One tx.
+  - `complete_pm_instance(subscription_id, partition_key,
+    event_number)` — DELETEs the snapshot AND every work-item
+    for the partition. One tx. Invoked when `handle` returns
+    `complete: true`.
+  - `fail_work_item(..., error_text)` — same shape for both
+    kinds.
+  - `skip_work_item_with_audit(..., operator, reason)` —
+    operator-only; transitions a `failed` row to a terminal
+    state with an audit trail.
+- Several `INV-SUB-*` invariants move from "user-facing
+  contract" to "routing-layer mechanism". Triage is a separate
+  artifact.
+
+#### What this section does not yet specify
+
+- **Operator commands** (`instructedctl`): the skip-with-audit
+  command, the work-item inspection commands, the
+  rebuild-projection command (PRJ-D), the drop-pm-instance
+  command. Deferred to the operator-surface artifact.
+- **`INV-SUB-*` triage**: which survive, which reshape, which
+  become `[mechanism-only]`. Deferred.
+- **`waitForProjection` SDK reimplementation**: the SQL
+  predicate is above; the SDK call shape (and the cross-stream
+  guard from review §2.3.2) is a separate artifact.
 
 ---
 
@@ -327,8 +701,12 @@ quarantine semantics activate when SUB-A lands.
 
 ## SUB-C — Routing-boundary batching
 
-**Status:** Open / "probably yes" pending SUB-A.
-**Release-relevance:** Pre-release, contingent on SUB-A.
+**Status:** Decided as part of SUB-A. The routing hot path in
+the SUB-A proposed design reads a batch from `$all`, collects
+routing decisions, and commits a multi-row INSERT plus the
+cursor UPDATE in one tx. Batch size is an SDK option. The
+"Open question" subsection below is resolved.
+**Release-relevance:** Pre-release, lands with SUB-A.
 
 ### The opportunity
 
@@ -353,14 +731,14 @@ batching is a separate question (and largely an application
 concern — a handler that wants to batch its work can collect items
 from the queue and process them together).
 
-### Open question
+### Resolved: ships with SUB-A
 
-Does routing-side batching ship with SUB-A (as part of the design),
-or as a follow-up? My lean: ship with SUB-A. The semantics are
-unambiguous (atomic batch of INSERTs + cursor UPDATE in one tx) and
-the SDK surface is one option (batch size). Designing SUB-A without
-routing-side batching and adding it later means a second pass on
-the same hot path.
+Routing-side batching is part of the SUB-A proposed design.
+The routing hot path commits an atomic batch of INSERTs + a
+cursor UPDATE in one tx. Batch size is an SDK option;
+default to be tuned during implementation. Designing SUB-A
+without this and adding it later would have meant a second
+pass on the same hot path; doing it once is cheaper.
 
 ### Processing-side batching
 
@@ -377,10 +755,20 @@ concrete request. Maybe-later candidate post-SUB-A.
 ## Connections to other files
 
 - PM-specific concerns (RouteFn shape, fan-out modelling,
-  handle/apply split, deterministic command IDs for PM-dispatched
-  commands) live in [`process-manager.md`](./process-manager.md).
-- The `waitForProjection` reimplementation under SUB-A is captured
-  in the review decisions log (§2.3.2 two-stage note) and in this
-  file (SUB-A "catch-up predicate" subsection).
-- ML-0001 (partitioned consumers) as a separately planned feature
-  dissolves into SUB-A.
+  `handle`/`apply` split, deterministic command IDs for
+  PM-dispatched commands, simplified routing surface, lifecycle
+  via `complete: true`) live in
+  [`process-manager.md`](./process-manager.md).
+- Projection-specific concerns (registration surface, no
+  `apply`/`handle` split, read-model transactionality,
+  immediate-delete on success, rebuild as operator action)
+  live in [`projections.md`](./projections.md).
+- The `waitForProjection` reimplementation under SUB-A is
+  captured in the review decisions log (§2.3.2 two-stage note)
+  and in this file (SUB-A "catch-up predicate" subsection); the
+  cross-stream guard lives in [`consistency.md`](./consistency.md)
+  CON-B.
+- ML-0001 (partitioned consumers) as a separately planned
+  feature dissolves into SUB-A.
+- ML-0010 (configurable projection done-row retention) is the
+  opt-in opposite of PRJ-E's immediate-delete default.

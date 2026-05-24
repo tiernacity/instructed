@@ -91,12 +91,15 @@ projections lives in `subscriptions.md` SUB-A, where it belongs.
   per-instance skip via `instructedctl` with explicit state-loss
   acknowledgement remains the only escape.
 - The PM `RouteFn` is the natural carrier of the partition key
-  under SUB-A Design 3 — it returns `{ kind, processId }` and the
-  `processId` *is* the partition key for the work-queue.
-- `:start` / `:continue` / `:stop` directives all produce work
-  items (one row each) under Design 3; `:ignore` produces no row.
-  PM-A's modelling-level fan-out, if applied, generates one
-  upstream event per intended target, which the routing layer
+  under SUB-A Design 3 — see PM-F for the simplified shape
+  `RouteFn → { partitionKey } | "ignore"`. The `partitionKey`
+  (for PMs, the instance uuid) keys the work queue.
+- Under Design 3: a returned `partitionKey` produces one work
+  item; `"ignore"` produces none. There is no `:start` /
+  `:continue` / `:stop` directive set; instance lifecycle is the
+  processing layer's concern via `handle`'s `complete?` return
+  (PM-F). PM-A's modelling-level fan-out, if applied, generates
+  one upstream event per intended target, which the routing layer
   enqueues as N separate work items, one per partition.
 
 When SUB-A is decided, the PM-specific work to wire up is small:
@@ -111,7 +114,12 @@ cursor.
 
 ## PM-C — `handle` / `apply` split
 
-**Status:** Designed, awaiting confirmation.
+**Status:** Decided. Required for SUB-A: the per-PM work-item
+retention contract ("keep work-items until `complete: true` so
+state is reconstructible on any snapshot-version-mismatch")
+is only meaningful if `apply` exists as a pure state-fold
+separate from `handle`'s command dispatch. PM-C and PM-F land
+together; SUB-A's PM path depends on both.
 **Release-relevance:** Pre-release.
 
 ### Problem
@@ -160,6 +168,75 @@ Worker flow becomes:
 - Sharper mental model. `apply` is to PMs what the event applier is
   to aggregates.
 - Cleaner test ergonomics — `apply` and `handle` test independently.
+- **Snapshotting becomes mechanically symmetric with
+  aggregates** (same primitive, same load-with-snapshot path,
+  same load-without-snapshot path, same losslessness property).
+  SNAP-002's honest-gap wording can drop the PM-specific
+  caveat: snapshot-version-mismatch triggers full event replay,
+  identically for aggregates and PMs.
+
+### Residual asymmetries with aggregate snapshotting
+
+Two asymmetries remain after PM-C because they reflect what a
+PM intrinsically *is*, not how it's wired:
+
+**1. Replay source.** An aggregate replays its own stream from
+`stream_events` — rows we never remove. A PM (under SUB-A
+Design 3) replays the events it was *routed*, identified via
+the `subscription_work_items` table — rows whose lifecycle is
+tied to the PM instance, not to age.
+
+The per-kind retention contract (SUB-A "Work-item lifecycle by
+subscription kind") is:
+
+- **PMs**: `done` work-items for a partition are retained
+  until that PM signals `complete: true`. On `complete: true`,
+  the framework DELETEs the snapshot and every work-item for
+  the partition (including the triggering one) in one
+  transaction. Until then, those rows form the durable record
+  needed to rebuild state losslessly via `apply` on any
+  snapshot-version-mismatch.
+- **Aggregates**: no analogue; the event log is never cleaned.
+
+The contract is now symmetric in spirit: state is always
+reconstructible until the application explicitly signals it's
+done with the instance. The asymmetry is in *what* gets
+replayed (own stream vs. routed events identified via
+work-items), not in whether replay is possible.
+
+Consequence: a long-running PM accumulates one work-item row
+per routed event for the life of the instance. Storage cost is
+real but bounded by routing rate. Levers for applications that
+find it expensive: (i) more aggressive `complete: true` on
+terminal sub-phases, (ii) sharded partition_keys so individual
+instances stay bounded, (iii) accept the cost. The alternative
+(silent unrecoverability on `apply` evolution) is worse.
+
+Snapshot cadence and work-item retention are independent: a
+snapshot does not release work-items; the only releaser is
+`complete: true`. Cadence is back to being purely a
+performance knob.
+
+**2. Terminality.** An aggregate's full reality is derivable
+from its events alone via `apply`. A PM under PM-F has a
+side-channel signal — `handle` returning `{ complete: true }` —
+that the runtime acts on (deletes the snapshot and the
+partition's work-items) but that is not automatically reflected
+in `state`.
+
+**Idiom (recommended).** Encode terminality in state too:
+`apply` sets e.g. `state.terminated = true` on the same event
+that causes `handle` to return `complete: true`. Replay then
+re-arrives at the terminal status without runtime help. This
+is the aggregate-shaped discipline ("if it matters for state,
+put it in `apply`") and should be documented as the canonical
+pattern in the upgrade note.
+
+**Mechanism (fallback).** If applications find the idiom
+awkward, the snapshot row can carry a `terminal_at_event_number`
+field restored alongside `state` on load. Costs a column;
+eliminates the discipline requirement. Defer until a real
+example trips on the idiom.
 
 ### Cost
 
@@ -171,6 +248,10 @@ Worker flow becomes:
   version-mismatched, which should be rare).
 - API change to existing PMs (the bank-account example PM and
   whatever lives in `examples/`).
+- Storage of work-items for long-running PMs (see "Residual
+  asymmetries" below). One small row per routed event, kept
+  for the life of the instance. Bounded by routing rate; the
+  cost of the lossless-rebuild contract.
 
 ### Recommendation
 
@@ -184,12 +265,17 @@ than the aggregate case.
 - `apply` runs against the *raw* event (post-upcast, if upcasting
   lands). It does *not* receive `metadata` parameters beyond what
   the event carries, mirroring the aggregate applier.
-- On a route directive of `start`, `apply` runs from
-  `initialState()` against the triggering event.
-- On `stop`, `apply` runs against the triggering event before the
-  snapshot is deleted — preserves the invariant that `source_version`
-  always matches "state has folded events up to event_number =
-  source_version" right up to the moment of deletion.
+- On first routed event for a partition (no snapshot present),
+  state starts at `initialState()` and `apply` folds the
+  triggering event onto it before `handle` runs.
+- On `handle` returning `{ complete: true }`, the snapshot is
+  DELETEd and every work-item for the partition is DELETEd in
+  one tx (PM-F). `apply` need not run on the triggering event
+  in this terminal case because no post-completion state is
+  retained — unless the application relies on `apply`-encoded
+  terminality being visible to `handle` itself (in which case
+  `apply` runs first, `handle` sees the terminal state, returns
+  `{ complete: true }`, and the framework discards).
 - Existing PM definitions need migration. Provide a one-page
   upgrade note; the bank-account example is the reference.
 
@@ -345,35 +431,223 @@ It's idiomatic application code, not a framework concern.
 
 ---
 
-## Cross-cutting: ordering across PM-A, PM-B, PM-C, PM-E
+## PM-F — Simplified PM surface: routing key only; lifecycle in handler
 
-(PM-D is merged into PM-B.)
+**Status:** Decided.
+**Release-relevance:** Pre-release.
+
+### Problem
+
+The current PM directive set inherited from Commanded —
+`{:start, :start!, :continue, :continue!, :stop, false}` returned
+by `interested?` — bundles four orthogonal concerns at the
+routing layer:
+
+1. *Which instance is this event for?* (`partition_key`)
+2. *Is this event for this PM type at all?* (`ignore`)
+3. *Strict assertion: is this the first event for this instance?*
+   (`:start!` / `:continue!`)
+4. *Lifecycle: this event terminates the instance.* (`:stop`)
+
+Concerns (1) and (2) are intrinsic to routing — they decide
+whether and where to do work. Concerns (3) and (4) are
+application logic about instance state, dressed up as framework
+directives because Commanded's in-process `GenServer` runtime had
+convenient access to both at the routing layer. We don't have
+processes; we have workers reading rows. The convenience
+disappears.
+
+### Proposal
+
+Reduce the routing surface to the minimum that's actually
+routing-shaped:
+
+```ts
+type PartitionKey = string
+RouteFn(event, metadata) → { partitionKey: PartitionKey } | "ignore"
+```
+
+Lift the rest into the processing-layer callbacks (mirroring
+PM-C):
+
+```ts
+apply(state, event) → state                              // pure fold
+handle(state, event) → {
+  commands?: DispatchedCommand[],
+  complete?: boolean,                                    // delete snapshot + work-items
+}
+```
+
+This is the aggregate shape: the framework decides which row to
+load; the application decides what to do with it.
+
+### How each Commanded directive collapses
+
+| Commanded                | Where it lives now                                              |
+| ------------------------ | --------------------------------------------------------------- |
+| `{:start, uuid}`         | `RouteFn → { partitionKey: uuid }`; processor loads/initialises |
+| `{:continue, uuid}`      | same — no distinction at routing                                |
+| `{:start!, uuid}`        | `handle` raises if `state !== initialState()`                   |
+| `{:continue!, uuid}`     | `handle` raises if `state === initialState()`                   |
+| `{:stop, uuid}`          | `handle` returns `{ complete: true }`                           |
+| `false`                  | `RouteFn → "ignore"`                                            |
+
+Routing becomes purely "is this event for this PM type, and if
+so, which instance?" — by construction stateless w.r.t. instance
+state, which matches the constraint that emerged from §2.5 and
+matches Commanded's own `interested?/2` signature (which has no
+state parameter).
+
+### Interaction with PM-A
+
+A trivial widening — `RouteFn → PartitionKey[] | "ignore"` —
+would address PM-A (fan-out to N instances per event) at the
+routing layer. PM-A is currently decided in favour of
+modelling-level fan-out (one PM emits per-instance events that a
+second PM consumes), explicitly trading performance for
+expressivity. We keep the singular return for now to honour that
+decision. Singular → list is backwards-compatible; if PM-A is
+ever re-opened, the API can stretch without breaking existing
+PMs.
+
+### Interaction with PM-B (SUB-A)
+
+PM-B's "consequences that survive the move" subsection above is
+updated for this shape: `RouteFn` returns `{ partitionKey } |
+"ignore"` with no directive enum; under SUB-A Design 3, a
+returned `partitionKey` produces one work item, `"ignore"`
+produces none, and the `complete: true` flag from `handle`
+causes the snapshot row AND every work-item for the partition
+(including the triggering one) to be DELETEd in one
+transaction (see "Decided: delete on complete" below).
+
+Future events to a `complete`-d partition route as normal and
+run from `initialState()`. Applications that need "permanently
+terminated" semantics encode it in their own state (in `apply`,
+so it survives replay) or shape `RouteFn` to stop matching
+once the upstream events that mark terminal have passed.
+
+### Interaction with PM-C
+
+PM-C splits today's `handle` into `apply` (pure state fold) and
+`handle` (commands only). PM-F widens PM-C's `handle` return
+from `DispatchedCommand[]` to `{ commands?, complete? }`. The
+two changes share the callback surface and land together.
+
+### Cost
+
+- Applications that relied on framework-level strict checks
+  (`:start!` / `:continue!`) write three lines of guard code in
+  `handle`. The bank-account example doesn't use them; an audit
+  of remaining examples is part of landing this.
+- Framework-level `:stop` semantics move to processing time. Was
+  already unavoidable under any SUB-A design (routing can't see
+  state to decide "this event terminates").
+
+### What lands
+
+1. Updated PM callback types in the TS SDK (`RouteFn`, `apply`,
+   `handle` per the shapes above).
+2. Audit of existing PMs in `examples/` (only the bank-account
+   PM today) and a migration of each to the new shape, plus a
+   one-page upgrade note for external consumers.
+3. PM-B's consequences subsection in this file revised to drop
+   directive references (done in this edit).
+4. PM-C's `handle` signature updated to include `complete?` (do
+   not land PM-C without PM-F or vice versa — they share the
+   callback surface).
+5. On `complete: true`, the processing worker's terminal-tx
+   DELETEs the snapshot AND every work-item for the partition
+   (including the triggering one). One transaction.
+   Non-terminal success path is UPDATE the triggering item to
+   `done` and UPSERT the snapshot.
+6. The reasoning above captured in `docs/decisions.md` (one
+   paragraph: "we don't inherit Commanded's directive set
+   because we don't inherit Commanded's runtime").
+
+### Decided: delete on complete
+
+On `handle` returning `{ complete: true }`, the processing
+worker DELETEs the snapshot row AND DELETEs every work-item
+for the partition (including the triggering one), all in one
+transaction. No tombstone, no terminal-state flag in the
+framework layer; no `done` row left behind.
+
+Rationale:
+
+- Same as aggregates: whether an aggregate/PM can be "reopened"
+  is an application-level concern. The framework doesn't model
+  it.
+- In practice, completed processes are discarded; the event
+  log is the system of record. If an application wants a
+  completed PM to linger (audit, late-arriving events), that's
+  application logic.
+- The `complete: true` signal is therefore best understood as
+  "I no longer need this state; clean up the storage row."
+  It's a row-lifecycle hint, not a domain-lifecycle hint.
+- Soft-delete, re-open, and "reject events for terminal
+  partitions" are application concerns. The natural place is
+  `apply` encoding a terminal flag (per the
+  `apply`-encodes-terminality idiom in PM-C); a terminal
+  partition's future events run `handle` against state with
+  `terminated: true` and the application chooses what to do
+  (no-op, raise, audit, re-open).
+
+Consequence for the per-kind retention contract (see SUB-A
+"Work-item lifecycle by subscription kind"): `complete: true`
+is the **only** mechanism that releases a PM partition's
+work-items. There is no age-based retention for PM work-items.
+The contract: while you have an active PM instance we keep
+enough to reconstruct it from origin via `apply`; when you say
+you're done, we discard everything.
+
+---
+
+## Cross-cutting: ordering across PM-A, PM-B, PM-C, PM-E, PM-F
+
+(PM-D is merged into PM-B, which is itself resolved into SUB-A.)
 
 Suggested pre-release sequencing:
 
-1. **PM-A**, **PM-C**, **PM-E** proceed in parallel — none
-   depends on PM-B's design choice. Each lands when ready.
-2. **PM-B** is parked for a dedicated design pass. Once chosen,
-   it likely subsumes some PM-C and PM-E plumbing (e.g. PM-E's
-   `IS004`-silent-absorption flag may want to live in whichever
-   layer Design 3's instance worker runs in).
+1. **PM-C** + **PM-F** land together — they share the callback
+   surface (`apply` split + `handle` return widened with
+   `complete?`) and are both prerequisites for the PM path of
+   SUB-A.
+2. **PM-B** is the application of SUB-A's proposed design to
+   the PM case. Implementation comes with SUB-A; the contract
+   is already captured in SUB-A's "PM-B constraints" table.
+3. **PM-E** lands with or after PM-C/PM-F; the
+   `IS004`-silent-absorption flag lives in the PM processing
+   worker (the layer that calls `runCommand` on dispatched
+   commands).
+4. **PM-A** is post-release; no dependency on the others.
 
 ---
 
 ## Open questions consolidated
 
-The implementation session needs decisions on these before starting:
+Status after the SUB-A / PM-F / PM-C / lifecycle-contract
+close-out:
 
-1. **PM-B**: parked. Next pass needs to pick between three designs
-   (per-instance subscriptions / partitioned cursors / decoupled
-   router + work queue), with SQL hot-path sketches and operator
-   surface sketches for each.
-2. **PM-B operator escape**: confirm "explicit per-event
-   per-instance skip, with state-loss acknowledgement; no
-   automatic-skip option at all" is the intended shape regardless
-   of which design wins. (Currently captured as a hard
-   constraint.)
+1. ~~**PM-B**: parked.~~ **Resolved**: SUB-A Design 3
+   (decoupled router + work queue) chosen; PM-B's per-instance
+   progress falls out of `partition_by = process_uuid`. See
+   SUB-A's "Proposed design" + "PM-B constraints — how
+   they're satisfied" tables.
+2. ~~**PM-B operator escape**: confirm "explicit per-event
+   per-instance skip ...".~~ **Confirmed** as part of the
+   PM-B constraints table in SUB-A; realised as the
+   `skip_work_item_with_audit` procedure.
 3. **PM-A**: confirm SDK-level fan-out is rejected and the
-   `maybe-later` entry records the rejection.
-4. **PM-C**: confirm migration of existing PMs (the bank-account
-   example) to the split shape as part of the change.
+   `maybe-later` entry records the rejection. (Still open;
+   post-release.)
+4. ~~**PM-C**: confirm migration of existing PMs.~~ **Decided**
+   as part of PM-C status; bank-account migration is a
+   land-item.
+5. ~~**PM-F**: confirm the simplification.~~ **Decided**: PM-F
+   adopted; Commanded directive set not inherited; on
+   `complete: true`, snapshot AND every work-item for the
+   partition DELETEd in one tx.
+
+The one remaining open question for the PM file is PM-A's
+fan-out rejection, which is post-release.

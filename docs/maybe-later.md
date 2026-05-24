@@ -235,6 +235,74 @@ concrete use case asks for it.
 
 ---
 
+## ML-0011 — Less-opinionated `PartitionBy` for projections
+
+PRJ-A in `docs/todo/projections.md` ships a three-mode
+`PartitionBy` surface (`sequential` / `per-event` /
+`per-key`) as the v1 SDK shape. A future SDK revision may
+collapse this to a less-opinionated surface, e.g.
+
+```ts
+type PartitionBy = (event) => string | null
+// null means "don't route to this projection" (= ignore)
+```
+
+or a richer combinator surface that lets applications express
+mixed strategies without enumerated kinds.
+
+**Why deferred:** the three-mode shape is opinionated, but
+opinionated in the direction of clarity (each mode names its
+intent). The free-form shape is more flexible but loses the
+intent signal that tooling (`instructedctl`, soak harness)
+can use to label and inspect subscriptions. Ship the
+opinionated default; revisit when a concrete application use
+case needs something the three modes can't express.
+
+**Forward-compat constraints on v1:**
+
+- Widening from the three-mode union to a function shape is
+  backwards-compatible at the SDK call site (every three-mode
+  usage has a clean function-equivalent). The migration is a
+  source-level rewrite, not a behaviour change.
+- The routing layer's contract (`RouteFn` collects routing
+  decisions per event) is unchanged regardless of how the SDK
+  surfaces the shape to the application. This is an SDK
+  convenience-layer concern, not a core concern.
+
+---
+
+## ML-0010 — Configurable post-success retention for projection work-items
+
+Under the SUB-A proposed design (see `docs/todo/subscriptions.md`)
+and PRJ-E in `docs/todo/projections.md`, projection work-items
+are DELETEd in the same transaction as the handler's successful
+read-model write. No `done` row is persisted.
+
+Applications that want a brief ops-visibility window — e.g.
+"keep `done` rows for K minutes so `instructedctl` can show
+recent processed events per projection" — would need a
+`keepDoneFor: Duration` option on `registerProjection`. The
+processing worker would UPDATE-to-`done` instead of DELETE
+when the option is set, and a background retention task would
+clean rows older than the configured window.
+
+**Why deferred:** no correctness implication. Audit / visibility
+needs today are met by application-level audit logs and by the
+in-flight work surface (`pending`/`claimed`/`failed` rows are
+always visible to `instructedctl`). Ship the simpler
+immediate-delete default first; add the option if real ops
+feedback asks for it.
+
+**Forward-compat constraints on v1:**
+
+- The catch-up predicate (`waitForProjection`) already filters
+  on `state IN ('pending','claimed','failed')`, so adding
+  retained `done` rows later doesn't change the predicate.
+- The work-item schema already includes a `state` column; no
+  migration would be needed when the option ships.
+
+---
+
 ## ML-0009 — Force-snapshot administrative operation
 
 An operator-facing "take a snapshot of aggregate X now"

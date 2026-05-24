@@ -421,9 +421,19 @@ a body of follow-up work split across four working files under
 - `docs/todo/process-manager.md` — PM-specific items that ride on
   top of the subscription substrate (handle/apply split,
   deterministic event IDs for PM-dispatched commands,
-  fan-out-as-modelling-pattern). PM-A, PM-C, PM-E can proceed in
-  parallel with SUB-A; PM-B is the slice that depends on the
-  subscription decision.
+  fan-out-as-modelling-pattern, simplified routing surface
+  collapsing the Commanded directive set). PM-A, PM-C, PM-E,
+  PM-F can proceed in parallel with SUB-A; PM-B is the slice
+  that depends on the subscription decision (and now consists
+  mostly of a constraint-mapping that's already written into
+  the SUB-A proposed design).
+- `docs/todo/projections.md` — projection-side items that ride
+  on the subscription substrate (registration surface for
+  partition modes, why projections don't take PM-C's
+  apply/handle split, read-model transactionality, rebuild as
+  an operator action). All items pre-release; depend on SUB-A
+  landing for the substrate, but the API-surface design can
+  proceed in parallel.
 
 **Post-release / depends on others:**
 
