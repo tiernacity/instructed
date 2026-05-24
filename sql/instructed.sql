@@ -53,7 +53,7 @@
 --   claim_subscription, extend_subscription_claim, release_subscription,
 --   read_subscription_batch, advance_subscription,
 --   read_subscription_position, delete_subscription,
---   route_batch, claim_work_item,
+--   route_batch, claim_work_item, extend_work_item_claim,
 --   complete_work_item_projection, complete_work_item_pm,
 --   complete_pm_instance, fail_work_item,
 --   is_subscription_caught_up.
@@ -464,6 +464,7 @@ create trigger stream_events_no_delete
 --   claim_work_item             holds  { subscription_work_items[one row]
 --                                        (FOR UPDATE SKIP LOCKED),
 --                                        events / stream_events (MVCC) }
+--   extend_work_item_claim      holds  { subscription_work_items[one row] }
 --   complete_work_item_projection  holds  { subscription_work_items[one row] }
 --                                  (the SDK is expected to call this in the
 --                                  same tx as its read-model write per PRJ-C;
@@ -3115,5 +3116,144 @@ begin
           and wi.event_number <= p_target
           and wi.state in ('pending','claimed','failed')
      );
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- extend_work_item_claim
+--
+-- Heartbeat for a work-item claim. The processing worker calls this
+-- periodically while a long-running handler is in progress so the work
+-- item's lease does not expire and trigger a takeover by another worker.
+--
+-- Mirrors extend_subscription_claim in shape. If this call fails with
+-- IS030 the worker MUST stop processing the item; the lease has been
+-- taken over and continuing risks double-execution.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text, must match the row's claimed_by.
+--   p_partition_key     text
+--   p_event_number      bigint
+--   p_lease_seconds     integer, the new lease duration (> 0).
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   lease_expires_at    timestamptz, the new lease expiry (= now() +
+--                         p_lease_seconds).
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found
+--   IS030  work_item_lease_lost     row missing, row is not in 'claimed'
+--                                    state, or claimed_by != p_worker_id.
+--   22023  invalid_parameter_value  null inputs or non-positive lease.
+--
+-- Lock-acquisition order:
+--   1. The subscription_work_items row keyed by
+--      (stream_id, name, shard, partition_key, event_number):
+--      SELECT ... FOR UPDATE; verify state='claimed' AND claimed_by;
+--      UPDATE lease_expires_at.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.extend_work_item_claim (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_partition_key     text,
+  p_event_number      bigint,
+  p_lease_seconds     integer,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    lease_expires_at timestamptz
+  )
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_expires   timestamptz;
+  v_state     text;
+  v_holder    text;
+begin
+  if p_stream_uuid is null then
+    raise exception 'extend_work_item_claim: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'extend_work_item_claim: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'extend_work_item_claim: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_partition_key is null then
+    raise exception 'extend_work_item_claim: p_partition_key is null'
+      using errcode = '22023';
+  end if;
+  if p_event_number is null or p_event_number < 0 then
+    raise exception 'extend_work_item_claim: p_event_number must be non-negative'
+      using errcode = '22023';
+  end if;
+  if p_lease_seconds is null or p_lease_seconds <= 0 then
+    raise exception 'extend_work_item_claim: p_lease_seconds must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  v_shard   := coalesce((p_options->>'shard')::smallint, 0);
+  v_expires := now() + make_interval(secs => p_lease_seconds);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'extend_work_item_claim: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'extend_work_item_claim: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  select state, claimed_by into v_state, v_holder
+    from instructed.subscription_work_items
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number
+   for update;
+
+  if not found then
+    raise exception 'extend_work_item_claim: work item (%, %) gone (takeover)',
+      p_partition_key, p_event_number
+      using errcode = 'IS030';
+  end if;
+  if v_state <> 'claimed' or v_holder is distinct from p_worker_id then
+    raise exception 'extend_work_item_claim: lease lost (state=%, holder=%, caller=%)',
+      v_state, coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS030';
+  end if;
+
+  update instructed.subscription_work_items
+     set lease_expires_at = v_expires
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number;
+
+  return query select v_expires;
 end;
 $$;

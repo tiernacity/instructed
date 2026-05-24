@@ -547,6 +547,47 @@ export class Client {
   }
 
   /**
+   * Heartbeat for a work-item claim. Extends `lease_expires_at` to
+   * `now() + leaseSeconds`. Raises `WorkItemLeaseLost` (IS030) if the
+   * row is gone, no longer in `'claimed'` state, or claimed by a
+   * different worker -- in any of those cases the SDK must stop
+   * processing the item.
+   */
+  async extendWorkItemClaim(
+    streamUuid: string,
+    subscriptionName: string,
+    workerId: string,
+    partitionKey: string,
+    eventNumber: bigint,
+    leaseSeconds: number,
+    options: SubscriptionShardOption = {},
+  ): Promise<{ leaseExpiresAt: Date }> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    const res = await this.run<{ lease_expires_at: Date | string }>(
+      `SELECT lease_expires_at
+         FROM instructed.extend_work_item_claim($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        workerId,
+        partitionKey,
+        eventNumber.toString(),
+        leaseSeconds,
+        JSON.stringify(opts),
+      ],
+      {
+        streamUuid,
+        subscriptionName,
+        shard: options.shard,
+        partitionKey,
+        eventNumber,
+      },
+    );
+    return { leaseExpiresAt: toDate(res.rows[0].lease_expires_at) };
+  }
+
+  /**
    * Projection terminal success (PRJ-E): DELETE the work item. The SDK is
    * expected to call this in the same transaction as the handler's
    * read-model write (PRJ-C); pass a `Queryable` bound to that

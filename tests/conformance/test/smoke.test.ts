@@ -80,6 +80,7 @@ describe("conformance harness — smoke", () => {
       // SUB-A work-queue procedures (slice 2).
       "route_batch",
       "claim_work_item",
+      "extend_work_item_claim",
       "complete_work_item_projection",
       "complete_work_item_pm",
       "complete_pm_instance",

@@ -406,6 +406,96 @@ describe("SUB-A slice 2 — claim_work_item", () => {
   });
 });
 
+describe("SUB-A slice 5 — extend_work_item_claim", () => {
+  let pool: pg.Pool;
+  before(async () => {
+    pool = await getPool();
+  });
+  beforeEach(async () => {
+    await truncateAll(pool);
+    await claimSubscription(pool);
+  });
+  after(async () => {
+    await closePool();
+  });
+
+  async function seedAndClaim(
+    worker = WORKER,
+  ): Promise<{ en: bigint; expiresBefore: Date }> {
+    const [en] = await appendN(pool, "s1", 1);
+    await pool.query(
+      `SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
+      [
+        ALL,
+        SUB,
+        WORKER,
+        en.toString(),
+        JSON.stringify([{ partition_key: "p", event_number: Number(en) }]),
+      ],
+    );
+    const claimed = await claim(pool, worker);
+    return { en, expiresBefore: new Date(claimed!.lease_expires_at) };
+  }
+
+  test("extends the lease for the claimant", async () => {
+    const { en, expiresBefore } = await seedAndClaim();
+    await new Promise((r) => setTimeout(r, 50));
+    const r = await pool.query<{ lease_expires_at: string }>(
+      `SELECT * FROM instructed.extend_work_item_claim(
+         $1, $2, $3, $4, $5, $6)`,
+      [ALL, SUB, WORKER, "p", Number(en), 60],
+    );
+    const expiresAfter = new Date(r.rows[0].lease_expires_at);
+    assert.ok(
+      expiresAfter.getTime() > expiresBefore.getTime(),
+      `lease should have been extended (before=${expiresBefore.toISOString()}, after=${expiresAfter.toISOString()})`,
+    );
+  });
+
+  test("non-claimant raises IS030", async () => {
+    const { en } = await seedAndClaim();
+    await rejectsWithCode(
+      () =>
+        pool.query(
+          `SELECT * FROM instructed.extend_work_item_claim(
+             $1, $2, $3, $4, $5, $6)`,
+          [ALL, SUB, "intruder", "p", Number(en), 30],
+        ),
+      "IS030",
+    );
+  });
+
+  test("missing row raises IS030", async () => {
+    await rejectsWithCode(
+      () =>
+        pool.query(
+          `SELECT * FROM instructed.extend_work_item_claim(
+             $1, $2, $3, $4, $5, $6)`,
+          [ALL, SUB, WORKER, "nope", 999, 30],
+        ),
+      "IS030",
+    );
+  });
+
+  test("row no longer in 'claimed' state raises IS030", async () => {
+    const { en } = await seedAndClaim();
+    // Move the row to 'failed'.
+    await pool.query(
+      `SELECT instructed.fail_work_item($1, $2, $3, $4, $5, $6)`,
+      [ALL, SUB, WORKER, "p", Number(en), "boom"],
+    );
+    await rejectsWithCode(
+      () =>
+        pool.query(
+          `SELECT * FROM instructed.extend_work_item_claim(
+             $1, $2, $3, $4, $5, $6)`,
+          [ALL, SUB, WORKER, "p", Number(en), 30],
+        ),
+      "IS030",
+    );
+  });
+});
+
 describe("SUB-A slice 2 — complete_work_item_projection", () => {
   let pool: pg.Pool;
   before(async () => {
