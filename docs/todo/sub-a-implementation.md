@@ -5,6 +5,212 @@ its required siblings. It exists so a fresh session does not
 have to re-derive the slice order from the design files. Delete
 this file when the work lands.
 
+## Status snapshot (for a fresh session picking this up)
+
+**Done:** Slices 1–5 (commits `fbd7b9c`, `1b08e1c`, `23d0bd0`,
+`76a7b79`, `984da26`; plus `8554a9a` for ML-0012).
+
+**Next:** Slice 6 (processing worker, projection branch).
+
+**Process the original session followed and the new session
+should keep:**
+
+- Read this file first, then the SUB-A proposed-design subsection
+  of `subscriptions.md` (line 283 onwards), then
+  `process-manager.md` PM-C/PM-F, then `projections.md` PRJ-A/B/C/E.
+- Land each slice as one coherent commit with its tests in the
+  same commit. No "tests later" passes.
+- Before each slice, list any design ambiguities and any
+  knob choices, and ask the user to confirm. Do not extend the
+  design unilaterally.
+- After each slice, surface any decisions that went beyond what
+  the design files state explicitly (errors codes, semantics
+  defaults, etc.) in the commit message and in the chat summary.
+- Re-baseline the test DB whenever the schema changes
+  (`docker exec instructed-postgres-1 psql -U postgres -d postgres
+  -c "DROP DATABASE IF EXISTS instructed_test"`); both the
+  conformance fixture (`tests/conformance/test/fixtures.ts`) and
+  the SDK fixture (`sdks/typescript/test/fixtures.ts`) re-install
+  the schema on first connection.
+
+## Carried-forward decisions (don't re-litigate)
+
+These were resolved during slices 1–5 and should be honoured
+by the remaining slices unless a new design question explicitly
+reopens them.
+
+- **No `sql/migrations/` files.** v1 hasn't shipped a release
+  and there are no consumers; schema changes land directly in
+  `sql/instructed.sql`. The migrations README's `<from>-<to>.sql`
+  convention will reactivate at first release tag.
+- **`subscription_work_items` PK is the composite
+  `(stream_id, subscription_name, shard, partition_key,
+  event_number)`**, expanded from the design's illustrative
+  `subscription_id`. The `subscriptions` table has no surrogate
+  id at v1; expanding the FK was simpler than retrofitting one
+  in this work. If a surrogate id is added later the PK shrinks
+  with no semantic change. Documented inline on the table.
+- **`ON DELETE CASCADE`** from `subscription_work_items` to
+  `subscriptions`. Cleaner test ergonomics; matches operator
+  expectations.
+- **Per-state CHECK constraints** on `subscription_work_items`:
+  `state ∈ {pending,claimed,failed,done}`,
+  `claimed ⇔ (claimed_by AND lease_expires_at)`,
+  `failed ⇔ failed_at`, `error_text` only on failed rows.
+  Mechanism-level; the procedures maintain them; the CHECKs
+  catch any future direct-SQL bug.
+- **New SQLSTATE `IS030 work_item_lease_lost`.** Covers both
+  "row gone" and "claimed_by mismatch" on terminal calls;
+  either way "stop". Mapped to the `WorkItemLeaseLost` typed
+  error in the SDK (with `partitionKey` / `eventNumber`
+  context fields).
+- **`is_subscription_caught_up` shipped as a SQL function**
+  (not just a documented query). Slice 8's `waitForProjection`
+  reimplementation calls it directly.
+- **`route_batch`'s cursor advance is monotone**
+  (`greatest(last_seen, p_new_cursor)`), not a straight assign.
+  Defensive against crash-replay and re-entry; equivalent
+  under normal single-active routing.
+- **`route_batch` requires the caller to hold the subscription
+  lease** (IS022 on mismatch). Enforced at the SQL boundary,
+  not just in the SDK.
+- **`claim_work_item` does NOT take a subscription lease.**
+  Open to any processing worker. The subscription-level lease
+  exists only for the routing worker.
+- **`complete_pm_instance` takes no `worker_id` and no
+  triggering `event_number`.** Followed the slice 2 signature
+  literally. Idempotent on second call (returns zero counts).
+  A takeover worker also reaching `complete: true` re-runs
+  it as a no-op.
+- **`extend_work_item_claim` was carried forward into slice 5**
+  from slice 2. The slice 2 brief didn't list it; slice 5's
+  "lease renewal heartbeat during long handler execution"
+  needed it. Mirrors `extend_subscription_claim` in shape and
+  raises IS030 on lease loss. Conformance covered.
+- **Routing worker `close()` mid-batch DROPS the partial
+  batch**, not flushes. Same observable behaviour as a crash;
+  re-launched worker re-reads from `lastSeen` and the
+  work-items PK absorbs duplicates. Recorded as **ML-0012**
+  in `docs/maybe-later.md` so the alternative remains a
+  documented option.
+- **`routeBatch` wire format: `event_number` is a JSON number**
+  (not string). Safe up to 2^53; documented as an inline
+  known-gap in `Client.routeBatch`. Re-evaluate before v1 if
+  a realistic deployment approaches that bound.
+- **Processing worker `SubscriptionNotFound` on claim is a
+  retry, not a fatal.** The processing worker may be started
+  before the routing worker has created the subscription row;
+  it sleeps `pollInterval` and tries again. All other
+  `claim_work_item` errors surface via `onError` and retry.
+- **SUB-B `'stop'` decision does NOT call `fail_work_item`.**
+  Per SUB-B: "stop terminates the worker. Other workers may
+  still pick up the work item". The row stays `claimed`,
+  lease expires, redelivery handles it. `failed` is reserved
+  for the future convenience-wrapper layer (`quarantineAfter`)
+  and operator action only.
+- **`complete()` IS030 in the processing worker -> markAborted.**
+  Lease was taken over between handle and complete; redelivery
+  via lease expiry handles the item. Same for any non-IS030
+  `complete` error: not safe to re-run `handle` without
+  `complete` since the handler may not be idempotent.
+- **New modules are NOT yet exported from
+  `sdks/typescript/src/index.ts`.** The layer-5 facade in
+  slice 9 will wire them. Tests import directly via the
+  module path. Slice 9 is the right place to decide the
+  public surface; until then keep this internal.
+
+## Knob defaults (locked in, slices 1–5)
+
+| Knob | Value | Source |
+|---|---|---|
+| Lease duration (routing) | `30s` | design illustration |
+| Lease duration (processing) | `30s` | mirrors routing |
+| Routing batch size | `100` | confirmed |
+| Routing poll interval | `200ms` | confirmed |
+| Processing poll interval | `200ms` | confirmed |
+| Lease heartbeat | `lease*1000/3`, min `1s` | confirmed |
+| Worker ID format | `${hostname}:${pid}:${uuidv4-8}` | confirmed; reused from existing `defaultWorkerId` |
+| Default error policy | exponential, base `100ms`, factor `2`, cap `30s`, retry forever | per SUB-B "What lands" #2 |
+
+Later slices that introduce new knobs (batch sizes for the
+projection / PM branches, etc.) should propose a default and
+ask, per the original process.
+
+## What's in the tree now (for orientation)
+
+SQL:
+- `sql/instructed.sql` — canonical spec. Contains the
+  `subscription_work_items` table, the eight SUB-A procedures
+  (`route_batch`, `claim_work_item`, `extend_work_item_claim`,
+  `complete_work_item_projection`, `complete_work_item_pm`,
+  `complete_pm_instance`, `fail_work_item`,
+  `is_subscription_caught_up`), and the IS030 SQLSTATE.
+
+SDK (`sdks/typescript/src/`):
+- `client.ts` — layer-0 wrappers extended with the eight
+  SUB-A methods.
+- `errors.ts` — `WorkItemLeaseLost` (IS030) added;
+  `MapPgErrorContext` extended with `partitionKey` /
+  `eventNumber`.
+- `types.ts` — `RouteDecision`, `RouteBatchResult`,
+  `ClaimedWorkItem`, `CompletePmInstanceResult`.
+- `routing-worker.ts` — SUB-A routing worker (slice 4).
+  Exposes `startRoutingWorker`, `RoutingDecision`,
+  `RoutingFn`, `RoutingDefinition`, `RoutingWorkerOptions`,
+  and the `DEFAULT_ROUTING_*` constants.
+- `processing-worker.ts` — SUB-A processing worker (slice 5).
+  Kind-agnostic. Exposes `startProcessingWorker`,
+  `ProcessingHandler`, `ProcessingCompleter`,
+  `ProcessingHandlerContext`, `ErrorPolicy`,
+  `ErrorPolicyDecision`, `DEFAULT_ERROR_POLICY`, and the
+  `DEFAULT_PROCESSING_*` constants. **Slices 6 and 7 plug
+  in here via the `complete` callback** — do not build a new
+  loop.
+- `subscription.ts`, `process-manager.ts` — the **old**
+  projection / PM workers. Untouched in slices 1–5. Slice 9
+  will replace the facade and may remove these (PM-F is a
+  breaking change at the SDK surface per the slice-9 brief).
+- `index.ts` — NOT yet extended with the new modules. Slice
+  9 is the right place.
+
+Tests:
+- `tests/conformance/test/subscription-work-items-schema.test.ts`
+  — slice 1.
+- `tests/conformance/test/subscription-work-items-procedures.test.ts`
+  — slices 2 + 5 (extend_work_item_claim cases live here
+  under a "SUB-A slice 5" describe block).
+- `tests/conformance/test/smoke.test.ts` — procedure-presence
+  catalogue extended.
+- `sdks/typescript/test/client-work-queue.test.ts` — slice 3.
+- `sdks/typescript/test/routing-worker.test.ts` — slice 4.
+- `sdks/typescript/test/processing-worker.test.ts` — slice 5.
+
+Fixtures (`fixtures.ts` in both `tests/conformance/test/` and
+`sdks/typescript/test/`) have `subscription_work_items` in
+their TRUNCATE list.
+
+## Test commands
+
+```sh
+# Re-baseline test DB after schema changes:
+docker exec instructed-postgres-1 psql -U postgres -d postgres \
+  -c "DROP DATABASE IF EXISTS instructed_test"
+
+# SDK:
+cd sdks/typescript && npm run type-check && npm test
+
+# Conformance:
+cd tests/conformance && npm test
+```
+
+As of the end of slice 5: SDK 127 pass / 0 fail; conformance
+157 pass / 0 fail / 3 pre-existing skipped.
+
+Known pre-existing type-check failures in
+`examples/bank-account/` (CommonJS / `verbatimModuleSyntax`).
+These land for migration in slice 10; ignore them in earlier
+slices.
+
 ## Goal
 
 Land the routing-vs-processing substrate (SUB-A) end to end:
