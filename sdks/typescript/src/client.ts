@@ -19,10 +19,14 @@ import type {
   AppendedEvent,
   ClaimResult,
   ClaimSubscriptionOptions,
+  ClaimedWorkItem,
+  CompletePmInstanceResult,
   ExpectedVersion,
   NewEvent,
   Queryable,
   RecordedEvent,
+  RouteBatchResult,
+  RouteDecision,
   Snapshot,
   SnapshotInput,
   SubscriptionShardOption,
@@ -436,5 +440,306 @@ export class Client {
       [streamUuid, subscriptionName, JSON.stringify(opts)],
       { streamUuid, subscriptionName, shard: options.shard },
     );
+  }
+
+  // ---- SUB-A work queue ----
+
+  /**
+   * Atomically advance the routing cursor to `newCursor` and insert one
+   * work item per decision. Re-running with the same decisions hits
+   * `ON CONFLICT DO NOTHING` on the work-items PK and is therefore
+   * crash-replay safe. The caller MUST hold the subscription's lease;
+   * lease loss raises `SubscriptionLeaseLost` (IS022).
+   *
+   * The cursor advance is monotone (`greatest(last_seen, newCursor)`).
+   */
+  async routeBatch(
+    streamUuid: string,
+    subscriptionName: string,
+    workerId: string,
+    newCursor: bigint,
+    decisions: RouteDecision[],
+    options: SubscriptionShardOption = {},
+  ): Promise<RouteBatchResult> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    const payload = decisions.map((d) => ({
+      partition_key: d.partitionKey,
+      // event_number must be a JSON number (the SQL contract requires
+      // jsonb_typeof = 'number'). bigint -> Number is safe in v1: the
+      // store uses bigint event_numbers but no realistic deployment
+      // exceeds 2^53 in v1. If that ever becomes a real concern the
+      // SQL contract can be widened to accept a string; documented as
+      // a known gap here.
+      event_number: Number(d.eventNumber),
+    }));
+    const res = await this.run<{
+      inserted_count: string | number;
+      new_last_seen: string | number;
+    }>(
+      `SELECT inserted_count, new_last_seen
+         FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        workerId,
+        newCursor.toString(),
+        JSON.stringify(payload),
+        JSON.stringify(opts),
+      ],
+      { streamUuid, subscriptionName, shard: options.shard },
+    );
+    const r = res.rows[0];
+    return {
+      insertedCount: toBigInt(r.inserted_count),
+      newLastSeen: toBigInt(r.new_last_seen),
+    };
+  }
+
+  /**
+   * Claim the next available work item for `subscriptionName`, enforcing
+   * per-partition ordering (no row is claimable while an earlier row for
+   * the same partition is still non-terminal). Includes the
+   * lease-takeover branch: a `claimed` row with `lease_expires_at <
+   * now()` is eligible.
+   *
+   * Returns `null` when the queue is empty (the SDK is expected to poll).
+   */
+  async claimWorkItem(
+    streamUuid: string,
+    subscriptionName: string,
+    workerId: string,
+    leaseSeconds: number,
+    options: SubscriptionShardOption = {},
+  ): Promise<ClaimedWorkItem | null> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    const res = await this.run<{
+      partition_key: string;
+      event_number: string | number;
+      claimed_by: string;
+      lease_expires_at: Date | string;
+      was_takeover: boolean;
+      prior_claimed_by: string | null;
+    }>(
+      `SELECT partition_key, event_number, claimed_by, lease_expires_at,
+              was_takeover, prior_claimed_by
+         FROM instructed.claim_work_item($1, $2, $3, $4, $5::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        workerId,
+        leaseSeconds,
+        JSON.stringify(opts),
+      ],
+      { streamUuid, subscriptionName, shard: options.shard },
+    );
+    if (res.rows.length === 0) return null;
+    const r = res.rows[0];
+    return {
+      partitionKey: r.partition_key,
+      eventNumber: toBigInt(r.event_number),
+      claimedBy: r.claimed_by,
+      leaseExpiresAt: toDate(r.lease_expires_at),
+      wasTakeover: r.was_takeover,
+      priorClaimedBy: r.prior_claimed_by,
+    };
+  }
+
+  /**
+   * Projection terminal success (PRJ-E): DELETE the work item. The SDK is
+   * expected to call this in the same transaction as the handler's
+   * read-model write (PRJ-C); pass a `Queryable` bound to that
+   * transaction via the `Client` constructor for that purpose.
+   *
+   * Raises `WorkItemLeaseLost` (IS030) if the caller is not (or no
+   * longer) the row's claimant.
+   */
+  async completeWorkItemProjection(
+    streamUuid: string,
+    subscriptionName: string,
+    workerId: string,
+    partitionKey: string,
+    eventNumber: bigint,
+    options: SubscriptionShardOption = {},
+  ): Promise<void> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    await this.run(
+      `SELECT instructed.complete_work_item_projection($1, $2, $3, $4, $5, $6::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        workerId,
+        partitionKey,
+        eventNumber.toString(),
+        JSON.stringify(opts),
+      ],
+      {
+        streamUuid,
+        subscriptionName,
+        shard: options.shard,
+        partitionKey,
+        eventNumber,
+      },
+    );
+  }
+
+  /**
+   * PM non-terminal success (PM-C / PM-F): UPDATE the work item to `done`
+   * AND UPSERT the PM's snapshot, in one transaction.
+   *
+   * Raises `WorkItemLeaseLost` (IS030) if the caller is not the row's
+   * claimant.
+   */
+  async completeWorkItemPm<S = unknown>(
+    streamUuid: string,
+    subscriptionName: string,
+    workerId: string,
+    partitionKey: string,
+    eventNumber: bigint,
+    snapshot: SnapshotInput<S>,
+    options: SubscriptionShardOption = {},
+  ): Promise<void> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    await this.run(
+      `SELECT instructed.complete_work_item_pm(
+         $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        workerId,
+        partitionKey,
+        eventNumber.toString(),
+        snapshot.sourceUuid,
+        snapshot.sourceType,
+        snapshot.sourceVersion.toString(),
+        JSON.stringify(snapshot.data),
+        snapshot.metadata === undefined
+          ? null
+          : JSON.stringify(snapshot.metadata),
+        JSON.stringify(opts),
+      ],
+      {
+        streamUuid,
+        subscriptionName,
+        shard: options.shard,
+        partitionKey,
+        eventNumber,
+        sourceUuid: snapshot.sourceUuid,
+      },
+    );
+  }
+
+  /**
+   * PM terminal success (`handle` returned `{ complete: true }`, PM-F):
+   * DELETE the snapshot AND every work item for the partition in one
+   * transaction. Idempotent: a second call returns zero counts and does
+   * not raise.
+   */
+  async completePmInstance(
+    streamUuid: string,
+    subscriptionName: string,
+    partitionKey: string,
+    snapshotUuid: string,
+    options: SubscriptionShardOption = {},
+  ): Promise<CompletePmInstanceResult> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    const res = await this.run<{
+      work_items_deleted: string | number;
+      snapshot_deleted: boolean;
+    }>(
+      `SELECT work_items_deleted, snapshot_deleted
+         FROM instructed.complete_pm_instance($1, $2, $3, $4, $5::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        partitionKey,
+        snapshotUuid,
+        JSON.stringify(opts),
+      ],
+      {
+        streamUuid,
+        subscriptionName,
+        shard: options.shard,
+        partitionKey,
+        sourceUuid: snapshotUuid,
+      },
+    );
+    const r = res.rows[0];
+    return {
+      workItemsDeleted: toBigInt(r.work_items_deleted),
+      snapshotDeleted: r.snapshot_deleted,
+    };
+  }
+
+  /**
+   * Move a claimed work item to `failed`. The row blocks subsequent
+   * work items for its partition only; other partitions are unaffected.
+   * `failed` rows are never auto-skipped or auto-deleted; operator action
+   * (deferred to `instructedctl`) is required to clear them.
+   *
+   * Raises `WorkItemLeaseLost` (IS030) if the caller is not the claimant.
+   */
+  async failWorkItem(
+    streamUuid: string,
+    subscriptionName: string,
+    workerId: string,
+    partitionKey: string,
+    eventNumber: bigint,
+    errorText: string | null,
+    options: SubscriptionShardOption = {},
+  ): Promise<void> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    await this.run(
+      `SELECT instructed.fail_work_item($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        workerId,
+        partitionKey,
+        eventNumber.toString(),
+        errorText,
+        JSON.stringify(opts),
+      ],
+      {
+        streamUuid,
+        subscriptionName,
+        shard: options.shard,
+        partitionKey,
+        eventNumber,
+      },
+    );
+  }
+
+  /**
+   * The SUB-A catch-up predicate: returns true iff the routing cursor is
+   * at or past `target` AND no work item for the subscription with
+   * `event_number <= target` is still in a non-terminal state. Used by
+   * `waitForProjection` (slice 8).
+   */
+  async isSubscriptionCaughtUp(
+    streamUuid: string,
+    subscriptionName: string,
+    target: bigint,
+    options: SubscriptionShardOption = {},
+  ): Promise<boolean> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    const res = await this.run<{ caught_up: boolean }>(
+      `SELECT caught_up
+         FROM instructed.is_subscription_caught_up($1, $2, $3, $4::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        target.toString(),
+        JSON.stringify(opts),
+      ],
+      { streamUuid, subscriptionName, shard: options.shard },
+    );
+    return res.rows[0].caught_up;
   }
 }

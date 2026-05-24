@@ -183,6 +183,47 @@ export class SubscriptionNotFound extends SubscriptionError {}
 export class SubscriptionAlreadyClaimed extends SubscriptionError {}
 export class SubscriptionLeaseLost extends SubscriptionError {}
 
+// ---- IS030: work-item errors (SUB-A) --------------------------------------
+
+/**
+ * Raised by `complete_work_item_*` and `fail_work_item` when the caller is
+ * not (or no longer) the row's claimant. Covers both "row gone" (a
+ * takeover worker already terminal-deleted it) and "claimed_by mismatch"
+ * (the lease expired and another worker took over). Either way the
+ * contract is: stop processing.
+ */
+export class WorkItemLeaseLost extends InstructedError {
+  readonly streamUuid?: string;
+  readonly subscriptionName?: string;
+  readonly shard?: number;
+  readonly partitionKey?: string;
+  readonly eventNumber?: bigint;
+  readonly holder?: string;
+  constructor(
+    message: string,
+    opts: {
+      code?: string;
+      detail?: string;
+      hint?: string;
+      streamUuid?: string;
+      subscriptionName?: string;
+      shard?: number;
+      partitionKey?: string;
+      eventNumber?: bigint;
+      holder?: string;
+      cause?: unknown;
+    } = {},
+  ) {
+    super(message, opts);
+    this.streamUuid = opts.streamUuid;
+    this.subscriptionName = opts.subscriptionName;
+    this.shard = opts.shard;
+    this.partitionKey = opts.partitionKey;
+    this.eventNumber = opts.eventNumber;
+    this.holder = opts.holder;
+  }
+}
+
 // ---- 22023 -----------------------------------------------------------------
 
 export class InvalidParameterValue extends InstructedError {}
@@ -267,6 +308,10 @@ export interface MapPgErrorContext {
   shard?: number;
   /** The snapshot source_uuid, if known at call site. */
   sourceUuid?: string;
+  /** The work-item partition, if known at call site (SUB-A). */
+  partitionKey?: string;
+  /** The work-item event_number, if known at call site (SUB-A). */
+  eventNumber?: bigint;
 }
 
 /**
@@ -334,6 +379,15 @@ export function mapPgError(err: unknown, ctx: MapPgErrorContext = {}): unknown {
         streamUuid: ctx.streamUuid,
         subscriptionName: ctx.subscriptionName,
         shard: ctx.shard,
+      });
+    case "IS030":
+      return new WorkItemLeaseLost(msg, {
+        ...base,
+        streamUuid: ctx.streamUuid,
+        subscriptionName: ctx.subscriptionName,
+        shard: ctx.shard,
+        partitionKey: ctx.partitionKey,
+        eventNumber: ctx.eventNumber,
       });
     case "22023":
       return new InvalidParameterValue(msg, base);

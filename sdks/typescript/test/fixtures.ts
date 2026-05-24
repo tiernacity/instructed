@@ -93,6 +93,7 @@ export async function truncateAll(p: pg.Pool): Promise<void> {
   // the `$all` row afterwards.
   await p.query(`
     TRUNCATE
+      instructed.subscription_work_items,
       instructed.stream_events,
       instructed.events,
       instructed.snapshots,
