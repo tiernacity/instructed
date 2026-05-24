@@ -12,6 +12,17 @@ about things we deliberately *won't* do.
 
 ## ML-0001 — Concurrent partitioned subscription consumers
 
+**Status:** Superseded. The capability still matters, but it is no
+longer a standalone item — it is one of the shapes the
+subscription substrate redesign tracked in
+[`todo/subscriptions.md`](todo/subscriptions.md) SUB-A is expected
+to provide. Under the leading candidate (Design 3, decoupled
+router + work queue), partitioned consumption falls out of varying
+the partition key per subscription; there is no separate
+"partitioned consumer" feature to add later.
+
+The original framing follows for context.
+
 Allow a single named subscription to be consumed by N workers in
 parallel, with a partitioning function (typically over
 `stream_id`) that preserves per-partition order while sacrificing
@@ -138,3 +149,106 @@ cases:
   lock-set disjointness; ML-0004 will not cover PMs in a first
   cut. Aggregates and projections only.
 
+---
+
+## ML-0006 — General "subscription has processed every relevant event ≤ N" wait predicate
+
+The current consistency-wait primitive answers
+"has subscription S processed event_number T?" by comparing
+positions, and rejects cross-stream targets (a per-stream
+subscription can only wait on appends to its own stream — see
+`todo/consistency.md` CON-B).
+
+A more general predicate would answer:
+
+> Has subscription S processed every event with `event_number
+> <= N` that S would ever have been notified about?
+
+Useful when a caller knows global progress (an `event_number`)
+and wants assurance that the projection has caught up "as much
+as it ever will" relative to that global point, regardless of
+which streams contributed.
+
+**Why deferred:** the v1 reject-cross-stream behaviour matches
+what callers intuitively mean. The general predicate is a real
+feature, not a workaround, and deserves its own design pass —
+likely an additional check inside the poll loop ("are there any
+events on S's scope with `s.last_seen < event_number <= N`?")
+that depends on the subscription substrate (SUB-A) being
+decided first.
+
+**Forward-compat constraints on v1:**
+
+- Keep the cross-stream guard (`ConsistencyTargetError`) — it
+  catches misuse of the simple predicate without preventing a
+  future general predicate from being added under a different
+  name or option flag.
+- Likely interacts with SUB-A's work-queue model: the predicate
+  becomes "is there any pending or claimed work item on S with
+  `event_number <= N`?", which is naturally available there.
+
+---
+
+## ML-0007 — Aggregate Multi-step convenience
+
+A helper for splitting one command into sequential steps with
+intermediate state visible to later steps, similar to running
+the aggregate's applier between event productions. Useful when
+later steps in a command need to read state derived from
+earlier events (e.g. "withdraw N, then if balance < 0 record
+overdraft").
+
+**Why deferred:** applications can fold the same logic by
+computing all events in the handler and tracking running state
+manually. The convenience is real but the pattern hasn't shown
+up often enough to earn core-SDK status.
+
+**Forward-compat constraints on v1:**
+
+- Purely additive at the SDK layer. The aggregate execute
+  signature returning `events[]` is unchanged; the helper just
+  builds the array more ergonomically.
+
+---
+
+## ML-0008 — Aggregate state / version introspection helpers
+
+Two helpers on the `Instructed` facade:
+
+- `aggregateStateOf(definition, uuid) → Promise<state>` —
+  returns the current folded state without dispatching a
+  command.
+- `aggregateVersionOf(definition, uuid) → Promise<bigint>` —
+  returns the current version without folding state.
+
+Useful for diagnostics, debugging, and read-only callers that
+need state without taking the dispatch path.
+
+**Why deferred:** trivially implementable on top of current
+primitives (read snapshot, read events, fold). Adding the
+helper is convenience, not capability. Worth doing when a
+concrete use case asks for it.
+
+**Forward-compat constraints on v1:**
+
+- Purely additive on the facade.
+
+---
+
+## ML-0009 — Force-snapshot administrative operation
+
+An operator-facing "take a snapshot of aggregate X now"
+operation, regardless of the configured snapshot policy.
+Useful post-deploy (warm up snapshot caches) and pre-archive
+(checkpoint before bulk operations).
+
+**Why deferred:** belongs in `instructedctl` (TODO #7) when
+that lands, not in the SDK surface. Apps that need it today
+can read state + write a snapshot via existing SDK
+primitives.
+
+**Forward-compat constraints on v1:**
+
+- No SDK signature change required; the SDK already exposes
+  `record_snapshot`. `instructedctl` consumes the same
+  primitive.

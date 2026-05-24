@@ -146,3 +146,23 @@ The SQL contract still supports co-transactional advance —
 transaction — so a narrow Postgres-projecting-into-same-database
 opt-in is achievable in a future SDK version.
 See [D-0016](decisions.md#d-0016).
+
+## No SDK-level fan-out of one event to many PM instances
+
+A `RouteFn` returns at most one `processId` per event. The SDK
+does not parallelise an event across multiple PM instances of
+the same type.
+
+Applications that want fan-out (a `BatchApproved` event
+affecting every `Order` in the batch) model it with composition:
+a first PM consumes `BatchApproved` and emits per-instance
+events (`OrderApprovalRequested × N`); a second PM consumes
+those per-instance events.
+
+The trade is performance/optimisation for expressivity and
+flexibility. Modelling fan-out in domain terms keeps the
+fan-out semantics (parallel? sequential? what if one fails?
+what about ordering across the fanned-out events?) in
+application code where the decisions belong, rather than
+baking SDK-level assumptions every application then has to
+override.

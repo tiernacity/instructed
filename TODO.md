@@ -6,71 +6,6 @@ prompted the list. Pick them up one at a time.
 
 ---
 
-## 1. Fresh Commanded re-review — find load-bearing BEAM-isms we may have under-served
-
-**Why this exists.** Our existing invariant catalogue (`docs/invariants.md`,
-`docs/guarantees.md`) was derived from Commanded's adapter contract and
-its conformance tests. The (I)/(B)/(C) classification in `guarantees.md`
-Part G was our judgement on each item. The risk: we classified something
-as **(B)** "BEAM mechanism, can be dropped" when it was actually
-**(I) realised via a BEAM mechanism** — i.e. intrinsic CQRS/ES that
-Commanded happened to do in OTP and we forgot to provide an equivalent.
-
-**What to do.** Treat the catalogue as suspect and re-read Commanded
-against a fresh review spec. For each Commanded mechanism flagged
-`[beam-mechanism]` in `guarantees.md`, ask:
-
-- Is there an *observable application-facing behaviour* this mechanism
-  provides?
-- If yes, does `instructed` provide that behaviour by some other means?
-- If no, is the behaviour intrinsic to CQRS/ES (apps will break without
-  it) or convenience (apps can live without it)?
-
-Specific candidates that warrant the closest look:
-
-- **AGG-011** — per-aggregate command serialisation via GenServer mailbox.
-  We replaced this with OCC retry (D-0005). The semantic *outcome* is the
-  same, but is there a behavioural difference under sustained contention
-  (e.g. retry storm vs. fair queue) that applications would notice?
-- **AGG-025** — aggregate self-subscription. We dropped this because
-  NG-0002 eliminates the in-memory cache. But the self-subscription also
-  served as a *liveness signal* for "this aggregate exists somewhere".
-  Re-check whether anything in Commanded depended on that signal beyond
-  the cache-coherence story.
-- **CON-002/003/013** — pubsub + ETS for strong-consistency-on-dispatch.
-  We replaced with polling (CON-010). Latency floor is the obvious
-  trade-off. Is there a *correctness* difference under heavy concurrent
-  ack traffic that we missed?
-- **PM-040** — per-instance GenServer for process managers. We rely on
-  the single-active-worker-per-subscription contract instead. Re-check
-  whether Commanded's per-instance process gave any concurrency guarantee
-  beyond "only one in-flight handle/3 at a time" that we don't reproduce.
-- **HND-050 / INV-SUB-P-040..042** — partitioned consumers. Currently
-  deferred (ML-0001). Re-check whether any single-worker workload is
-  effectively blocked from working at all (vs. just slower than ideal).
-
-**Sources to read.**
-
-- `commanded/lib/commanded/aggregates/{aggregate,execution_context}.ex`
-- `commanded/lib/commanded/event/handler.ex`
-- `commanded/lib/commanded/process_managers/{process_manager_instance,process_router}.ex`
-- `commanded/lib/commanded/subscriptions.ex`
-- The same three adapter conformance tests already consumed
-  (`commanded/test/event_store/support/{append_events,subscription,snapshot}_test_case.ex`)
-  but this time looking for behaviours the *adapter* relies on rather
-  than for invariants the adapter enforces.
-
-**Note:** Commanded source is not currently checked out anywhere on this
-machine. First step is `git clone https://github.com/commanded/commanded`
-into a scratch location, plus `commanded/eventstore` for the reference
-Postgres adapter.
-
-**Output.** Either "no gaps found" (recorded as a short addendum to
-whatever the post-tidy invariant/guarantee doc is), or a list of new
-INV-* / new ADR entries with realisation plans.
-
----
-
 ## 2. SDK restructuring — core vs. idiomatic-convenience split
 
 **Why this exists.** Conversation on 2026-05-23 settled a framing:
@@ -368,6 +303,144 @@ example language in every code snippet.
 
 ---
 
+## 11. Conformance criteria — revisit once the subscription model stabilises
+
+**Why this exists.** The 2026-05-23 Commanded re-review (TODO #1)
+produced a list of conformance-test gaps in `§4` of the review
+document — cases that the conformance harness should cover but
+probably doesn't (subscription scope isolation, lease takeover
+without admin action, monotone cumulative ack, etc.). Those gaps
+were written against the **current** single-cursor subscription
+model.
+
+During the same review walkthrough, the subscription model itself
+became a parked design question. The leading candidate (SUB-A
+Design 3 in `docs/todo/subscriptions.md`) replaces the
+`subscriptions` cursor + per-event ack model with a
+routing-cursor + work-queue model. Under that model, several of
+the §4 conformance cases either no longer apply (the cursor
+behaviours they test are internal routing-layer details, not
+application-facing contract) or change shape (per-partition
+ordering, work-item state transitions, claim semantics over
+`SELECT … FOR UPDATE SKIP LOCKED`).
+
+Rather than codify conformance cases against a model we are
+actively redesigning, the work is parked.
+
+**What to do (when SUB-A is decided):**
+
+1. Walk the gap list below with the chosen SUB-A design in mind.
+   For each conformance case decide:
+   - Still applies as written → land the test.
+   - Applies in modified form → reshape and land.
+   - No longer meaningful (was about cursor mechanics that are now
+     internal) → drop, record why.
+2. Add the new conformance cases SUB-A introduces:
+   - Per-partition ordering under concurrent claimants.
+   - Failed work item blocks subsequent items for the same
+     partition; does not block other partitions.
+   - Routing-cursor advance is atomic with the batch of work-item
+     INSERTs.
+   - `waitForProjection` catch-up predicate (both conditions:
+     routing cursor past target AND no outstanding work items ≤
+     target).
+   - Cross-stream `waitForProjection` guard (review §2.3.2; the
+     guard itself ships earlier against today's schema but the
+     test is part of the SUB-A acceptance set).
+   - Claim leasing, lease expiry takeover, lease-loss detection at
+     the work-item layer.
+3. Decide the v1 conformance surface. The current `INV-*`
+   catalogue mixes "intrinsic store contract" with "single-cursor
+   subscription mechanism". Under SUB-A, only the former survives
+   as the application-facing contract; the latter becomes
+   `[mechanism-only]` on the routing-layer internals. The split
+   is part of this work.
+
+**Depends on.** `docs/todo/subscriptions.md` SUB-A reaching a
+decision. Until then, do not modify `tests/conformance/`.
+
+**Original gap list (against today's model).** Tests worth adding
+in the current shape; some will translate, some won't, per the
+walk above.
+
+- Subscription scope isolation: a subscription on stream A does
+  not deliver events appended to stream B. (`INV-READ-006`,
+  `INV-SUB-P-030` imply it; not explicitly tested.)
+- `:current` `start_from` skips all currently-existing events.
+  (`INV-SUB-P-020`.)
+- Resume from last successful ack: an un-ack'd event redelivers.
+  (`INV-SUB-P-031`.)
+- `$all` event rows carry their **original** `stream_id` /
+  `stream_version`. (`INV-READ-006/007`.)
+- Delete-subscription + re-subscribe from `:origin` redelivers
+  from the start. (`INV-SUB-P-061`.)
+- `release_subscription` preserves cursor; subsequent claim
+  resumes from `last_seen`. (`INV-SUB-P-060`.)
+- Lease expiry without administrative action; takeover by another
+  worker; original worker's next op raises `IS022`.
+  (`INV-SUB-P-012`.)
+- Monotone cumulative-ack absorbs a lower-position advance
+  silently. (`INV-SUB-P-034`.)
+
+**Depends on.** `docs/todo/subscriptions.md` SUB-A reaching a
+decision. Until then, do not modify `tests/conformance/`.
+
+**Output.** An updated `tests/conformance/` plus a clear statement
+of what the conformance harness verifies and why each case is in
+or out, reflecting the post-SUB-A subscription model.
+
+---
+
+## 12. Apply re-review outcomes
+
+**Why this exists.** The 2026-05-23 re-review of the invariant
+catalogue (closed as item #1, in the Done list below) produced
+a body of follow-up work split across four working files under
+`docs/todo/`. This item is the index — the place to come for
+"what's left from the re-review and where does each piece live?".
+
+**Pre-release, small / contained:**
+
+- `docs/todo/doc-patches.md` — three small wording patches to
+  `guarantees.md`, `concepts.md`, and `decisions.md`. ~30 minutes
+  each.
+- `docs/todo/consistency.md` — two coordinated SDK changes to the
+  consistency-wait path: an `exclude` mechanism for `dispatch`
+  (with PM self-deadlock auto-prevention and warning log), and a
+  cross-stream guard for `waitForProjection`. Focused
+  implementations, each one or two files plus tests.
+
+**Pre-release, design first:**
+
+- `docs/todo/subscriptions.md` — the subscription substrate
+  redesign (SUB-A: routing-vs-processing architecture / work
+  queue), with the handler error-policy surface (SUB-B) and
+  routing-side batching (SUB-C) folded in. The big architectural
+  question of this cycle; ML-0001 partitioned-consumers collapses
+  into it.
+- `docs/todo/process-manager.md` — PM-specific items that ride on
+  top of the subscription substrate (handle/apply split,
+  deterministic event IDs for PM-dispatched commands,
+  fan-out-as-modelling-pattern). PM-A, PM-C, PM-E can proceed in
+  parallel with SUB-A; PM-B is the slice that depends on the
+  subscription decision.
+
+**Post-release / depends on others:**
+
+- TODO #11 above — conformance criteria revisit, blocked on SUB-A.
+- The new `ML-0006..0009` entries in `docs/maybe-later.md` — the
+  general consistency-wait predicate, the Aggregate Multi-step
+  convenience, aggregate state/version introspection,
+  force-snapshot admin.
+- The new entry in `docs/non-goals.md` — SDK-level PM fan-out is
+  explicitly out.
+
+**Output.** Each working file closes when its items land in the
+live docs and SDK; this index item closes when all four working
+files are empty (or themselves closed).
+
+---
+
 Item numbers are stable: closed items are removed from the body and
 recorded below rather than renumbered, so existing in-tree references
 (e.g. `TODO #3a`, `TODO #10` in code comments and docs) keep their
@@ -375,6 +448,26 @@ meaning. Gaps in the numbering are expected.
 
 ## Done items (delete on confirmation)
 
+- **#1 Fresh re-review of the invariant catalogue against the
+  reference event-sourcing library.** Walked the catalogue
+  end-to-end on 2026-05-23. Headline outcomes:
+  - Two correctness-class findings: the `waitForProjection`
+    cross-stream silent wrong-answer bug (tracked in
+    `docs/todo/consistency.md` CON-B) and the PM
+    multi-command-on-redelivery duplicate-dispatch risk (tracked
+    in `docs/todo/process-manager.md` PM-E).
+  - A larger architectural finding: the single-cursor subscription
+    model is insufficient for the PM-instance and
+    concurrent-projection cases. Three candidate designs
+    identified; decision parked for a dedicated design pass
+    (`docs/todo/subscriptions.md` SUB-A). ML-0001 collapses into
+    it.
+  - Several smaller items routed to `docs/maybe-later.md`
+    (ML-0006..0009) and `docs/non-goals.md` (SDK-level PM
+    fan-out).
+  - Conformance-test re-evaluation parked behind SUB-A; tracked
+    as item #11.
+  - Master index of the follow-up work: item #12 above.
 - **#3 Concurrent correctness + load/soak harness.**
   - **#3a composed-concurrency correctness tests** — landed in
     `sdks/typescript/test/concurrent.test.ts` (aggregate OCC ×
