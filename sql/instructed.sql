@@ -52,7 +52,11 @@
 --   record_snapshot, read_snapshot, delete_snapshot,
 --   claim_subscription, extend_subscription_claim, release_subscription,
 --   read_subscription_batch, advance_subscription,
---   read_subscription_position, delete_subscription.
+--   read_subscription_position, delete_subscription,
+--   route_batch, claim_work_item,
+--   complete_work_item_projection, complete_work_item_pm,
+--   complete_pm_instance, fail_work_item,
+--   is_subscription_caught_up.
 --
 -- All procedures that accept caller-tunable knobs do so via a `p_options jsonb`
 -- parameter rather than positional arguments, so that ML-0001 / ML-0002 can
@@ -90,6 +94,11 @@ $$;
 --   IS020  subscription_not_found          (INV-SUB-P-062 / D-0009)
 --   IS021  subscription_already_claimed    (D-0006; claim attempted on live lease)
 --   IS022  subscription_lease_lost         (D-0006; worker no longer holds claim)
+--   IS030  work_item_lease_lost            (SUB-A; complete/fail by a worker
+--                                              that no longer holds the row's
+--                                              claim, or the row was already
+--                                              terminal-deleted by a takeover
+--                                              worker. Either way: stop.)
 --
 -- The full closed error set per procedure is documented in each procedure's
 -- docstring below.
@@ -449,6 +458,22 @@ create trigger stream_events_no_delete
 --   advance_subscription        holds  { subscriptions[stream,name,shard] }
 --   read_subscription_position  holds  { } (MVCC read)
 --   delete_subscription         holds  { subscriptions[stream,name,shard] }
+--   route_batch                 holds  { subscriptions[stream,name,shard]
+--                                        (FOR UPDATE),
+--                                        subscription_work_items (INSERTs) }
+--   claim_work_item             holds  { subscription_work_items[one row]
+--                                        (FOR UPDATE SKIP LOCKED),
+--                                        events / stream_events (MVCC) }
+--   complete_work_item_projection  holds  { subscription_work_items[one row] }
+--                                  (the SDK is expected to call this in the
+--                                  same tx as its read-model write per PRJ-C;
+--                                  the read-model lock-set is the user's)
+--   complete_work_item_pm       holds  { subscription_work_items[one row],
+--                                        snapshots[source_uuid] }
+--   complete_pm_instance        holds  { subscription_work_items[partition
+--                                        slice], snapshots[source_uuid] }
+--   fail_work_item              holds  { subscription_work_items[one row] }
+--   is_subscription_caught_up   holds  { } (MVCC read)
 --
 -- The persist-and-ack transaction the PM worker opens (record_snapshot then
 -- advance_subscription in one tx, per D-0008/PM-023) holds
@@ -2079,5 +2104,1016 @@ begin
       p_subscription_name, p_stream_uuid, v_shard
       using errcode = 'IS020';
   end if;
+end;
+$$;
+
+
+-- ============================================================================
+-- SUB-A work-queue procedures
+--
+-- These maintain `subscription_work_items` per the contract documented on
+-- that table. Two worker roles touch them:
+--
+--   Routing worker (one per subscription, holds the subscription's lease):
+--     calls `route_batch` to atomically advance the routing cursor and
+--     insert the per-event work items produced by RouteFn.
+--
+--   Processing workers (any number per subscription, no subscription-lease
+--     dependency): call `claim_work_item` to pick a row, then one of
+--     `complete_work_item_projection` / `complete_work_item_pm` /
+--     `complete_pm_instance` / `fail_work_item` to transition it. The
+--     per-work-item lease (`claimed_by`, `lease_expires_at`) gates these
+--     terminal calls; a worker that has lost its lease (because another
+--     worker took over after expiry) sees IS030.
+-- ============================================================================
+
+
+-- ----------------------------------------------------------------------------
+-- route_batch
+--
+-- Atomically: insert N work items, advance the subscription's routing
+-- cursor. One tx. Crash-safe: re-running with the same decisions hits the
+-- work-items PK and the redundant inserts are absorbed by ON CONFLICT DO
+-- NOTHING; the cursor advance is the commit point so a crash before commit
+-- leaves both the cursor and the work-items table untouched.
+--
+-- The caller MUST hold the subscription's lease (claim_subscription).
+-- route_batch verifies this with a SELECT ... FOR UPDATE on the
+-- subscriptions row before any INSERT; lease loss raises IS022.
+--
+-- Inputs:
+--   p_stream_uuid       text, the subscription's stream scope (typically
+--                         '$all' under SUB-A, but the procedure is
+--                         scope-agnostic).
+--   p_subscription_name text
+--   p_worker_id         text, must match subscriptions.claimed_by.
+--   p_new_cursor        bigint, the cursor target after the batch.
+--                         Monotone: the procedure UPDATEs last_seen to
+--                         greatest(last_seen, p_new_cursor). A caller that
+--                         re-runs after a partial crash thus cannot move
+--                         the cursor backwards.
+--   p_decisions         jsonb, an array (possibly empty) of objects:
+--                           [{ "partition_key": text, "event_number": int }, ...]
+--                         An empty array means "advance the cursor past
+--                         events that all routed to 'ignore'". Per-event
+--                         routing decisions equal in (partition_key,
+--                         event_number) to an already-present row are
+--                         absorbed by ON CONFLICT DO NOTHING; this is the
+--                         crash-safety mechanism, not a duplicate-routing
+--                         feature (the routing worker is single-active per
+--                         subscription via the subscription lease).
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   inserted_count  bigint, the number of rows actually inserted
+--                     (excludes ON CONFLICT-absorbed rows).
+--   new_last_seen   bigint, the cursor value after the update.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row.
+--   IS022  subscription_lease_lost  caller does not hold the subscription
+--                                    lease.
+--   22023  invalid_parameter_value  malformed inputs (null, negative
+--                                    cursor, non-array decisions,
+--                                    malformed decision element).
+--
+-- Lock-acquisition order:
+--   1. The subscriptions row keyed by (stream_id, name, shard) -- SELECT
+--      FOR UPDATE; verify lease; then UPDATE last_seen.
+--   2. INSERT into subscription_work_items (PK locks per inserted row).
+--      The same-tx atomicity here is load-bearing for the SUB-A catch-up
+--      predicate: once last_seen >= N is visible to a reader, the
+--      corresponding work-item rows are too.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.route_batch (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_new_cursor        bigint,
+  p_decisions         jsonb,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    inserted_count bigint,
+    new_last_seen  bigint
+  )
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
+  v_inserted  bigint;
+  v_new_last  bigint;
+begin
+  if p_stream_uuid is null then
+    raise exception 'route_batch: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'route_batch: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'route_batch: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_new_cursor is null or p_new_cursor < 0 then
+    raise exception 'route_batch: p_new_cursor must be non-negative'
+      using errcode = '22023';
+  end if;
+  if p_decisions is null or jsonb_typeof(p_decisions) <> 'array' then
+    raise exception 'route_batch: p_decisions must be a JSON array (possibly empty)'
+      using errcode = '22023';
+  end if;
+  -- Per-element shape check.
+  if exists (
+    select 1
+    from jsonb_array_elements(p_decisions) as d
+    where not (d ? 'partition_key')
+       or not (d ? 'event_number')
+       or jsonb_typeof(d->'partition_key') <> 'string'
+       or jsonb_typeof(d->'event_number') <> 'number'
+  ) then
+    raise exception 'route_batch: each decision must have partition_key:text and event_number:int'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'route_batch: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  -- (1) Lock the subscription row; verify lease.
+  select claimed_by into v_holder
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update;
+
+  if not found then
+    raise exception 'route_batch: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'route_batch: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS022';
+  end if;
+
+  -- (2) Insert the work items. ON CONFLICT DO NOTHING absorbs crash-replay.
+  with ins as (
+    insert into instructed.subscription_work_items
+      (stream_id, subscription_name, shard, partition_key, event_number, state)
+    select
+      v_stream_id,
+      p_subscription_name,
+      v_shard,
+      (d->>'partition_key')::text,
+      (d->>'event_number')::bigint,
+      'pending'
+    from jsonb_array_elements(p_decisions) as d
+    on conflict do nothing
+    returning 1
+  )
+  select count(*) into v_inserted from ins;
+
+  -- (3) Advance the cursor (monotone).
+  update instructed.subscriptions s
+     set last_seen = greatest(s.last_seen, p_new_cursor)
+   where s.stream_id = v_stream_id
+     and s.subscription_name = p_subscription_name
+     and s.shard = v_shard
+  returning s.last_seen into v_new_last;
+
+  return query select v_inserted, v_new_last;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- claim_work_item
+--
+-- Claim the next claimable work item for a subscription, enforcing
+-- per-partition ordering. Returns 0 or 1 row.
+--
+-- A row is claimable iff:
+--   * state = 'pending', OR
+--   * state = 'claimed' AND lease_expires_at < now()  (takeover branch)
+--   AND no earlier row for the same (subscription, partition_key) is
+--   still non-terminal (i.e. in pending/claimed/failed).
+--
+-- The NOT EXISTS subquery is the per-partition ordering enforcement.
+-- Combined with FOR UPDATE SKIP LOCKED on the candidate row, this yields
+-- concurrent claims *across* partitions and serial claims *within* a
+-- partition. The partial index `subscription_work_items_claimable`
+-- excludes 'done' rows from the subquery scan.
+--
+-- This procedure does NOT verify any subscription-level lease: any worker
+-- may claim. (The subscription-level lease is held by the routing worker.)
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text, identifies the claimant. Stored in
+--                         claimed_by; later complete_*/fail_* calls verify
+--                         it.
+--   p_lease_seconds     integer, > 0. The claim's lease window. On expiry
+--                         the row becomes eligible to a takeover claim.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: zero or one row:
+--   partition_key     text
+--   event_number      bigint
+--   claimed_by        text  (= p_worker_id)
+--   lease_expires_at  timestamptz
+--   was_takeover      boolean, true iff the row was previously 'claimed'
+--                       by a different worker whose lease had expired.
+--                       Informational only; the SDK may log it.
+--   prior_claimed_by  text, the previous holder on a takeover; NULL
+--                       otherwise.
+--
+-- Returning zero rows is the normal "queue empty" outcome; the SDK polls.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row for
+--                                    (stream, name, shard). The work-items
+--                                    table is FK-cascaded; a missing
+--                                    subscription means a missing queue.
+--   22023  invalid_parameter_value  null inputs or non-positive lease.
+--
+-- Lock-acquisition order:
+--   1. The candidate subscription_work_items row, via the inner SELECT
+--      ... FOR UPDATE SKIP LOCKED, then UPDATE on the same row.
+--      No subscriptions-row lock is taken.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.claim_work_item (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_lease_seconds     integer,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    partition_key    text,
+    event_number     bigint,
+    claimed_by       text,
+    lease_expires_at timestamptz,
+    was_takeover     boolean,
+    prior_claimed_by text
+  )
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_now       timestamptz := now();
+  v_expires   timestamptz;
+begin
+  if p_stream_uuid is null then
+    raise exception 'claim_work_item: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'claim_work_item: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'claim_work_item: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_lease_seconds is null or p_lease_seconds <= 0 then
+    raise exception 'claim_work_item: p_lease_seconds must be a positive integer'
+      using errcode = '22023';
+  end if;
+
+  v_shard   := coalesce((p_options->>'shard')::smallint, 0);
+  v_expires := v_now + make_interval(secs => p_lease_seconds);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'claim_work_item: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  -- Existence check on the subscription itself. We do not lock it; we
+  -- only need to surface IS020 distinctly from "queue empty".
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'claim_work_item: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  return query
+  with candidate as (
+    select wi.partition_key, wi.event_number, wi.claimed_by as prior
+      from instructed.subscription_work_items wi
+     where wi.stream_id = v_stream_id
+       and wi.subscription_name = p_subscription_name
+       and wi.shard = v_shard
+       and (
+         wi.state = 'pending'
+         or (wi.state = 'claimed' and wi.lease_expires_at < v_now)
+       )
+       and not exists (
+         select 1
+           from instructed.subscription_work_items earlier
+          where earlier.stream_id = wi.stream_id
+            and earlier.subscription_name = wi.subscription_name
+            and earlier.shard = wi.shard
+            and earlier.partition_key = wi.partition_key
+            and earlier.event_number  < wi.event_number
+            and earlier.state in ('pending','claimed','failed')
+       )
+     order by wi.event_number asc
+     for update skip locked
+     limit 1
+  ),
+  updated as (
+    update instructed.subscription_work_items w
+       set state            = 'claimed',
+           claimed_by       = p_worker_id,
+           lease_expires_at = v_expires
+      from candidate c
+     where w.stream_id = v_stream_id
+       and w.subscription_name = p_subscription_name
+       and w.shard = v_shard
+       and w.partition_key = c.partition_key
+       and w.event_number  = c.event_number
+    returning
+      w.partition_key,
+      w.event_number,
+      w.claimed_by,
+      w.lease_expires_at,
+      c.prior is not null and c.prior <> p_worker_id as was_takeover,
+      case when c.prior is not null and c.prior <> p_worker_id then c.prior
+           else null end as prior_claimed_by
+  )
+  select * from updated;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- complete_work_item_projection
+--
+-- Terminal success for a projection work item (PRJ-E). DELETEs the row.
+-- The SDK is expected to call this in the same transaction as the
+-- handler's read-model write (PRJ-C); the procedure itself takes no
+-- read-model locks.
+--
+-- The worker MUST be the row's current claimant. A mismatch (because
+-- another worker took over after a lease expiry, or completed first)
+-- raises IS030; the calling worker MUST stop processing on that error.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text, must match the row's claimed_by.
+--   p_partition_key     text
+--   p_event_number      bigint
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found   no subscription row (stream / name /
+--                                    shard).
+--   IS030  work_item_lease_lost     the row no longer exists, or exists
+--                                    but claimed_by != p_worker_id.
+--   22023  invalid_parameter_value  null inputs or negative event_number.
+--
+-- Lock-acquisition order:
+--   1. The subscription_work_items row keyed by
+--      (stream_id, name, shard, partition_key, event_number):
+--      SELECT ... FOR UPDATE; verify claimed_by; DELETE.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.complete_work_item_projection (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_partition_key     text,
+  p_event_number      bigint,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
+begin
+  if p_stream_uuid is null then
+    raise exception 'complete_work_item_projection: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'complete_work_item_projection: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'complete_work_item_projection: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_partition_key is null then
+    raise exception 'complete_work_item_projection: p_partition_key is null'
+      using errcode = '22023';
+  end if;
+  if p_event_number is null or p_event_number < 0 then
+    raise exception 'complete_work_item_projection: p_event_number must be non-negative'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'complete_work_item_projection: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'complete_work_item_projection: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by into v_holder
+    from instructed.subscription_work_items
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number
+   for update;
+
+  if not found then
+    raise exception 'complete_work_item_projection: work item (%, %) gone (takeover)',
+      p_partition_key, p_event_number
+      using errcode = 'IS030';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'complete_work_item_projection: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS030';
+  end if;
+
+  delete from instructed.subscription_work_items
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- complete_work_item_pm
+--
+-- Terminal-success-non-terminal for a PM work item (PM-C / PM-F): UPDATE
+-- the row to 'done' AND UPSERT the PM's snapshot in one tx. The retained
+-- 'done' row is what PM-C's rebuild-via-apply path reads when a future
+-- snapshot mismatch forces a state rebuild.
+--
+-- The worker MUST be the row's current claimant; mismatch raises IS030.
+--
+-- Inputs:
+--   p_stream_uuid             text
+--   p_subscription_name       text
+--   p_worker_id               text
+--   p_partition_key           text
+--   p_event_number            bigint
+--   p_snapshot_uuid           text, snapshots.source_uuid for the PM
+--                               instance (per PM-020 the SDK builds this as
+--                               '<pm_name>-<process_uuid>'; opaque to the
+--                               store).
+--   p_snapshot_type           text, snapshots.source_type (the PM module
+--                               name, typically).
+--   p_snapshot_version        bigint, snapshots.source_version. Per
+--                               PM-024 / SUB-A this MUST equal the
+--                               just-claimed work item's event_number; the
+--                               procedure does NOT enforce that equality
+--                               (it's an SDK invariant, validated in
+--                               higher-layer tests).
+--   p_snapshot_data           jsonb, the staged PM state after apply.
+--   p_snapshot_metadata       jsonb, may be null. The SDK encodes
+--                               `snapshot_module_version` here per SNAP-002.
+--   p_options                 jsonb, default '{}'. Recognised keys:
+--                               'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found
+--   IS030  work_item_lease_lost
+--   22023  invalid_parameter_value
+--
+-- Lock-acquisition order:
+--   1. The subscription_work_items row -- SELECT FOR UPDATE; verify
+--      claimed_by; UPDATE to 'done'.
+--   2. The snapshots row -- UPSERT (full-row replace).
+-- ----------------------------------------------------------------------------
+create or replace function instructed.complete_work_item_pm (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_partition_key     text,
+  p_event_number      bigint,
+  p_snapshot_uuid     text,
+  p_snapshot_type     text,
+  p_snapshot_version  bigint,
+  p_snapshot_data     jsonb,
+  p_snapshot_metadata jsonb default null,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
+begin
+  if p_stream_uuid is null then
+    raise exception 'complete_work_item_pm: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'complete_work_item_pm: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'complete_work_item_pm: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_partition_key is null then
+    raise exception 'complete_work_item_pm: p_partition_key is null'
+      using errcode = '22023';
+  end if;
+  if p_event_number is null or p_event_number < 0 then
+    raise exception 'complete_work_item_pm: p_event_number must be non-negative'
+      using errcode = '22023';
+  end if;
+  if p_snapshot_uuid is null or p_snapshot_uuid = '' then
+    raise exception 'complete_work_item_pm: p_snapshot_uuid is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_snapshot_type is null or p_snapshot_type = '' then
+    raise exception 'complete_work_item_pm: p_snapshot_type is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_snapshot_version is null or p_snapshot_version < 0 then
+    raise exception 'complete_work_item_pm: p_snapshot_version must be non-negative'
+      using errcode = '22023';
+  end if;
+  if p_snapshot_data is null then
+    raise exception 'complete_work_item_pm: p_snapshot_data is null'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'complete_work_item_pm: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'complete_work_item_pm: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by into v_holder
+    from instructed.subscription_work_items
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number
+   for update;
+
+  if not found then
+    raise exception 'complete_work_item_pm: work item (%, %) gone (takeover)',
+      p_partition_key, p_event_number
+      using errcode = 'IS030';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'complete_work_item_pm: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS030';
+  end if;
+
+  -- (1) Mark the work item done. Clear claim metadata for cleanliness;
+  -- the per-state CHECK requires claimed_by/lease_expires_at to be NULL
+  -- when state != 'claimed'.
+  update instructed.subscription_work_items
+     set state            = 'done',
+         claimed_by       = null,
+         lease_expires_at = null
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number;
+
+  -- (2) Upsert the snapshot. Mirrors record_snapshot semantics, inlined so
+  -- both writes commit together.
+  insert into instructed.snapshots
+    (source_uuid, source_type, source_version, data, metadata, created_at)
+  values
+    (p_snapshot_uuid, p_snapshot_type, p_snapshot_version,
+     p_snapshot_data, p_snapshot_metadata, now())
+  on conflict (source_uuid) do update
+    set source_type    = excluded.source_type,
+        source_version = excluded.source_version,
+        data           = excluded.data,
+        metadata       = excluded.metadata,
+        created_at     = excluded.created_at;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- complete_pm_instance
+--
+-- Terminal success for a whole PM instance (`handle` returned
+-- `{ complete: true }`, PM-F): in one tx, DELETE the snapshot AND every
+-- work-item (any state) for the partition. The promise to the application
+-- is: once you say a PM instance is complete, we discard everything for
+-- the instance.
+--
+-- Idempotent: a missing snapshot is fine (matches delete_snapshot per
+-- INV-SNAP-004); a partition with zero work items is fine.
+--
+-- Per the slice 2 spec this procedure takes no worker_id and no
+-- event_number: a takeover worker that also reaches `complete: true` is
+-- safe to call this again. The triggering work item was the one the worker
+-- just held a lease on; by the time complete_pm_instance fires, the SDK
+-- has already finished dispatching the terminal commands.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_partition_key     text
+--   p_snapshot_uuid     text, the PM instance's snapshot source_uuid.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   work_items_deleted bigint
+--   snapshot_deleted   boolean
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found
+--   22023  invalid_parameter_value
+--
+-- Lock-acquisition order:
+--   1. subscription_work_items rows for the partition -- DELETE.
+--   2. snapshots row -- DELETE.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.complete_pm_instance (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_partition_key     text,
+  p_snapshot_uuid     text,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    work_items_deleted bigint,
+    snapshot_deleted   boolean
+  )
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id  bigint;
+  v_shard      smallint;
+  v_wi_deleted bigint;
+  v_snap_del   integer;
+begin
+  if p_stream_uuid is null then
+    raise exception 'complete_pm_instance: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'complete_pm_instance: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_partition_key is null then
+    raise exception 'complete_pm_instance: p_partition_key is null'
+      using errcode = '22023';
+  end if;
+  if p_snapshot_uuid is null or p_snapshot_uuid = '' then
+    raise exception 'complete_pm_instance: p_snapshot_uuid is null/empty'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'complete_pm_instance: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'complete_pm_instance: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  with del as (
+    delete from instructed.subscription_work_items
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+       and partition_key = p_partition_key
+    returning 1
+  )
+  select count(*) into v_wi_deleted from del;
+
+  delete from instructed.snapshots where source_uuid = p_snapshot_uuid;
+  get diagnostics v_snap_del = row_count;
+
+  return query select v_wi_deleted, v_snap_del > 0;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- fail_work_item
+--
+-- Move a claimed work item to 'failed'. Sets failed_at / error_text;
+-- clears claimed_by / lease_expires_at. The 'failed' row blocks subsequent
+-- work items for its partition only (via the per-partition NOT EXISTS in
+-- the claim query); other partitions are unaffected. 'failed' rows are
+-- never auto-skipped or auto-deleted by any code path; operator action
+-- (deferred to `instructedctl`) is required.
+--
+-- The worker MUST be the row's current claimant; mismatch raises IS030.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_worker_id         text
+--   p_partition_key     text
+--   p_event_number      bigint
+--   p_error_text        text, may be NULL (diagnostic only; not parsed
+--                         by the framework).
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: void.
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found
+--   IS030  work_item_lease_lost
+--   22023  invalid_parameter_value
+--
+-- Lock-acquisition order:
+--   1. subscription_work_items row -- SELECT FOR UPDATE; verify
+--      claimed_by; UPDATE.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.fail_work_item (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_worker_id         text,
+  p_partition_key     text,
+  p_event_number      bigint,
+  p_error_text        text,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns void
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_holder    text;
+begin
+  if p_stream_uuid is null then
+    raise exception 'fail_work_item: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'fail_work_item: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_worker_id is null or p_worker_id = '' then
+    raise exception 'fail_work_item: p_worker_id is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_partition_key is null then
+    raise exception 'fail_work_item: p_partition_key is null'
+      using errcode = '22023';
+  end if;
+  if p_event_number is null or p_event_number < 0 then
+    raise exception 'fail_work_item: p_event_number must be non-negative'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'fail_work_item: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'fail_work_item: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  select claimed_by into v_holder
+    from instructed.subscription_work_items
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number
+   for update;
+
+  if not found then
+    raise exception 'fail_work_item: work item (%, %) gone (takeover)',
+      p_partition_key, p_event_number
+      using errcode = 'IS030';
+  end if;
+  if v_holder is distinct from p_worker_id then
+    raise exception 'fail_work_item: lease lost (holder=%, caller=%)',
+      coalesce(v_holder,'<none>'), p_worker_id
+      using errcode = 'IS030';
+  end if;
+
+  update instructed.subscription_work_items
+     set state            = 'failed',
+         failed_at        = now(),
+         error_text       = p_error_text,
+         claimed_by       = null,
+         lease_expires_at = null
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+     and partition_key = p_partition_key
+     and event_number  = p_event_number;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- is_subscription_caught_up
+--
+-- The SUB-A catch-up predicate, used by waitForProjection (slice 8) and
+-- equivalents. Returns TRUE iff subscription S is caught up to event_number
+-- T: both
+--
+--   * the routing cursor (subscriptions.last_seen) is >= T, AND
+--   * no work-item row for S with event_number <= T is in a non-terminal
+--     state (pending / claimed / failed).
+--
+-- The routing cursor disambiguates "no rows" from "routing hasn't reached T
+-- yet"; the work-items check guarantees that what was routed has been
+-- processed. The state filter is logically redundant for projections (which
+-- DELETE on success and so have no 'done' rows) but harmless; for PMs it
+-- correctly excludes retained 'done' rows from blocking catch-up.
+--
+-- Race safety at the start of waitForProjection depends on route_batch's
+-- single-tx commit of (cursor advance + work-item INSERTs); see the
+-- subscription_work_items docstring and the SUB-A "Catch-up predicate"
+-- subsection.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_target            bigint, the target event_number.
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: exactly one row:
+--   caught_up  boolean
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found
+--   22023  invalid_parameter_value
+--
+-- Lock-acquisition order: none. Pure MVCC read.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.is_subscription_caught_up (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_target            bigint,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    caught_up boolean
+  )
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+  v_last_seen bigint;
+begin
+  if p_stream_uuid is null then
+    raise exception 'is_subscription_caught_up: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'is_subscription_caught_up: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_target is null or p_target < 0 then
+    raise exception 'is_subscription_caught_up: p_target must be non-negative'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'is_subscription_caught_up: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  select s.last_seen into v_last_seen
+    from instructed.subscriptions s
+   where s.stream_id = v_stream_id
+     and s.subscription_name = p_subscription_name
+     and s.shard = v_shard;
+  if not found then
+    raise exception 'is_subscription_caught_up: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  return query
+  select (v_last_seen >= p_target)
+     and not exists (
+       select 1
+         from instructed.subscription_work_items wi
+        where wi.stream_id = v_stream_id
+          and wi.subscription_name = p_subscription_name
+          and wi.shard = v_shard
+          and wi.event_number <= p_target
+          and wi.state in ('pending','claimed','failed')
+     );
 end;
 $$;

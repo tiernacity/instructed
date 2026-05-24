@@ -77,6 +77,14 @@ describe("conformance harness — smoke", () => {
       "advance_subscription",
       "read_subscription_position",
       "delete_subscription",
+      // SUB-A work-queue procedures (slice 2).
+      "route_batch",
+      "claim_work_item",
+      "complete_work_item_projection",
+      "complete_work_item_pm",
+      "complete_pm_instance",
+      "fail_work_item",
+      "is_subscription_caught_up",
     ];
 
     const r = await pool.query<{ proname: string }>(
