@@ -288,10 +288,12 @@ create index subscriptions_claim_expires_idx
 -- Lifecycle by subscription kind (SUB-A "Work-item lifecycle by subscription
 -- kind"):
 --
---   Projection (PRJ-E): on handler success the row is DELETEd in the same tx
---     as the handler's read-model write. `done` rows do not exist for
---     projections. The framework neither reads nor writes projection state
---     beyond the in-flight rows.
+--   Projection (PRJ-E): on handler success the SDK calls
+--     `complete_work_item_projection`, which DELETEs the row. The DELETE
+--     runs as its own short SDK-owned tx *after* the handler returns; the
+--     handler is opaque to the SDK and may target any store (Postgres,
+--     Elasticsearch, Redis, an HTTP API, ...). See D-0016 in
+--     `docs/decisions.md`. `done` rows do not exist for projections.
 --
 --   Process manager (PM-C / PM-F): on non-terminal success the row is
 --     UPDATEd to `state = 'done'` in the same tx as the snapshot upsert.
@@ -466,9 +468,9 @@ create trigger stream_events_no_delete
 --                                        events / stream_events (MVCC) }
 --   extend_work_item_claim      holds  { subscription_work_items[one row] }
 --   complete_work_item_projection  holds  { subscription_work_items[one row] }
---                                  (the SDK is expected to call this in the
---                                  same tx as its read-model write per PRJ-C;
---                                  the read-model lock-set is the user's)
+--                                  (own short SDK tx, after the handler
+--                                  returns; no read-model locks -- see
+--                                  D-0016 in `docs/decisions.md`)
 --   complete_work_item_pm       holds  { subscription_work_items[one row],
 --                                        snapshots[source_uuid] }
 --   complete_pm_instance        holds  { subscription_work_items[partition
@@ -2477,9 +2479,9 @@ $$;
 -- complete_work_item_projection
 --
 -- Terminal success for a projection work item (PRJ-E). DELETEs the row.
--- The SDK is expected to call this in the same transaction as the
--- handler's read-model write (PRJ-C); the procedure itself takes no
--- read-model locks.
+-- The SDK calls this in its own short tx *after* the handler returns; the
+-- handler is opaque to the SDK (D-0016 in `docs/decisions.md`) and may
+-- target any store. The procedure takes no read-model locks.
 --
 -- The worker MUST be the row's current claimant. A mismatch (because
 -- another worker took over after a lease expiry, or completed first)

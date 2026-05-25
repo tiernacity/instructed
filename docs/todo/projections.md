@@ -156,9 +156,12 @@ projection side).
 ### What's settled
 
 On handler success, the framework DELETEs the work-item row
-in the same transaction as the handler's read-model write (see
-PRJ-C for the same-tx mechanism). No `done` row is ever
-persisted for a projection.
+via `complete_work_item_projection`. The DELETE runs as its
+own short SDK-owned transaction *after* the handler returns;
+the handler is opaque to the SDK and may target any store
+(see D-0016 in `docs/decisions.md`, and PRJ-C below for why
+the earlier "same tx as read-model write" wording was
+dropped). No `done` row is ever persisted for a projection.
 
 Rationale:
 
@@ -198,47 +201,46 @@ entry; default ships as immediate DELETE.
 
 ---
 
-## PRJ-C — Read-model transactionality
+## PRJ-C — Read-model transactionality (DROPPED, see D-0016)
 
-**Status:** Decided (mechanism); documentation pending.
-**Release-relevance:** Pre-release.
+**Status:** Dropped. Back-reference only.
+**Release-relevance:** N/A.
 
-### What's settled
+### Why this is dropped
 
-Under today's single-cursor model, a projection writing to a
-read model in the same Postgres can include the read-model
-write and the cursor advance in one transaction, getting
-atomicity for free.
+An earlier version of this section proposed that the
+framework thread its own work-item-DELETE transaction
+through the projection handler's `ctx` so applications could
+opt into a same-tx pattern with the read-model write. That
+proposal contradicts the established design decision D-0016
+(`docs/decisions.md`): the projection handler is opaque to
+the SDK; it does not receive a Postgres connection, an ORM
+handle, or any other framework-owned resource. Projection
+targets are application-domain (Postgres, Elasticsearch,
+Redis, BigQuery, HTTP APIs, ...) and only a Postgres-in-the-
+same-database target could possibly share a transaction with
+the framework's DELETE. Paying that plumbing cost on every
+handler signature to benefit one narrow target was rejected
+in D-0016 and remains rejected here.
 
-Under the SUB-A proposed design (with PRJ-E
-immediate-delete), the equivalent is: the read-model write
-and the work-item DELETE go in one transaction. Mechanically
-identical; only the SQL of the framework-side write changes
-(DELETE on `subscription_work_items` instead of UPDATE on
-`subscriptions`).
+### What replaces it
 
-The `ctx` passed to `handler` MUST expose the transaction (or
-the database handle the framework is using for the `done`
-write) so applications can opt into the same-tx pattern. The
-SDK's TS shape today already does this via a pluggable
-context; the SUB-A migration preserves it.
+- Delivery is at-least-once. Handlers MUST be idempotent
+  against redelivery (UPSERT, `_id` keyed on `event_id`,
+  `SETNX`, or whatever the target store offers). This is the
+  same contract D-0016 already specifies for the legacy
+  single-cursor projection worker.
+- The framework runs `complete_work_item_projection` as its
+  own short SDK-owned transaction *after* the handler
+  returns. If the handler throws, the DELETE never runs and
+  redelivery happens via lease expiry / re-claim.
+- The `ctx` passed to the projection handler stays opaque
+  (`workerId`, `partitionKey`, `eventNumber`, `attempt`,
+  `signal`). No tx, no `Queryable`, no read-model writer.
 
-If the handler writes to an external store (different DB, HTTP
-API, etc.) the application takes responsibility for
-idempotency — same as today. Work items being durable rather
-than implicit-in-cursor doesn't change that.
-
-### What lands
-
-- One paragraph in `docs/concepts.md` (or `architecture.md`)
-  noting that the same-tx idiom continues to work under SUB-A
-  with the new write target.
-- The `ctx` type doesn't change shape; the framework swaps
-  what transaction it hands the handler.
-- A test in the conformance harness (or its SUB-A successor)
-  covering "handler writes to read model + framework writes
-  `done`, both succeed or both roll back" against a mock
-  read-model table.
+See also: `docs/non-goals.md` on projection targets;
+`docs/concepts.md` and `docs/sql-contract.md` for the
+at-least-once / idempotent-handler contract.
 
 ---
 

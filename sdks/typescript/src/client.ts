@@ -588,10 +588,10 @@ export class Client {
   }
 
   /**
-   * Projection terminal success (PRJ-E): DELETE the work item. The SDK is
-   * expected to call this in the same transaction as the handler's
-   * read-model write (PRJ-C); pass a `Queryable` bound to that
-   * transaction via the `Client` constructor for that purpose.
+   * Projection terminal success (PRJ-E): DELETE the work item. Called by
+   * the SDK in its own short tx *after* the handler returns; the handler
+   * is opaque to the SDK (D-0016 in `docs/decisions.md`) and may target
+   * any store. No read-model locks are taken here.
    *
    * Raises `WorkItemLeaseLost` (IS030) if the caller is not (or no
    * longer) the row's claimant.

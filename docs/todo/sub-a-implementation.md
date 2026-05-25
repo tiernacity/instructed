@@ -230,8 +230,10 @@ single-cursor model is gone.
 3. `docs/todo/process-manager.md` — PM-C (apply/handle split)
    and PM-F (simplified routing shape + lifecycle).
 4. `docs/todo/projections.md` — PRJ-A (registration surface),
-   PRJ-B (no apply/handle split), PRJ-C (read-model
-   transactionality), PRJ-E (immediate-delete on success).
+   PRJ-B (no apply/handle split), PRJ-E (immediate-delete on
+   success). PRJ-C as originally written is dropped; read its
+   current text as a back-reference to D-0016 in
+   `docs/decisions.md`.
 5. Skim `docs/maybe-later.md` ML-0010 and ML-0011 just to know
    what's *not* in scope for this work.
 
@@ -249,10 +251,17 @@ single-cursor model is gone.
   `complete?`) split.
 - PM-F: `RouteFn → { partitionKey } | "ignore"`; lifecycle
   via `complete: true`.
-- PRJ-A: three-mode `PartitionBy` registration surface.
+- PRJ-A: three-mode `PartitionBy` registration surface
+  (sugar) **plus** a raw `routeFn: RouteFn` escape hatch for
+  the projection case that also wants to ignore some events
+  at routing time. Unified-routing shape with PMs; see the
+  slice-9 brief for the facade wiring.
 - PRJ-B: projections keep the single-callback shape.
-- PRJ-C: same-tx read-model + framework write.
 - PRJ-E: immediate-DELETE of projection work-items on success.
+  Handler is opaque to the SDK; the DELETE runs as its own
+  short SDK-owned tx *after* the handler returns. No
+  framework-supplied tx is threaded through the handler
+  signature (D-0016 in `docs/decisions.md`).
 - `waitForProjection` reimplementation against the new
   catch-up predicate.
 - Bank-account example migration.
@@ -413,26 +422,38 @@ complete", SUB-A "Lease takeover", SUB-B "What's settled".
 ### Slice 6 — Processing worker, projection branch
 
 **Scope:**
-- Plug a projection handler into the slice 5 worker.
-- On handler success: `complete_work_item_projection` in the
-  same transaction as the handler's read-model write
-  (`ctx` exposes the tx — PRJ-C).
-- Three `PartitionBy` modes:
+- New module `sdks/typescript/src/projection-worker.ts` that
+  wraps `startProcessingWorker` (slice 5) with a projection
+  adapter. Per D-0016 the handler is opaque to the SDK: no
+  tx threaded through the handler signature, no `ctx.tx`,
+  no `Queryable` in the handler context. The adapter's
+  `complete` callback is the one-line
+  `client.completeWorkItemProjection(...)`, which runs as its
+  own short SDK-owned tx after the handler returns.
+- Three `PartitionBy` modes (sugar over a routing-layer
+  `RoutingFn`; the helper lives in this module and is reused
+  by the slice-9 facade):
   - `sequential` → routing produces partition `'_default'`.
   - `per-event` → routing produces partition equal to
-    `event_number` (or another unique value).
+    `String(event.event_number)`.
   - `per-key` → routing calls the user-supplied `key(event)`
-    function.
+    function; partition key is its string return.
+  None of the three modes emit `"ignore"`. A projection that
+  wants routing-side filtering uses the raw `routeFn` escape
+  hatch wired at slice 9.
 
 **Acceptance:**
 - Tests for: each `PartitionBy` mode behaves as specified
   (sequential = serial; per-event = max parallelism;
-  per-key = parallel across keys, serial within); same-tx
-  atomicity (read-model write rolled back ⇒ work-item not
-  deleted); immediate-delete (no `done` row ever exists for a
-  projection).
+  per-key = parallel across keys, serial within);
+  immediate-delete (no `done` row ever exists for a
+  projection); handler throw leaves the work item `claimed`
+  with the lease still held under the error-policy retry
+  loop (no spurious commit-without-handler); the DELETE
+  is a single procedure call, not wrapped in any
+  framework-supplied user-facing tx.
 
-**Design refs:** PRJ-A, PRJ-C, PRJ-E.
+**Design refs:** PRJ-A, PRJ-E, D-0016.
 
 ### Slice 7 — Processing worker, PM branch
 
@@ -584,15 +605,21 @@ harness.
 
 These are not their own slices but apply to every slice:
 
-- **Same-tx atomicity is load-bearing.** Three places:
+- **Same-tx atomicity is load-bearing** in the framework's
+  own state, in three places:
   - Routing: cursor advance + work-item INSERTs (slice 4).
     Race-safety of `waitForProjection` depends on this.
   - PM non-terminal: work-item UPDATE-to-done + snapshot
     UPSERT (slice 7).
   - PM terminal: snapshot DELETE + all-work-items DELETE
     (slice 7).
-  - Projection: handler's read-model write + work-item DELETE
-    (slice 6).
+  Projections explicitly do *not* extend this list. Per
+  D-0016, the projection handler is opaque to the SDK and may
+  target any store (Postgres, Elasticsearch, Redis, an HTTP
+  API). `complete_work_item_projection` runs as its own short
+  SDK-owned tx *after* the handler returns; idempotency of
+  the handler against at-least-once redelivery is the
+  application's responsibility.
 - **`failed` rows are sacred.** No code path auto-skips or
   auto-deletes them. Only operator action (out of scope here;
   ships with `instructedctl`) can transition them.
