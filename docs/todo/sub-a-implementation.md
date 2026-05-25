@@ -7,17 +7,62 @@ this file when the work lands.
 
 ## Status snapshot (for a fresh session picking this up)
 
-**Done:** Slices 1–5 (commits `fbd7b9c`, `1b08e1c`, `23d0bd0`,
-`76a7b79`, `984da26`; plus `8554a9a` for ML-0012).
+**Done:** Slices 1–8.
 
-**Next:** Slice 6 (processing worker, projection branch).
+Commit log (newest first):
+- `<this commit>` SUB-A slice 8: `waitForProjection`
+  reimplementation against the catch-up predicate.
+- `83b16c6` TODO #13: record streams_stream_uuid_key race
+  (pre-existing, unrelated; noted while running slice-7 tests).
+- `04bcf5a` SUB-A slice 7: process-manager processing worker.
+- `a9463f9` SUB-A slice 6: projection processing worker.
+- `13b15c6` SUB-A: unify projection and PM routing surface
+  (option (c) course-correction).
+- `1e4e2f1` SUB-A: drop PRJ-C from scope (D-0016 fix-up).
+- `dc0fd31` SUB-A impl plan: status snapshot +
+  carried-forward decisions.
+- `984da26` SUB-A slice 5: processing worker (common claim
+  mechanics).
+- `8554a9a` ML-0012 documentation.
+- `76a7b79` SUB-A slice 4: routing worker.
+- `23d0bd0` SUB-A slice 3: TS SDK core wrappers.
+- `1b08e1c` SUB-A slice 2: core work-queue procedures.
+- `fbd7b9c` SUB-A slice 1: subscription_work_items schema.
+
+**Next:** Slice 9 (`Instructed` facade updates).
+
+Slice 9 is the breaking-API-change slice for the SDK surface:
+it removes the legacy `registerProjection(name, handler)` and
+`registerProcessManager(name, { handle, ... })` shapes and
+rewires the facade onto the slice 4–7 worker modules
+(`startRoutingWorker` + `startProjectionWorker` for the
+projection case; `startRoutingWorker` + `startPmWorker` for
+the PM case). New surface per PRJ-A option (c) and PM-F:
+
+  - `registerProjection(name, { partitionBy?, routeFn?, handler })`
+    — `partitionBy` and `routeFn` mutually exclusive; default
+    `partitionBy: { kind: 'sequential' }`. Legacy `selector` is
+    expressed as a `routeFn` returning `"ignore"`.
+  - `registerProcessManager(name, { routeFn, apply, handle,
+    initialState, snapshotModuleVersion? })`. The old
+    single-`handle` signature is removed (not deprecated;
+    breaking).
+  - `Instructed.dispatch` is unchanged.
+  - The new modules should be re-exported from
+    `sdks/typescript/src/index.ts` here (slices 6–8 deferred
+    this).
+  - Existing tests under `sdks/typescript/test/instructed.test.ts`
+    and `bank-account.test.ts` will need updating; slice 10
+    handles the bank-account *example* migration, but slice 9's
+    facade tests need to compile.
 
 **Process the original session followed and the new session
 should keep:**
 
 - Read this file first, then the SUB-A proposed-design subsection
   of `subscriptions.md` (line 283 onwards), then
-  `process-manager.md` PM-C/PM-F, then `projections.md` PRJ-A/B/C/E.
+  `process-manager.md` PM-C/PM-F, then `projections.md` PRJ-A/B/E
+  (PRJ-C dropped; back-reference only).
 - Land each slice as one coherent commit with its tests in the
   same commit. No "tests later" passes.
 - Before each slice, list any design ambiguities and any
@@ -31,7 +76,9 @@ should keep:**
   -c "DROP DATABASE IF EXISTS instructed_test"`); both the
   conformance fixture (`tests/conformance/test/fixtures.ts`) and
   the SDK fixture (`sdks/typescript/test/fixtures.ts`) re-install
-  the schema on first connection.
+  the schema on first connection. No schema change in slices 6
+  or 8; slice 7 added `list_pm_rebuild_events`. Slice 9 should
+  not need any schema change.
 
 ## Carried-forward decisions (don't re-litigate)
 
@@ -162,7 +209,23 @@ reopens them.
   ("N concurrent commands: projector's folded state matches
   the aggregate") trips on a `streams_stream_uuid_key`
   duplicate-insert race ~1 in 5 runs. Predates slice 7;
-  verified by running the slice-6 baseline. Out of scope here.
+  verified by running the slice-6 baseline. Recorded as
+  **TODO #13** in `TODO.md` with a fix sketch. Out of scope
+  here.
+- **`waitForProjection` target is always `event_number`**
+  (slice 8) for both `$all` and per-stream subscriptions —
+  the SUB-A catch-up predicate compares in event_number
+  space throughout, and the SUB-A routing worker (slice 4)
+  advances `subscriptions.last_seen` using `event.event_number`
+  for both source kinds. The legacy single-cursor model's
+  per-stream-stream_version target is gone. Public API
+  shape unchanged (callers still pass `AppendedEvent` rows
+  unchanged); only the internal target field changed. Note
+  the schema comment on `subscriptions.last_seen` (lines
+  236–240 of `sql/instructed.sql`) still describes the
+  legacy stream_version semantics for per-stream subs —
+  stale under SUB-A; slice 12 doc-patches pass should
+  reconcile.
 
 ## Knob defaults (locked in, slices 1–7)
 
@@ -189,15 +252,16 @@ ask, per the original process.
 
 SQL:
 - `sql/instructed.sql` — canonical spec. Contains the
-  `subscription_work_items` table, the eight SUB-A procedures
+  `subscription_work_items` table, the nine SUB-A procedures
   (`route_batch`, `claim_work_item`, `extend_work_item_claim`,
   `complete_work_item_projection`, `complete_work_item_pm`,
   `complete_pm_instance`, `fail_work_item`,
-  `is_subscription_caught_up`), and the IS030 SQLSTATE.
+  `is_subscription_caught_up`, `list_pm_rebuild_events`), and
+  the IS030 SQLSTATE.
 
 SDK (`sdks/typescript/src/`):
-- `client.ts` — layer-0 wrappers extended with the eight
-  SUB-A methods.
+- `client.ts` — layer-0 wrappers extended with the nine
+  SUB-A methods (including `listPmRebuildEvents` from slice 7).
 - `errors.ts` — `WorkItemLeaseLost` (IS030) added;
   `MapPgErrorContext` extended with `partitionKey` /
   `eventNumber`.
@@ -212,11 +276,30 @@ SDK (`sdks/typescript/src/`):
   `ProcessingHandler`, `ProcessingCompleter`,
   `ProcessingHandlerContext`, `ErrorPolicy`,
   `ErrorPolicyDecision`, `DEFAULT_ERROR_POLICY`, and the
-  `DEFAULT_PROCESSING_*` constants. **Slices 6 and 7 plug
-  in here via the `complete` callback** — do not build a new
-  loop.
+  `DEFAULT_PROCESSING_*` constants. Slices 6 and 7 plug in
+  here via the `complete` callback.
+- `projection-worker.ts` — SUB-A projection adapter (slice 6).
+  Exposes `startProjectionWorker`, `PartitionBy`,
+  `routingFnForPartitionBy`, `ProjectionHandler`,
+  `ProjectionHandlerContext`, `ProjectionDefinition`,
+  `SEQUENTIAL_PARTITION_KEY`. `complete` callback is the
+  one-line `client.completeWorkItemProjection(...)`. Per
+  D-0016 the handler ctx is opaque — no tx, no Queryable.
+- `pm-worker.ts` — SUB-A PM adapter (slice 7). Exposes
+  `startPmWorker(client, dispatchClient, def, opts)`,
+  `PmDefinition`, `PmHandleResult`, `PmHandlerContext`,
+  `DispatchedCommand`, `PM_SNAPSHOT_MODULE_VERSION_KEY`.
+  Implements PM-C apply/handle split + PM-F lifecycle
+  (`complete: true`). Per-item state shared between
+  slice-5 `handle` and `complete` via a per-worker Map.
+  Known gap: PM-E (deterministic event IDs) is out of
+  scope; documented in the module header.
+- `consistency.ts` — `waitForProjection` reimplemented
+  against `is_subscription_caught_up` (slice 8). Public API
+  shape unchanged; per-stream-stream_version target is gone
+  (everything is in event_number space now).
 - `subscription.ts`, `process-manager.ts` — the **old**
-  projection / PM workers. Untouched in slices 1–5. Slice 9
+  projection / PM workers. Untouched in slices 1–8. Slice 9
   will replace the facade and may remove these (PM-F is a
   breaking change at the SDK surface per the slice-9 brief).
 - `index.ts` — NOT yet extended with the new modules. Slice
@@ -226,13 +309,18 @@ Tests:
 - `tests/conformance/test/subscription-work-items-schema.test.ts`
   — slice 1.
 - `tests/conformance/test/subscription-work-items-procedures.test.ts`
-  — slices 2 + 5 (extend_work_item_claim cases live here
-  under a "SUB-A slice 5" describe block).
+  — slices 2 + 5 + 7 (extend_work_item_claim under "SUB-A
+  slice 5"; list_pm_rebuild_events under "SUB-A slice 7").
 - `tests/conformance/test/smoke.test.ts` — procedure-presence
-  catalogue extended.
+  catalogue extended (includes `list_pm_rebuild_events`).
 - `sdks/typescript/test/client-work-queue.test.ts` — slice 3.
 - `sdks/typescript/test/routing-worker.test.ts` — slice 4.
 - `sdks/typescript/test/processing-worker.test.ts` — slice 5.
+- `sdks/typescript/test/projection-worker.test.ts` — slice 6.
+- `sdks/typescript/test/pm-worker.test.ts` — slice 7.
+- `sdks/typescript/test/consistency.test.ts` — slice 8
+  (existing legacy-worker tests + a new
+  "SUB-A work-item conjunct" describe block).
 
 Fixtures (`fixtures.ts` in both `tests/conformance/test/` and
 `sdks/typescript/test/`) have `subscription_work_items` in
@@ -252,8 +340,22 @@ cd sdks/typescript && npm run type-check && npm test
 cd tests/conformance && npm test
 ```
 
-As of the end of slice 5: SDK 127 pass / 0 fail; conformance
-157 pass / 0 fail / 3 pre-existing skipped.
+As of the end of slice 8: SDK 149 pass / 0 fail reliably;
+conformance 163 pass / 0 fail / 3 pre-existing skipped.
+
+Progression: 127 (slice 5) → 138 (+11 slice 6) → 146 (+8
+slice 7) → 149 (+3 slice 8). Conformance: 157 (slice 5) →
+163 (+6 slice 7's list_pm_rebuild_events).
+
+Known pre-existing test flake (NOT a SUB-A regression —
+recorded as **TODO #13** in `TODO.md`): an intermittent
+`streams_stream_uuid_key` duplicate-insert race in
+`sdks/typescript/test/concurrent.test.ts` ("N concurrent
+commands: projector's folded state matches the aggregate").
+Verified against origin/main commit `a982b4d` (pre-SUB-A
+baseline): fails ~3/10 runs there with the identical error.
+Urgent follow-up but unrelated to SUB-A; do not let it block
+slice 9+.
 
 Known pre-existing type-check failures in
 `examples/bank-account/` (CommonJS / `verbatimModuleSyntax`).

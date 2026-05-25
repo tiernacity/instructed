@@ -1,19 +1,49 @@
 /**
- * Layer 4: consistency-on-dispatch wait.
+ * Layer 4: consistency-on-dispatch wait (SUB-A slice 8).
  *
- * See docs/sdk-design.md §3 layer 4. For each named subscription,
- * polls `readSubscriptionPosition` until `lastSeen >= target`. The
- * target is:
+ * For each named subscription, polls the SUB-A catch-up predicate
+ * (`instructed.is_subscription_caught_up`, slice 2) until it returns
+ * true or the timeout expires. The predicate's two conjuncts are both
+ * enforced server-side:
  *
- *   - the highest `event_number` across `appended` for `$all`
- *     subscriptions, or
- *   - the matching `stream_version` for per-stream subscriptions
- *     (the subscription's `stream` is not `'$all'`).
+ *   1. `subscriptions.last_seen >= target` (the routing cursor has
+ *      reached the appended events), AND
+ *   2. no `subscription_work_items` row for the subscription with
+ *      `event_number <= target` is still in a non-terminal state
+ *      (`pending` / `claimed` / `failed`).
  *
- * Throws {@link ConsistencyTimeout} on timeout (named
- * subscriptions whose cursors never reached the target are listed
- * in `missing`). No `:strong` shorthand (D-0010) — callers list the
- * subscriptions they want to wait on explicitly.
+ * Together, this means: every event the caller cares about has been
+ * routed AND every routed work-item for that range has been
+ * terminally handled (DELETEd for projections, UPDATEd to `done`
+ * for PMs).
+ *
+ * The race-safety property at the start (a caller that appends event
+ * N and immediately calls `waitForProjection(S, N)` must not observe
+ * a spurious "caught-up" before routing has actually reached N) is
+ * load-bearing on the routing worker's atomic `route_batch` --
+ * cursor advance + work-item INSERTs commit in one transaction
+ * (slice 4 invariant). Without that, the predicate could spuriously
+ * return true. The slice-8 implementation simply trusts the
+ * server-side predicate; race-safety is owned by the routing layer.
+ *
+ * The legacy stream_version-as-target behaviour for per-stream
+ * subscriptions (which targeted the per-stream version under the
+ * pre-SUB-A single-cursor model) is gone: under SUB-A all work
+ * items carry the global `event_number`, the routing worker
+ * (slice 4) advances `subscriptions.last_seen` using
+ * `event.event_number` for both `$all` and per-stream sources, and
+ * the predicate compares in `event_number` space throughout. The
+ * `AppendedEvent` rows carry both numbers; the same wall-clock
+ * moment is reached either way.
+ *
+ * Throws {@link ConsistencyTimeout} on timeout (named subscriptions
+ * whose predicate never returned true are listed in `missing`).
+ *
+ * Out of scope here: the cross-stream guard (CON-B; a caller waiting
+ * on a projection whose source stream is different from the one just
+ * appended to can today silently get back a spurious "caught-up"
+ * because the appended events were never routed to that
+ * subscription). The guard ships separately.
  */
 
 import type { Client } from "./client.ts";
@@ -39,14 +69,14 @@ export const DEFAULT_WAIT_POLL_INTERVAL_MS = 25;
 export const DEFAULT_WAIT_TIMEOUT_MS = 5_000;
 
 /**
- * Wait for every named subscription to have advanced past the
- * appended events.
+ * Wait for every named subscription to be caught up past the appended
+ * events. "Caught up" means the SUB-A catch-up predicate is true
+ * server-side -- routing cursor has reached the target AND no
+ * in-flight work-items remain at or below it.
  *
  * `appended` is the array returned by `appendToStream` (or a single
- * row from it). For `$all` subscriptions the target is the highest
- * `event_number` across `appended`; for a per-stream subscription
- * it is the highest `stream_version`. Both are derived from the
- * same `AppendedEvent` rows.
+ * row from it). The target is the highest `event_number` across the
+ * rows, applied uniformly to `$all` and per-stream subscriptions.
  */
 export async function waitForProjection(
   client: Client,
@@ -61,13 +91,9 @@ export async function waitForProjection(
   const pollInterval = opts.pollInterval ?? DEFAULT_WAIT_POLL_INTERVAL_MS;
   const timeout = opts.timeout ?? DEFAULT_WAIT_TIMEOUT_MS;
 
-  const maxEventNumber = rows.reduce(
+  const target = rows.reduce(
     (m, r) => (r.event_number > m ? r.event_number : m),
     rows[0].event_number,
-  );
-  const maxStreamVersion = rows.reduce(
-    (m, r) => (r.stream_version > m ? r.stream_version : m),
-    rows[0].stream_version,
   );
 
   const deadline = Date.now() + timeout;
@@ -78,26 +104,28 @@ export async function waitForProjection(
 
   while (remaining.size > 0) {
     for (const [k, sub] of [...remaining]) {
-      const target = sub.stream === "$all" ? maxEventNumber : maxStreamVersion;
-      let lastSeen: bigint;
+      let caughtUp = false;
       try {
-        const r = await client.readSubscriptionPosition(sub.stream, sub.name);
-        lastSeen = r.lastSeen;
+        caughtUp = await client.isSubscriptionCaughtUp(
+          sub.stream,
+          sub.name,
+          target,
+        );
       } catch (err) {
-        // A subscription that doesn't exist yet is "not caught up";
-        // keep polling until it does (a worker is starting up) or
-        // the timeout fires. Other contract errors surface
+        // A subscription that doesn't exist yet (no routing worker
+        // has created it) is "not caught up"; keep polling until it
+        // does, or the timeout fires. Other contract errors surface
         // immediately.
         if (
           err instanceof InstructedError &&
           (err as { code?: string }).code === "IS020"
         ) {
-          lastSeen = -1n;
+          caughtUp = false;
         } else {
           throw err;
         }
       }
-      if (lastSeen >= target) remaining.delete(k);
+      if (caughtUp) remaining.delete(k);
     }
     if (remaining.size === 0) return;
 

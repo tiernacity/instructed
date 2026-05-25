@@ -79,13 +79,15 @@ describe("waitForProjection — happy path", () => {
     }
   });
 
-  test("per-stream subscription uses stream_version as the target", async () => {
+  test("per-stream subscription waits in event_number space (SUB-A)", async () => {
+    // Under SUB-A all work-items carry the global event_number and
+    // the catch-up predicate compares in that space for both `$all`
+    // and per-stream subscriptions. The legacy stream_version-based
+    // target is gone; the same wall-clock moment is reached either
+    // way because each AppendedEvent carries both numbers.
     const stream = randomUUID();
     const name = `p-${randomUUID().slice(0, 8)}`;
 
-    // Per-stream subscription requires the stream to exist before
-    // claim (claim_subscription resolves stream_id and raises IS003
-    // otherwise). Seed the stream first.
     const appended = await client.appendToStream(stream, expected.noStream, [
       { event_type: "X", data: {} },
     ]);
@@ -108,6 +110,11 @@ describe("waitForProjection — happy path", () => {
         [{ stream, name }],
         { timeout: 5_000, pollInterval: 10 },
       );
+      // Predicate-true guarantees both conjuncts; cursor reached the
+      // event_number target. (The legacy worker stores the
+      // single-cursor value here, which is fine -- the SUB-A
+      // predicate's NOT EXISTS over work-items is vacuously true
+      // for the legacy worker because it doesn't write any.)
       const pos = await client.readSubscriptionPosition(stream, name);
       assert.ok(pos.lastSeen >= appended[0].stream_version);
     } finally {
@@ -188,5 +195,204 @@ describe("waitForProjection — timeout", () => {
         err instanceof ConsistencyTimeout &&
         (err as ConsistencyTimeout).missing.includes("$all::never-created"),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SUB-A slice 8 — work-item conjunct
+//
+// The legacy single-cursor tests above exercise the routing-cursor
+// conjunct only (the legacy worker writes no work-items, so the
+// predicate's NOT EXISTS is vacuously true). The cases below exercise
+// the second conjunct under the real SUB-A routing + processing path.
+// ---------------------------------------------------------------------------
+
+describe("waitForProjection — SUB-A work-item conjunct", () => {
+  test("routed-but-pending blocks; predicate flips to true once handler completes", async () => {
+    const { startRoutingWorker } = await import("../src/routing-worker.ts");
+    const { startProjectionWorker, routingFnForPartitionBy } = await import(
+      "../src/projection-worker.ts"
+    );
+
+    const stream = randomUUID();
+    const name = `subA-wait-${randomUUID().slice(0, 8)}`;
+    const appended = await client.appendToStream(stream, expected.noStream, [
+      { event_type: "A", data: {} },
+      { event_type: "B", data: {} },
+    ]);
+
+    // Block the handler so work-items stay `claimed` and the
+    // predicate's second conjunct is false even though routing
+    // catches up immediately. Source from $all (per-stream sources
+    // require the stream to exist before claim_subscription; we use
+    // $all uniformly across these tests so workers can start in any
+    // order).
+    let release!: () => void;
+    const block = new Promise<void>((r) => {
+      release = r;
+    });
+    const router = startRoutingWorker(client, {
+      name,
+      stream: "$all",
+      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
+      startFrom: "origin",
+    });
+    const proj = startProjectionWorker(client, {
+      name,
+      stream: "$all",
+      handler: async () => {
+        await block;
+      },
+    });
+
+    try {
+      // Phase 1: wait should NOT return while handler is blocked.
+      const racer = waitForProjection(
+        client,
+        appended,
+        [{ stream: "$all", name }],
+        { timeout: 2_000, pollInterval: 10 },
+      );
+      let racerResolved = false;
+      racer.then(
+        () => {
+          racerResolved = true;
+        },
+        () => {
+          racerResolved = true;
+        },
+      );
+      await new Promise((r) => setTimeout(r, 250));
+      assert.equal(
+        racerResolved,
+        false,
+        "waitForProjection must not return while work-items are in flight",
+      );
+
+      // Phase 2: unblock handlers; wait should return cleanly.
+      release();
+      await racer;
+    } finally {
+      release();
+      await Promise.all([router.close(), proj.close()]);
+    }
+  });
+
+  test("failed work-item keeps the predicate false (operator-only resolution)", async () => {
+    const { startRoutingWorker } = await import("../src/routing-worker.ts");
+    const stream = randomUUID();
+    const name = `subA-fail-${randomUUID().slice(0, 8)}`;
+    const appended = await client.appendToStream(stream, expected.noStream, [
+      { event_type: "A", data: {} },
+    ]);
+
+    // Just routing -- no processing worker; we'll set the work-item
+    // to `failed` directly via SQL after routing fires. Source from
+    // $all uniformly with the other SUB-A tests in this describe.
+    const router = startRoutingWorker(client, {
+      name,
+      stream: "$all",
+      routeFn: () => ({ partitionKey: "p1" }),
+      startFrom: "origin",
+    });
+
+    try {
+      // Wait for routing to insert the work-item, then claim+fail it
+      // directly to put it in `failed` state.
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        const r = await pool.query(
+          `SELECT 1 FROM instructed.subscription_work_items
+            WHERE subscription_name = $1`,
+          [name],
+        );
+        if ((r.rowCount ?? 0) > 0) break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      // Claim then fail via the same worker id.
+      const claimed = await client.claimWorkItem(
+        "$all",
+        name,
+        "test-w",
+        30,
+      );
+      assert.ok(claimed, "expected a claimable work item");
+      await client.failWorkItem(
+        "$all",
+        name,
+        "test-w",
+        claimed.partitionKey,
+        claimed.eventNumber,
+        "synthetic-failure-for-test",
+      );
+
+      // Predicate must report not-caught-up due to the `failed` row.
+      await assert.rejects(
+        () =>
+          waitForProjection(
+            client,
+            appended,
+            [{ stream: "$all", name }],
+            { timeout: 150, pollInterval: 25 },
+          ),
+        (err: unknown) =>
+          err instanceof ConsistencyTimeout &&
+          (err as ConsistencyTimeout).missing.includes(`$all::${name}`),
+      );
+    } finally {
+      await router.close();
+    }
+  });
+
+  test("race-safety: append + immediate wait does not spuriously return caught-up", async () => {
+    // Load-bearing on the routing worker's atomic route_batch: cursor
+    // advance and work-item INSERTs commit in one tx. If they didn't,
+    // there would be a window where last_seen >= N but the work-item
+    // for N hasn't been inserted yet, and the predicate would
+    // falsely return true.
+    //
+    // We source from $all so the routing worker can claim the
+    // subscription before any user stream exists (per-stream sources
+    // would raise IS003 at claim-time).
+    const { startRoutingWorker } = await import("../src/routing-worker.ts");
+    const { startProjectionWorker, routingFnForPartitionBy } = await import(
+      "../src/projection-worker.ts"
+    );
+
+    const stream = randomUUID();
+    const name = `subA-race-${randomUUID().slice(0, 8)}`;
+
+    const router = startRoutingWorker(client, {
+      name,
+      stream: "$all",
+      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
+      startFrom: "origin",
+    });
+    let handled = 0;
+    const proj = startProjectionWorker(client, {
+      name,
+      stream: "$all",
+      handler: async () => {
+        handled += 1;
+      },
+    });
+
+    try {
+      // Append-then-immediately-wait. The wait must block until both
+      // routing and processing actually happen; it must not see a
+      // stale "caught up" from before the append.
+      const appended = await client.appendToStream(stream, expected.noStream, [
+        { event_type: "R", data: {} },
+      ]);
+      await waitForProjection(
+        client,
+        appended,
+        [{ stream: "$all", name }],
+        { timeout: 5_000, pollInterval: 10 },
+      );
+      assert.ok(handled >= 1, "handler must have run before wait returned");
+    } finally {
+      await Promise.all([router.close(), proj.close()]);
+    }
   });
 });
