@@ -86,6 +86,8 @@ describe("conformance harness — smoke", () => {
       "complete_pm_instance",
       "fail_work_item",
       "is_subscription_caught_up",
+      // SUB-A slice 7: PM-state rebuild cold path.
+      "list_pm_rebuild_events",
     ];
 
     const r = await pool.query<{ proname: string }>(

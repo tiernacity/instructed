@@ -56,7 +56,7 @@
 --   route_batch, claim_work_item, extend_work_item_claim,
 --   complete_work_item_projection, complete_work_item_pm,
 --   complete_pm_instance, fail_work_item,
---   is_subscription_caught_up.
+--   is_subscription_caught_up, list_pm_rebuild_events.
 --
 -- All procedures that accept caller-tunable knobs do so via a `p_options jsonb`
 -- parameter rather than positional arguments, so that ML-0001 / ML-0002 can
@@ -477,6 +477,7 @@ create trigger stream_events_no_delete
 --                                        slice], snapshots[source_uuid] }
 --   fail_work_item              holds  { subscription_work_items[one row] }
 --   is_subscription_caught_up   holds  { } (MVCC read)
+--   list_pm_rebuild_events      holds  { } (MVCC read; cold path)
 --
 -- The persist-and-ack transaction the PM worker opens (record_snapshot then
 -- advance_subscription in one tx, per D-0008/PM-023) holds
@@ -3257,5 +3258,140 @@ begin
      and event_number  = p_event_number;
 
   return query select v_expires;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
+-- list_pm_rebuild_events
+--
+-- Cold-path read for PM state rebuild (PM-C / SUB-A slice 7). When a PM
+-- processing worker claims a work item and the partition's snapshot is
+-- missing (IS010) or carries a `snapshot_module_version` (in metadata)
+-- that no longer matches the SDK's compiled-in version (SNAP-002), the
+-- worker rebuilds state by folding every previously-`done` event for
+-- the partition through the PM's `apply` callback. This function
+-- returns those events, ordered by event_number, in the
+-- `read_all`-compatible shape so the SDK can fold directly.
+--
+-- Only rows in state 'done' are returned. 'pending' / 'claimed' /
+-- 'failed' rows by definition haven't yet been seen by `apply` (the
+-- claim query's per-partition NOT EXISTS guarantees this: a row is
+-- only claimable once every earlier row for its partition is terminal,
+-- and on the PM path the terminal-success step is the
+-- UPDATE-to-'done'). The claimed event itself is excluded by the
+-- exclusive upper bound; the SDK runs `apply` on it after the rebuild
+-- to produce the staged state handed to user `handle`.
+--
+-- Inputs:
+--   p_stream_uuid       text
+--   p_subscription_name text
+--   p_partition_key     text
+--   p_event_number      bigint, exclusive upper bound (typically the
+--                         claimed event's event_number).
+--   p_options           jsonb, default '{}'. Recognised keys:
+--                         'shard' :: smallint (default 0; ML-0001).
+--
+-- Output: a set of rows in the read_all shape, ordered by event_number
+-- ascending. Empty set if the partition has no 'done' rows below the
+-- cutoff (e.g. claimed event is the first ever for the partition).
+--
+-- Errors (closed set):
+--   IS020  subscription_not_found
+--   22023  invalid_parameter_value
+--
+-- Lock-acquisition order: none. Pure MVCC read.
+-- ----------------------------------------------------------------------------
+create or replace function instructed.list_pm_rebuild_events (
+  p_stream_uuid       text,
+  p_subscription_name text,
+  p_partition_key     text,
+  p_event_number      bigint,
+  p_options           jsonb default '{}'::jsonb
+)
+  returns table (
+    event_id        uuid,
+    event_number    bigint,
+    stream_uuid     text,
+    stream_version  bigint,
+    event_type      text,
+    causation_id    uuid,
+    correlation_id  uuid,
+    data            jsonb,
+    metadata        jsonb,
+    created_at      timestamptz
+  )
+  language plpgsql
+as $$
+#variable_conflict use_column
+declare
+  v_stream_id bigint;
+  v_shard     smallint;
+begin
+  if p_stream_uuid is null then
+    raise exception 'list_pm_rebuild_events: p_stream_uuid is null'
+      using errcode = '22023';
+  end if;
+  if p_subscription_name is null or p_subscription_name = '' then
+    raise exception 'list_pm_rebuild_events: p_subscription_name is null/empty'
+      using errcode = '22023';
+  end if;
+  if p_partition_key is null then
+    raise exception 'list_pm_rebuild_events: p_partition_key is null'
+      using errcode = '22023';
+  end if;
+  if p_event_number is null or p_event_number < 0 then
+    raise exception 'list_pm_rebuild_events: p_event_number must be non-negative'
+      using errcode = '22023';
+  end if;
+
+  v_shard := coalesce((p_options->>'shard')::smallint, 0);
+
+  select stream_id into v_stream_id
+    from instructed.streams
+   where stream_uuid = p_stream_uuid;
+  if not found then
+    raise exception 'list_pm_rebuild_events: subscription not found (no such stream)'
+      using errcode = 'IS020';
+  end if;
+
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard
+  ) then
+    raise exception 'list_pm_rebuild_events: subscription % on % (shard %) not found',
+      p_subscription_name, p_stream_uuid, v_shard
+      using errcode = 'IS020';
+  end if;
+
+  return query
+  select
+    e.event_id,
+    se.stream_version                  as event_number,
+    orig.stream_uuid                   as stream_uuid,
+    se.original_stream_version         as stream_version,
+    e.event_type,
+    e.causation_id,
+    e.correlation_id,
+    e.data,
+    e.metadata,
+    e.created_at
+  from instructed.subscription_work_items wi
+  join instructed.stream_events se
+    on se.stream_id = 0
+   and se.stream_version = wi.event_number
+  join instructed.events e
+    on e.event_id = se.event_id
+  join instructed.streams orig
+    on orig.stream_id = se.original_stream_id
+  where wi.stream_id        = v_stream_id
+    and wi.subscription_name = p_subscription_name
+    and wi.shard             = v_shard
+    and wi.partition_key     = p_partition_key
+    and wi.state             = 'done'
+    and wi.event_number      < p_event_number
+  order by wi.event_number asc;
 end;
 $$;

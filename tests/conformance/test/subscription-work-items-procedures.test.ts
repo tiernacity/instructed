@@ -982,3 +982,151 @@ describe("SUB-A slice 2 — is_subscription_caught_up", () => {
     );
   });
 });
+
+describe("SUB-A slice 7 — list_pm_rebuild_events", () => {
+  let pool: pg.Pool;
+  before(async () => {
+    pool = await getPool();
+  });
+  beforeEach(async () => {
+    await truncateAll(pool);
+    await claimSubscription(pool);
+  });
+  after(async () => {
+    await closePool();
+  });
+
+  async function routeAndDone(
+    partitionKey: string,
+    eventNumber: bigint,
+    snapshotUuid: string,
+  ): Promise<void> {
+    await pool.query(
+      `SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
+      [
+        ALL,
+        SUB,
+        WORKER,
+        eventNumber.toString(),
+        JSON.stringify([
+          { partition_key: partitionKey, event_number: Number(eventNumber) },
+        ]),
+      ],
+    );
+    await claim(pool);
+    await pool.query(
+      `SELECT instructed.complete_work_item_pm(
+         $1, $2, $3, $4, $5, $6, 'PM', $5, '{}'::jsonb, NULL)`,
+      [ALL, SUB, WORKER, partitionKey, Number(eventNumber), snapshotUuid],
+    );
+  }
+
+  test("returns only 'done' rows for the partition, ordered by event_number", async () => {
+    const ens = await appendN(pool, "s1", 5);
+    // pm-A: 3 done; pm-B: 1 done (should not appear).
+    await routeAndDone("pm-A", ens[0], "PM-A");
+    await routeAndDone("pm-A", ens[1], "PM-A");
+    await routeAndDone("pm-A", ens[2], "PM-A");
+    await routeAndDone("pm-B", ens[3], "PM-B");
+    // route a 'pending' for pm-A and a 'failed' for pm-A; both must
+    // be excluded from the rebuild result.
+    await pool.query(
+      `SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
+      [
+        ALL,
+        SUB,
+        WORKER,
+        ens[4].toString(),
+        JSON.stringify([
+          { partition_key: "pm-A", event_number: Number(ens[4]) },
+        ]),
+      ],
+    );
+
+    const r = await pool.query<{ event_number: string }>(
+      `SELECT event_number::text AS event_number
+         FROM instructed.list_pm_rebuild_events($1, $2, $3, $4)`,
+      [ALL, SUB, "pm-A", Number(ens[4]) + 1],
+    );
+    assert.deepEqual(
+      r.rows.map((x) => x.event_number),
+      [ens[0], ens[1], ens[2]].map((n) => n.toString()),
+    );
+  });
+
+  test("exclusive upper bound: returns rows strictly less than p_event_number", async () => {
+    const ens = await appendN(pool, "s1", 3);
+    await routeAndDone("pm-A", ens[0], "PM-A");
+    await routeAndDone("pm-A", ens[1], "PM-A");
+    await routeAndDone("pm-A", ens[2], "PM-A");
+
+    const r = await pool.query<{ event_number: string }>(
+      `SELECT event_number::text AS event_number
+         FROM instructed.list_pm_rebuild_events($1, $2, $3, $4)`,
+      [ALL, SUB, "pm-A", Number(ens[2])],
+    );
+    // Only ens[0] and ens[1]; ens[2] is the cutoff.
+    assert.deepEqual(
+      r.rows.map((x) => x.event_number),
+      [ens[0], ens[1]].map((n) => n.toString()),
+    );
+  });
+
+  test("returns the read_all-compatible event payload", async () => {
+    const [e1] = await appendN(pool, "s1", 1);
+    await routeAndDone("pm-A", e1, "PM-A");
+
+    const r = await pool.query(
+      `SELECT event_id, event_number::text AS event_number,
+              stream_uuid, stream_version::text AS stream_version,
+              event_type, causation_id, correlation_id, data, metadata,
+              created_at
+         FROM instructed.list_pm_rebuild_events($1, $2, $3, $4)`,
+      [ALL, SUB, "pm-A", Number(e1) + 1],
+    );
+    assert.equal(r.rowCount, 1);
+    const row = r.rows[0];
+    assert.equal(row.event_number, e1.toString());
+    assert.equal(typeof row.event_id, "string");
+    assert.ok(row.event_type);
+    assert.ok(row.created_at instanceof Date);
+  });
+
+  test("empty result when partition has no 'done' rows below the cutoff", async () => {
+    const r = await pool.query(
+      `SELECT * FROM instructed.list_pm_rebuild_events($1, $2, $3, $4)`,
+      [ALL, SUB, "no-such-partition", 9999],
+    );
+    assert.equal(r.rowCount, 0);
+  });
+
+  test("subscription-not-found raises IS020", async () => {
+    await rejectsWithCode(
+      () =>
+        pool.query(
+          `SELECT * FROM instructed.list_pm_rebuild_events($1, 'no-such', $2, 0)`,
+          [ALL, "pm-A"],
+        ),
+      "IS020",
+    );
+  });
+
+  test("rejects invalid parameters with 22023", async () => {
+    await rejectsWithCode(
+      () =>
+        pool.query(
+          `SELECT * FROM instructed.list_pm_rebuild_events($1, $2, $3, -1)`,
+          [ALL, SUB, "pm-A"],
+        ),
+      "22023",
+    );
+    await rejectsWithCode(
+      () =>
+        pool.query(
+          `SELECT * FROM instructed.list_pm_rebuild_events($1, $2, NULL, 0)`,
+          [ALL, SUB],
+        ),
+      "22023",
+    );
+  });
+});

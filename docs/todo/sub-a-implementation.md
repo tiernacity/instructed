@@ -118,8 +118,53 @@ reopens them.
   slice 9 will wire them. Tests import directly via the
   module path. Slice 9 is the right place to decide the
   public surface; until then keep this internal.
+- **Slice 7 added a new SQL function `list_pm_rebuild_events`**
+  in `sql/instructed.sql`. Cold-path read used by PM-state
+  rebuild when the snapshot is missing (IS010) or carries a
+  `snapshot_module_version` (in metadata) that no longer
+  matches the SDK's compiled-in version. Conformance covers
+  the procedure. Test-DB rebase was required at the slice 7
+  boundary; subsequent slices need a rebase only if they add
+  further schema changes.
+- **PM snapshot uuid format = `${def.name}-${partitionKey}`.**
+  Parallels the legacy `${def.name}-${processId}` shape; the
+  PM-F partition_key replaces the legacy processId.
+- **SDK-reserved snapshot metadata key =
+  `snapshot_module_version`** (matches the SQL-contract
+  reservation in `record_snapshot`'s doc-comment, line ~1049).
+  Set on write when `def.snapshotModuleVersion` is supplied;
+  compared on read to decide between snapshot-load and
+  rebuild. Absent on both sides = match.
+- **`startPmWorker(client, dispatchClient, def, opts)`**
+  mirrors legacy `startProcessManager`'s two-Client shape for
+  D-0011 lock-set disjointness. Throws at construction if the
+  two are the same instance. (Two different `Client`
+  wrappers around the same pool *is* allowed; D-0011 is about
+  per-call session isolation, not pool identity.)
+- **PM worker shares per-item state between the slice-5
+  `handle` and `complete` callbacks via a
+  `Map<"${pk}:${en}", { sourceUuid, stagedState, complete }>`.**
+  The map entry is written when `handle` succeeds and read by
+  `complete`. SUB-B `retry-in` overwrites the entry on re-run;
+  on `stop` or lease loss, `complete` never fires and a stale
+  entry just orphans (worker is exiting). The same pattern
+  was rejected for projections (no need with PRJ-C dropped)
+  but is required for PMs because terminal-vs-non-terminal
+  completion + the staged state must flow across the two
+  callbacks.
+- **PM-E known gap surfaced in `pm-worker.ts` module header.**
+  Re-dispatch on SUB-B `retry-in` or lease-takeover
+  redelivery may produce duplicate events at the aggregate;
+  no IS004 protection without deterministic event IDs.
+  Closing this gap is PM-E and is explicitly out of scope for
+  SUB-A.
+- **Pre-existing test flake in `sdks/typescript/test/concurrent.test.ts`**
+  ("N concurrent commands: projector's folded state matches
+  the aggregate") trips on a `streams_stream_uuid_key`
+  duplicate-insert race ~1 in 5 runs. Predates slice 7;
+  verified by running the slice-6 baseline. Out of scope here.
 
-## Knob defaults (locked in, slices 1–5)
+## Knob defaults (locked in, slices 1–7)
 
 | Knob | Value | Source |
 |---|---|---|
@@ -131,6 +176,10 @@ reopens them.
 | Lease heartbeat | `lease*1000/3`, min `1s` | confirmed |
 | Worker ID format | `${hostname}:${pid}:${uuidv4-8}` | confirmed; reused from existing `defaultWorkerId` |
 | Default error policy | exponential, base `100ms`, factor `2`, cap `30s`, retry forever | per SUB-B "What lands" #2 |
+| Projection partition key (sequential) | `"_default"` | slice 6 |
+| Projection partition key (per-event) | `String(event.event_number)` | slice 6 |
+| PM snapshot uuid format | `${def.name}-${partitionKey}` | slice 7 |
+| PM snapshot module-version metadata key | `snapshot_module_version` | slice 7; matches the SQL contract reservation |
 
 Later slices that introduce new knobs (batch sizes for the
 projection / PM branches, etc.) should propose a default and

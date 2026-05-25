@@ -783,4 +783,47 @@ export class Client {
     );
     return res.rows[0].caught_up;
   }
+
+  /**
+   * Cold-path read for PM state rebuild (SUB-A slice 7 / PM-C). Returns
+   * every `done` work-item for `(subscriptionName, partitionKey)` with
+   * `event_number < exclusiveUpperBound`, in event-number order, in the
+   * `read_all`-compatible recorded-event shape. The SDK uses this when
+   * a PM partition's snapshot is missing (IS010) or carries a
+   * `snapshot_module_version` (in metadata) that no longer matches the
+   * SDK's compiled-in version, to fold prior events through the PM's
+   * `apply` callback from `initialState()`.
+   *
+   * Raises `SubscriptionNotFound` (IS020) if the subscription does not
+   * exist.
+   */
+  async listPmRebuildEvents<E = unknown>(
+    streamUuid: string,
+    subscriptionName: string,
+    partitionKey: string,
+    exclusiveUpperBound: bigint,
+    options: SubscriptionShardOption = {},
+  ): Promise<RecordedEvent<E>[]> {
+    const opts: Record<string, unknown> = {};
+    if (options.shard !== undefined) opts.shard = options.shard;
+    const res = await this.run<RawEventRow>(
+      `SELECT event_id, event_number, stream_uuid, stream_version,
+              event_type, causation_id, correlation_id, data, metadata, created_at
+         FROM instructed.list_pm_rebuild_events($1, $2, $3, $4, $5::jsonb)`,
+      [
+        streamUuid,
+        subscriptionName,
+        partitionKey,
+        exclusiveUpperBound.toString(),
+        JSON.stringify(opts),
+      ],
+      {
+        streamUuid,
+        subscriptionName,
+        shard: options.shard,
+        partitionKey,
+      },
+    );
+    return res.rows.map((r) => mapRecordedEvent<E>(r));
+  }
 }
