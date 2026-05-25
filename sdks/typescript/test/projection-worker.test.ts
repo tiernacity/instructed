@@ -1,0 +1,541 @@
+/**
+ * SUB-A slice 6 — projection processing worker tests.
+ *
+ * Slice acceptance items (per docs/todo/sub-a-implementation.md after
+ * commit A's rewrite of the slice-6 brief):
+ *   - each `PartitionBy` mode behaves as specified:
+ *       sequential = serial; per-event = max parallelism;
+ *       per-key   = parallel across keys, serial within.
+ *   - immediate-delete: no `done` row ever exists for a projection.
+ *   - handler throw leaves the work item `claimed` under the
+ *     error-policy retry loop; the DELETE never runs without a
+ *     successful handler.
+ *   - the DELETE is a single procedure call, not wrapped in any
+ *     framework-supplied user-facing tx (D-0016).
+ *   - `routingFnForPartitionBy` translation produces the documented
+ *     partition keys and never emits `"ignore"`.
+ *
+ * Tests wire the actual SUB-A routing worker (slice 4) on top of the
+ * sugar translator, so the routing + processing paths are exercised
+ * end-to-end.
+ */
+
+import { after, before, beforeEach, describe, test } from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { closePool, getPool, truncateAll } from "./fixtures.ts";
+import { Client, expected } from "../src/index.ts";
+import { startRoutingWorker } from "../src/routing-worker.ts";
+import {
+  routingFnForPartitionBy,
+  SEQUENTIAL_PARTITION_KEY,
+  startProjectionWorker,
+  type ProjectionDefinition,
+  type ProjectionHandlerContext,
+} from "../src/projection-worker.ts";
+import type pg from "pg";
+import type { RunningWorker } from "../src/subscription.ts";
+import type { RecordedEvent } from "../src/types.ts";
+
+const ALL = "$all";
+
+let pool: pg.Pool;
+let client: Client;
+
+before(async () => {
+  pool = await getPool();
+  client = new Client(pool);
+});
+
+after(async () => {
+  await closePool();
+});
+
+beforeEach(async () => {
+  await truncateAll(pool);
+});
+
+// -- helpers -----------------------------------------------------------------
+
+async function append(
+  streamPrefix: string,
+  n: number,
+): Promise<{ stream: string; ens: bigint[] }> {
+  const stream = `${streamPrefix}-${randomUUID().slice(0, 8)}`;
+  const rows = await client.appendToStream(
+    stream,
+    expected.any,
+    Array.from({ length: n }, (_, i) => ({
+      event_type: `E${i}`,
+      data: { i },
+    })),
+  );
+  return { stream, ens: rows.map((r) => r.event_number) };
+}
+
+async function waitFor<T>(
+  predicate: () => Promise<T | null | undefined>,
+  timeoutMs = 5_000,
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const v = await predicate();
+    if (v) return v;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  throw new Error(`waitFor: timed out after ${timeoutMs}ms`);
+}
+
+async function listWorkItems(
+  name: string,
+): Promise<
+  Array<{ partition_key: string; event_number: string; state: string }>
+> {
+  const r = await pool.query<{
+    partition_key: string;
+    event_number: string;
+    state: string;
+  }>(
+    `SELECT partition_key, event_number::text AS event_number, state
+       FROM instructed.subscription_work_items
+      WHERE subscription_name = $1
+      ORDER BY event_number`,
+    [name],
+  );
+  return r.rows;
+}
+
+async function workItemState(
+  name: string,
+  partitionKey: string,
+  eventNumber: bigint,
+): Promise<{ state: string; claimed_by: string | null } | null> {
+  const r = await pool.query<{ state: string; claimed_by: string | null }>(
+    `SELECT state, claimed_by FROM instructed.subscription_work_items
+      WHERE subscription_name = $1
+        AND partition_key = $2
+        AND event_number = $3`,
+    [name, partitionKey, eventNumber.toString()],
+  );
+  if (r.rowCount === 0) return null;
+  return r.rows[0];
+}
+
+interface WiredWorkers {
+  routing: RunningWorker;
+  processing: RunningWorker;
+  closeAll: () => Promise<void>;
+}
+
+/**
+ * Start a routing worker (driven by `routeFn`) and a projection processing
+ * worker for the same subscription, against the given source stream.
+ * Returned `closeAll` is idempotent.
+ */
+function startPair<E>(
+  source: string,
+  def: ProjectionDefinition<E>,
+  routeFn: Parameters<typeof startRoutingWorker<E>>[1]["routeFn"],
+  opts: { processingCount?: number } = {},
+): WiredWorkers & { processingWorkers: RunningWorker[] } {
+  const routing = startRoutingWorker<E>(client, {
+    name: def.name,
+    stream: source,
+    routeFn,
+    startFrom: "origin",
+  });
+  const count = opts.processingCount ?? 1;
+  const processingWorkers = Array.from({ length: count }, () =>
+    startProjectionWorker<E>(client, { ...def, stream: source }),
+  );
+  return {
+    routing,
+    processing: processingWorkers[0],
+    processingWorkers,
+    async closeAll() {
+      await Promise.all([
+        routing.close(),
+        ...processingWorkers.map((w) => w.close()),
+      ]);
+    },
+  };
+}
+
+// ============================================================================
+// routingFnForPartitionBy — pure translation
+// ============================================================================
+
+describe("routingFnForPartitionBy", () => {
+  function fakeEvent<E = unknown>(en: bigint, data: E = {} as E): RecordedEvent<E> {
+    return {
+      event_id: "id-" + en,
+      event_number: en,
+      stream_uuid: "s",
+      stream_version: en,
+      event_type: "T",
+      causation_id: null,
+      correlation_id: null,
+      data,
+      metadata: null,
+      created_at: new Date(0),
+    };
+  }
+
+  test("sequential: every event routes to '_default'", async () => {
+    const fn = routingFnForPartitionBy({ kind: "sequential" });
+    for (const en of [1n, 2n, 100n]) {
+      const d = await fn(fakeEvent(en));
+      assert.deepEqual(d, { partitionKey: SEQUENTIAL_PARTITION_KEY });
+    }
+  });
+
+  test("per-event: partition key is String(event_number)", async () => {
+    const fn = routingFnForPartitionBy({ kind: "per-event" });
+    for (const en of [1n, 2n, 12345n]) {
+      const d = await fn(fakeEvent(en));
+      assert.deepEqual(d, { partitionKey: String(en) });
+    }
+  });
+
+  test("per-key: calls the user key function", async () => {
+    const fn = routingFnForPartitionBy<{ k: string }>({
+      kind: "per-key",
+      key: (e) => e.data.k,
+    });
+    const d = await fn(fakeEvent<{ k: string }>(1n, { k: "alice" }));
+    assert.deepEqual(d, { partitionKey: "alice" });
+  });
+
+  test("never emits 'ignore'", async () => {
+    // The sugar layer always produces a partition; filtering belongs
+    // to the raw routeFn escape hatch (option (c)).
+    const seq = await routingFnForPartitionBy({ kind: "sequential" })(
+      fakeEvent(1n),
+    );
+    const pe = await routingFnForPartitionBy({ kind: "per-event" })(
+      fakeEvent(1n),
+    );
+    const pk = await routingFnForPartitionBy<{ k: string }>({
+      kind: "per-key",
+      key: () => "x",
+    })(fakeEvent<{ k: string }>(1n, { k: "x" }));
+    assert.notEqual(seq, "ignore");
+    assert.notEqual(pe, "ignore");
+    assert.notEqual(pk, "ignore");
+  });
+});
+
+// ============================================================================
+// PartitionBy modes end-to-end (routing + processing)
+// ============================================================================
+
+describe("projection worker — sequential mode", () => {
+  test("strict-sequential delivery; one partition; serial regardless of worker count", async () => {
+    const name = `proj-seq-${randomUUID().slice(0, 8)}`;
+    const { stream, ens } = await append("seq", 5);
+
+    const handled: bigint[] = [];
+    const def: ProjectionDefinition = {
+      name,
+      handler: async (event) => {
+        handled.push(event.event_number);
+        await new Promise((r) => setTimeout(r, 5));
+      },
+    };
+    const wired = startPair(
+      stream,
+      def,
+      routingFnForPartitionBy({ kind: "sequential" }),
+      { processingCount: 3 },
+    );
+
+    try {
+      await waitFor(async () => (handled.length >= 5 ? true : null));
+      assert.deepEqual(handled, ens);
+      // All work items should have been DELETEd; no rows survive.
+      assert.deepEqual(await listWorkItems(name), []);
+    } finally {
+      await wired.closeAll();
+    }
+  });
+
+  test("all routed work items use the synthetic '_default' partition key", async () => {
+    const name = `proj-seq-pk-${randomUUID().slice(0, 8)}`;
+    const { stream } = await append("seq-pk", 3);
+
+    // Block handlers so we can observe routed rows before they're deleted.
+    let release!: () => void;
+    const block = new Promise<void>((r) => {
+      release = r;
+    });
+    const def: ProjectionDefinition = {
+      name,
+      handler: async () => {
+        await block;
+      },
+    };
+    const wired = startPair(
+      stream,
+      def,
+      routingFnForPartitionBy({ kind: "sequential" }),
+    );
+
+    try {
+      await waitFor(async () => {
+        const rows = await listWorkItems(name);
+        return rows.length >= 3 ? rows : null;
+      });
+      const rows = await listWorkItems(name);
+      assert.ok(rows.length === 3, `expected 3 rows; got ${rows.length}`);
+      for (const r of rows) {
+        assert.equal(r.partition_key, SEQUENTIAL_PARTITION_KEY);
+      }
+    } finally {
+      release();
+      await wired.closeAll();
+    }
+  });
+});
+
+describe("projection worker — per-event mode", () => {
+  test("each event becomes its own partition; full parallelism across workers", async () => {
+    const name = `proj-pe-${randomUUID().slice(0, 8)}`;
+    const N = 6;
+    const { stream, ens } = await append("pe", N);
+
+    const starts = new Map<bigint, number>();
+    const finishes = new Map<bigint, number>();
+    const def: ProjectionDefinition = {
+      name,
+      handler: async (event) => {
+        starts.set(event.event_number, Date.now());
+        await new Promise((r) => setTimeout(r, 100));
+        finishes.set(event.event_number, Date.now());
+      },
+    };
+    const wired = startPair(
+      stream,
+      def,
+      routingFnForPartitionBy({ kind: "per-event" }),
+      { processingCount: N },
+    );
+
+    try {
+      await waitFor(
+        async () => (finishes.size >= N ? true : null),
+        10_000,
+      );
+      // partition_key == String(event_number) for each; with N workers
+      // and disjoint partitions, total wall-clock should be well under
+      // the serial bound (N * 100ms).
+      const t0 = Math.min(...starts.values());
+      const t1 = Math.max(...finishes.values());
+      assert.ok(
+        t1 - t0 < N * 100 * 0.7,
+        `expected parallel run; wall=${t1 - t0}ms, serial bound=${N * 100}ms`,
+      );
+      assert.deepEqual(await listWorkItems(name), []);
+      // sanity: starts cover exactly the routed ens
+      assert.deepEqual(
+        [...starts.keys()].sort((a, b) => Number(a - b)),
+        ens,
+      );
+    } finally {
+      await wired.closeAll();
+    }
+  });
+});
+
+describe("projection worker — per-key mode", () => {
+  test("parallel across keys, serial within a key", async () => {
+    const name = `proj-pk-${randomUUID().slice(0, 8)}`;
+    // 4 events: 2 for key 'a', 2 for key 'b', interleaved.
+    const stream = `pk-${randomUUID().slice(0, 8)}`;
+    const rows = await client.appendToStream<{ k: string; i: number }>(
+      stream,
+      expected.any,
+      [
+        { event_type: "E", data: { k: "a", i: 0 } },
+        { event_type: "E", data: { k: "b", i: 0 } },
+        { event_type: "E", data: { k: "a", i: 1 } },
+        { event_type: "E", data: { k: "b", i: 1 } },
+      ],
+    );
+    const ens = rows.map((r) => r.event_number);
+
+    const events: Array<{ k: string; en: bigint; t0: number; t1: number }> =
+      [];
+    const def: ProjectionDefinition<{ k: string; i: number }> = {
+      name,
+      handler: async (event, ctx: ProjectionHandlerContext) => {
+        const t0 = Date.now();
+        await new Promise((r) => setTimeout(r, 100));
+        events.push({
+          k: ctx.partitionKey,
+          en: event.event_number,
+          t0,
+          t1: Date.now(),
+        });
+      },
+    };
+    const wired = startPair<{ k: string; i: number }>(
+      stream,
+      def,
+      routingFnForPartitionBy<{ k: string; i: number }>({
+        kind: "per-key",
+        key: (e) => e.data.k,
+      }),
+      { processingCount: 4 },
+    );
+
+    try {
+      await waitFor(
+        async () => (events.length >= 4 ? true : null),
+        10_000,
+      );
+
+      // Serial within key: 'a's events in event_number order.
+      const aEns = events.filter((e) => e.k === "a").map((e) => e.en);
+      const bEns = events.filter((e) => e.k === "b").map((e) => e.en);
+      assert.deepEqual(aEns, [ens[0], ens[2]]);
+      assert.deepEqual(bEns, [ens[1], ens[3]]);
+
+      // Parallel across keys: the second 'a' and the first 'b'
+      // overlap in time, OR each key's two events run in parallel
+      // with the other key's events. A practical, stable check: the
+      // total wall-clock is closer to 2*100ms (per-key serial, both
+      // keys in parallel) than to 4*100ms (everything serial).
+      const t0 = Math.min(...events.map((e) => e.t0));
+      const t1 = Math.max(...events.map((e) => e.t1));
+      assert.ok(
+        t1 - t0 < 350,
+        `expected per-key parallelism; wall=${t1 - t0}ms`,
+      );
+
+      assert.deepEqual(await listWorkItems(name), []);
+    } finally {
+      await wired.closeAll();
+    }
+  });
+});
+
+// ============================================================================
+// PRJ-E immediate-delete; D-0016 handler-opacity invariants
+// ============================================================================
+
+describe("projection worker — PRJ-E immediate-delete", () => {
+  test("no `done` row ever persists for a projection", async () => {
+    const name = `proj-del-${randomUUID().slice(0, 8)}`;
+    const { stream } = await append("del", 4);
+
+    const seenStatesDuringHandle: string[] = [];
+    const def: ProjectionDefinition = {
+      name,
+      handler: async (_event, ctx) => {
+        // Snapshot all rows for this subscription so we can prove no
+        // `done` state ever appears (rows are either claimed-by-us or
+        // pending for the queue tail).
+        const r = await pool.query<{ state: string }>(
+          `SELECT state FROM instructed.subscription_work_items
+            WHERE subscription_name = $1`,
+          [ctx.workerId.startsWith("force") ? "_" : name],
+        );
+        for (const row of r.rows) seenStatesDuringHandle.push(row.state);
+      },
+    };
+    const wired = startPair(
+      stream,
+      def,
+      routingFnForPartitionBy({ kind: "sequential" }),
+    );
+
+    try {
+      await waitFor(async () => {
+        const rows = await listWorkItems(name);
+        return rows.length === 0 ? true : null;
+      });
+      // No row ever observed in state 'done'.
+      assert.ok(
+        seenStatesDuringHandle.every((s) => s !== "done"),
+        `expected no 'done' rows; saw states=${seenStatesDuringHandle.join(",")}`,
+      );
+      // Final state: empty.
+      assert.deepEqual(await listWorkItems(name), []);
+    } finally {
+      await wired.closeAll();
+    }
+  });
+
+  test("handler throw leaves the work item `claimed`; DELETE never runs without a successful handler", async () => {
+    const name = `proj-throw-${randomUUID().slice(0, 8)}`;
+    const { stream, ens } = await append("th", 1);
+    const [e1] = ens;
+
+    let attempts = 0;
+    const def: ProjectionDefinition = {
+      name,
+      handler: async () => {
+        attempts += 1;
+        throw new Error("handler-fails-once");
+      },
+      // Tight retry-in so we observe multiple attempts quickly.
+      errorPolicy: () => ({ kind: "retry-in", delayMs: 30 }),
+    };
+    const wired = startPair(
+      stream,
+      def,
+      routingFnForPartitionBy({ kind: "sequential" }),
+    );
+
+    try {
+      // Wait for at least 3 attempts; throughout that time the row
+      // must NOT be deleted.
+      await waitFor(async () => (attempts >= 3 ? true : null));
+      const s = await workItemState(name, SEQUENTIAL_PARTITION_KEY, e1);
+      assert.ok(s, "work item must still exist after handler throws");
+      assert.equal(s.state, "claimed");
+      assert.notEqual(s.state, "done");
+    } finally {
+      await wired.closeAll();
+    }
+  });
+});
+
+describe("projection worker — D-0016 handler opacity", () => {
+  test("ProjectionHandlerContext exposes no tx / Queryable", async () => {
+    // Compile-time guard re-checked at runtime: only the documented
+    // fields are present. This protects against future regressions
+    // where someone adds a `tx` field thinking it harmless.
+    const name = `proj-ctx-${randomUUID().slice(0, 8)}`;
+    const { stream } = await append("ctx", 1);
+
+    let captured: ProjectionHandlerContext | null = null;
+    const def: ProjectionDefinition = {
+      name,
+      handler: async (_event, ctx) => {
+        captured = ctx;
+      },
+    };
+    const wired = startPair(
+      stream,
+      def,
+      routingFnForPartitionBy({ kind: "sequential" }),
+    );
+
+    try {
+      await waitFor(async () => (captured ? true : null));
+      const ctx = captured!;
+      assert.deepEqual(
+        Object.keys(ctx).sort(),
+        ["attempt", "eventNumber", "partitionKey", "signal", "workerId"],
+      );
+      // Belt and braces: explicit field-absence checks.
+      const bag = ctx as unknown as Record<string, unknown>;
+      assert.equal(bag.tx, undefined);
+      assert.equal(bag.client, undefined);
+      assert.equal(bag.query, undefined);
+    } finally {
+      await wired.closeAll();
+    }
+  });
+});
