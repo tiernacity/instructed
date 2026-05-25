@@ -1,30 +1,53 @@
 /**
- * Worker farm + failure injection.
+ * Worker farm + failure injection (SUB-A).
  *
- * A "slot" is a logical projector or process-manager position. The
- * harness keeps each slot live by respawning whenever the previous
- * worker exits. Multiple slots can target the same subscription —
- * only one wins the lease at a time, the others see `already_claimed`
- * and back off (the soak harness exercises lease rebalancing this
- * way).
+ * A "slot" is a logical projector or process-manager position. Under
+ * SUB-A each slot spawns a *pair* of workers: a routing worker
+ * (single-active per subscription -- competes for
+ * `subscriptions.claim_*` and converts events into
+ * `subscription_work_items` rows) and a processing worker (claims
+ * work items and runs the handler -- multiple may be active
+ * concurrently per subscription, distributed by `FOR UPDATE SKIP
+ * LOCKED`).
  *
- * Failure injection has two flavours:
+ * Multiple slots therefore exercise two distinct kinds of
+ * concurrency at once:
  *
- *   1. **Respawn.** Periodically close a random worker; the slot's
- *      keep-alive recreates it immediately. Models "process died".
+ *   - **Routing-side rebalancing.** Only one routing worker per
+ *     subscription holds the lease at a time; the others wait. Slot
+ *     respawn and lease theft both cause a routing handover.
+ *   - **Processing-side parallelism.** All processing workers per
+ *     subscription run simultaneously, racing for work items via
+ *     `claim_work_item`. The per-partition predicate keeps the
+ *     within-partition ordering invariant.
+ *
+ * Failure injection has two flavours, unchanged in observable
+ * intent from the pre-SUB-A harness:
+ *
+ *   1. **Respawn.** Periodically close a random slot (both workers);
+ *      the slot's keep-alive recreates the pair immediately. Models
+ *      "process died". On the routing side, the next idle routing
+ *      worker steps up; on the processing side, in-flight items
+ *      have their per-item lease expire and are taken over by other
+ *      processing workers (or the respawned one).
  *   2. **Lease theft.** Periodically run an UPDATE that backdates a
- *      random subscription's `claim_expires_at`, forcing the holder's
- *      next heartbeat to detect lease loss (`IS022`) and another slot
- *      to take over. Models the rebalancing path under churn.
+ *      random subscription's `claim_expires_at`, forcing the routing
+ *      worker's next heartbeat to detect lease loss (`IS022`) and
+ *      another slot's routing worker to take over. Processing
+ *      workers are unaffected by this (they hold per-item leases on
+ *      `subscription_work_items.lease_expires_at`, not on
+ *      `subscriptions`).
  */
 
 import pg from "pg";
 import {
   Client,
-  startProcessManager,
-  startProjection,
-  type ProcessManagerDefinition,
+  startPmWorker,
+  startProjectionWorker,
+  startRoutingWorker,
+  type PmDefinition,
   type ProjectionDefinition,
+  type RoutingDefinition,
   type RunningWorker,
 } from "../../sdks/typescript/src/index.ts";
 
@@ -33,7 +56,7 @@ export interface SlotHandle {
   readonly label: string;
   /** Stop the slot (no respawn). Idempotent. */
   close(): Promise<void>;
-  /** Force the underlying worker to exit; the slot will respawn. */
+  /** Force the underlying worker pair to exit; the slot will respawn. */
   bounce(): Promise<void>;
 }
 
@@ -46,6 +69,20 @@ interface SlotInternal extends SlotHandle {
 interface SpawnArgs {
   workerId: string;
   client: Client;
+}
+
+/**
+ * Compose two workers into one `RunningWorker`. Stopped resolves
+ * once both have stopped; close stops both in parallel. Matches the
+ * facade's composite shape (SUB-A slice 9).
+ */
+function compose(a: RunningWorker, b: RunningWorker): RunningWorker {
+  return {
+    stopped: Promise.all([a.stopped, b.stopped]).then(() => {}),
+    close: async () => {
+      await Promise.all([a.close(), b.close()]);
+    },
+  };
 }
 
 /**
@@ -111,7 +148,7 @@ function keepAlive(
       await loop;
     },
     async bounce() {
-      // Closing the current worker triggers the keep-alive to respawn.
+      // Closing the current pair triggers the keep-alive to respawn.
       await current.close();
     },
   };
@@ -155,7 +192,10 @@ export function newMetrics(): SoakMetrics {
 
 export interface ProjectorSlotOptions {
   client: Client;
-  def: ProjectionDefinition;
+  /** Routing-worker side of the projection. */
+  routingDef: RoutingDefinition;
+  /** Processing-worker side of the projection. */
+  projectionDef: ProjectionDefinition;
   slotLabel: string;
   leaseSeconds: number;
   pollInterval: number;
@@ -163,28 +203,34 @@ export interface ProjectorSlotOptions {
 }
 
 export function projectorSlot(opts: ProjectorSlotOptions): SlotInternal {
-  const stream = opts.def.stream ?? "$all";
+  const stream = opts.routingDef.stream ?? "$all";
+  const heartbeatInterval = Math.max(500, (opts.leaseSeconds * 1000) / 3);
   const handle = keepAlive(
     opts.slotLabel,
-    ({ workerId, client }) =>
-      startProjection(client, opts.def, {
-        workerId,
+    ({ workerId, client }) => {
+      const router = startRoutingWorker(client, opts.routingDef, {
+        workerId: `${workerId}-r`,
         leaseSeconds: opts.leaseSeconds,
         pollInterval: opts.pollInterval,
-        heartbeatInterval: Math.max(500, (opts.leaseSeconds * 1000) / 3),
-        onError: () => {
-          // Swallow per-handler errors here; the soak harness's
-          // invariant checks catch real damage. Could surface to a
-          // log if --verbose is added later.
-        },
-      }),
+        heartbeatInterval,
+        onError: noop,
+      });
+      const proc = startProjectionWorker(client, opts.projectionDef, {
+        workerId: `${workerId}-p`,
+        leaseSeconds: opts.leaseSeconds,
+        pollInterval: opts.pollInterval,
+        heartbeatInterval,
+        onError: noop,
+      });
+      return compose(router, proc);
+    },
     opts.client,
     opts.slotLabel,
     opts.metrics,
   );
   return {
     label: opts.slotLabel,
-    subscriptionName: opts.def.name,
+    subscriptionName: opts.routingDef.name,
     stream,
     close: handle.close,
     bounce: handle.bounce,
@@ -194,7 +240,10 @@ export function projectorSlot(opts: ProjectorSlotOptions): SlotInternal {
 export interface PmSlotOptions {
   client: Client;
   dispatchClient: Client;
-  def: ProcessManagerDefinition<any>;
+  /** Routing-worker side of the PM. */
+  routingDef: RoutingDefinition;
+  /** Processing-worker side of the PM (apply + handle). */
+  pmDef: PmDefinition<any, any>;
   slotLabel: string;
   leaseSeconds: number;
   pollInterval: number;
@@ -202,30 +251,49 @@ export interface PmSlotOptions {
 }
 
 export function pmSlot(opts: PmSlotOptions): SlotInternal {
-  const stream = opts.def.stream ?? "$all";
+  const stream = opts.routingDef.stream ?? "$all";
+  const heartbeatInterval = Math.max(500, (opts.leaseSeconds * 1000) / 3);
   const handle = keepAlive(
     opts.slotLabel,
-    ({ workerId, client }) =>
-      startProcessManager(client, opts.dispatchClient, opts.def, {
-        workerId,
+    ({ workerId, client }) => {
+      const router = startRoutingWorker(client, opts.routingDef, {
+        workerId: `${workerId}-r`,
         leaseSeconds: opts.leaseSeconds,
         pollInterval: opts.pollInterval,
-        heartbeatInterval: Math.max(500, (opts.leaseSeconds * 1000) / 3),
-        onError: () => {
-          // see projectorSlot
+        heartbeatInterval,
+        onError: noop,
+      });
+      const proc = startPmWorker(
+        client,
+        opts.dispatchClient,
+        opts.pmDef,
+        {
+          workerId: `${workerId}-p`,
+          leaseSeconds: opts.leaseSeconds,
+          pollInterval: opts.pollInterval,
+          heartbeatInterval,
+          onError: noop,
         },
-      }),
+      );
+      return compose(router, proc);
+    },
     opts.client,
     opts.slotLabel,
     opts.metrics,
   );
   return {
     label: opts.slotLabel,
-    subscriptionName: opts.def.name,
+    subscriptionName: opts.routingDef.name,
     stream,
     close: handle.close,
     bounce: handle.bounce,
   };
+}
+
+function noop(_err: Error): void {
+  // Swallow per-handler errors here; the soak harness's invariant
+  // checks catch real damage. Could surface to a log if --verbose
+  // is added later.
 }
 
 // ---------------------------------------------------------------------------

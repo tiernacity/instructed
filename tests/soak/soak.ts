@@ -29,11 +29,17 @@ import pg from "pg";
 
 import {
   Client,
+  routingFnForPartitionBy,
   type ProjectionDefinition,
   type RecordedEvent,
+  type RoutingDefinition,
 } from "../../sdks/typescript/src/index.ts";
 import { dbConfigFromEnv, makePool, resetSchema } from "./fixtures.ts";
-import { forwarder, newForwarderCounters } from "./domain.ts";
+import {
+  forwarderPmDefinition,
+  forwarderRouteFn,
+  newForwarderCounters,
+} from "./domain.ts";
 import {
   newMetrics,
   pickRandom,
@@ -182,10 +188,12 @@ async function waitForDrain(
   subscriptions: Array<{ stream: string; name: string }>,
   timeoutMs: number,
 ): Promise<boolean> {
-  // Drain = $all head stable for two consecutive ticks AND every
-  // subscription's last_seen >= head. The PM creates new events
-  // while processing triggers, so head keeps growing until the PM
-  // is itself caught up.
+  // SUB-A drain = $all head stable for two consecutive ticks AND
+  // every subscription is caught up per the SUB-A predicate
+  // (`is_subscription_caught_up`): routing cursor >= head AND no
+  // in-flight work-items <= head. The PM creates new events while
+  // processing triggers, so head keeps growing until the PM is
+  // itself caught up.
   const deadline = Date.now() + timeoutMs;
   let prevHead = -1n;
   let stableTicks = 0;
@@ -200,29 +208,33 @@ async function waitForDrain(
       stableTicks = 0;
       prevHead = head;
     }
-    // Every subscription caught up?
+    // Every subscription caught up (both conjuncts of the SUB-A
+    // catch-up predicate)?
     let allCaught = true;
     for (const sub of subscriptions) {
+      let target = head;
+      if (sub.stream !== "$all") {
+        const r2 = await pool.query<{ head: string }>(
+          `SELECT stream_version::text AS head FROM instructed.streams WHERE stream_uuid = $1`,
+          [sub.stream],
+        );
+        target = BigInt(r2.rows[0]?.head ?? "0");
+      }
       try {
-        const pos = await client.readSubscriptionPosition(sub.stream, sub.name);
-        if (sub.stream === "$all") {
-          if (pos.lastSeen < head) {
-            allCaught = false;
-            break;
-          }
-        } else {
-          const r2 = await pool.query<{ head: string }>(
-            `SELECT stream_version::text AS head FROM instructed.streams WHERE stream_uuid = $1`,
-            [sub.stream],
-          );
-          const subHead = BigInt(r2.rows[0]?.head ?? "0");
-          if (pos.lastSeen < subHead) {
-            allCaught = false;
-            break;
-          }
+        const caughtUp = await client.isSubscriptionCaughtUp(
+          sub.stream,
+          sub.name,
+          target,
+        );
+        if (!caughtUp) {
+          allCaught = false;
+          break;
         }
       } catch {
-        // No subscription row yet; treat as caught up (nothing to do).
+        // Subscription / stream not yet created; treat as not caught
+        // up so we don't false-positive on a too-early call.
+        allCaught = false;
+        break;
       }
     }
     if (stableTicks >= 2 && allCaught) return true;
@@ -265,18 +277,35 @@ async function main(): Promise<number> {
     );
 
     // Projector with a balance map (and event_id dedup).
+    // SUB-A: routing + processing split. The Balances projection
+    // partitions sequentially so within-partition ordering matches
+    // the legacy single-cursor behaviour the original soak exercised.
+    // Routing-side filtering is unnecessary here (the projector
+    // ignores non-Added events in its handler; the work-item PK
+    // absorbs the few extra rows we route).
     const balanceProj = makeBalanceProjector();
     const projectionName = "p-balances";
+    const projRoutingDef: RoutingDefinition = {
+      name: projectionName,
+      stream: "$all",
+      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
+      startFrom: "origin",
+    };
     const projDef: ProjectionDefinition = {
       name: projectionName,
       stream: "$all",
-      startFrom: "origin",
-      handle: (e: RecordedEvent) => balanceProj.handle(e),
+      handler: (e: RecordedEvent) => balanceProj.handle(e),
     };
 
     const forwarderName = "pm-forwarder";
     const pmCounters = newForwarderCounters();
-    const pmDef = forwarder(forwarderName, pmCounters);
+    const pmRoutingDef: RoutingDefinition = {
+      name: forwarderName,
+      stream: "$all",
+      routeFn: forwarderRouteFn(pmCounters),
+      startFrom: "origin",
+    };
+    const pmDef = forwarderPmDefinition(forwarderName, pmCounters);
 
     // Subscription registry for invariant checks.
     const subscriptions = [
@@ -292,7 +321,8 @@ async function main(): Promise<number> {
       slots.push(
         projectorSlot({
           client,
-          def: projDef,
+          routingDef: projRoutingDef,
+          projectionDef: projDef,
           slotLabel: `proj-${i}`,
           leaseSeconds: cli.leaseSeconds,
           pollInterval: cli.pollIntervalMs,
@@ -305,7 +335,8 @@ async function main(): Promise<number> {
         pmSlot({
           client,
           dispatchClient,
-          def: pmDef,
+          routingDef: pmRoutingDef,
+          pmDef,
           slotLabel: `pm-${i}`,
           leaseSeconds: cli.leaseSeconds,
           pollInterval: cli.pollIntervalMs,

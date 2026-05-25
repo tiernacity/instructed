@@ -14,19 +14,27 @@
  * coordination).
  *
  * **Forwarder PM.** Subscribed to `$all`. Routes `Triggered{n,target}`
- * events to a per-target process instance; the handler dispatches
- * `add{n}` to the target account stream. After TODO #10 (ex-ML-0005)
- * the PM coalesces ignored-event acks: each routed event's
- * persist-and-ack tx covers prior ignored events implicitly, and a
- * trailing run of ignored events is flushed with one
- * `advance_subscription` per batch.
+ * events to a per-target process instance (PM-F: partitionKey is
+ * `target`); the handler dispatches `add{n}` to the target account
+ * stream. Non-Triggered events route to `"ignore"`, so the routing
+ * worker never inserts a work item for them -- the SUB-A substrate
+ * subsumes the legacy ignored-event ack coalescing (TODO #10 /
+ * ex-ML-0005) at the routing layer: no work item ever exists for an
+ * ignored event, so there's nothing to ack.
+ *
+ * The PM is long-lived: it never returns `{ complete: true }` because
+ * the harness wants the snapshot to survive so the final
+ * PM-FORWARD-TOTAL invariant can sum `forwarded` across every
+ * partition's snapshot.
  */
 
 import type {
   AggregateDefinition,
   DispatchedCommand,
   DomainEvent,
-  ProcessManagerDefinition,
+  PmDefinition,
+  RecordedEvent,
+  RoutingFn,
 } from "../../sdks/typescript/src/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -85,22 +93,32 @@ export interface TriggeredData {
  * report prints the totals and compares them against the
  * triggers_total / forwarded_total numbers to localise any loss.
  *
- * The buckets answer one question per row in the final report:
+ * Reading the bucket meaning under SUB-A:
  *
- *   routeCalls['Triggered']  - did the SDK reach our route fn?
- *   handleCalls              - did the SDK reach our handle fn?
- *   handleReturns            - did handle complete without throwing?
+ *   routeCalls['Triggered']  - times the *routing worker* invoked our
+ *                              routeFn with a Triggered event. Should
+ *                              be >= triggers_total (re-routing on
+ *                              routing-worker restart is idempotent
+ *                              at the work-item PK; the routeFn still
+ *                              fires per re-read event).
+ *   handleCalls              - times the *processing worker* entered
+ *                              the PM's handle. May exceed routeCalls
+ *                              under SUB-B retry-in or lease takeover
+ *                              (handle re-runs per attempt).
+ *   handleReturns            - times handle returned normally.
+ *                              handleCalls - handleReturns = handler
+ *                              throws.
  *
  * Plus a SQL query at the end that counts Added events whose
  * causation_id is a Triggered event (= PM dispatches that
- * committed to the aggregate stream). All four numbers, side by
+ * committed to an aggregate stream). All four numbers, side by
  * side with triggers_total and forwarded_total, pin the bug to a
  * single SDK code path.
  */
 export interface ForwarderCounters {
-  /** Times the SDK invoked our route fn, by event_type. */
+  /** Times the SDK invoked our routeFn, by event_type. */
   readonly routeCalls: Map<string, number>;
-  /** Times handle was entered. */
+  /** Times the processing worker entered handle. */
   handleCalls: number;
   /** Times handle returned normally (not threw / not aborted mid-body). */
   handleReturns: number;
@@ -115,30 +133,56 @@ function bump(map: Map<string, number>, key: string): void {
 }
 
 /**
- * Build a Forwarder PM with a deterministic name. One PM type
- * subscribes to `$all` and routes by `target`, so multiple process
- * instances coexist on the same subscription.
+ * SUB-A routing function for the Forwarder. Non-Triggered events
+ * route to `"ignore"`; the routing worker writes no work item for
+ * them. Triggered events route to the partition keyed by `target`.
  *
- * When `counters` is provided, the route and handle hooks update it
- * (in-process JS numbers; no I/O).
+ * Counter side effect: `routeCalls['Triggered']` increments on every
+ * Triggered event the routing worker sees. This runs in the routing
+ * worker process; the routing-worker has at-most-one-active-worker
+ * semantics per subscription, so the counter is single-writer modulo
+ * routing-worker handover.
  */
-export function forwarder(
+export function forwarderRouteFn(
+  counters?: ForwarderCounters,
+): RoutingFn {
+  return (event: RecordedEvent) => {
+    if (event.event_type !== "Triggered") return "ignore";
+    if (counters) bump(counters.routeCalls, event.event_type);
+    const data = event.data as TriggeredData;
+    return { partitionKey: data.target };
+  };
+}
+
+/**
+ * SUB-A PM definition for the Forwarder (worker-level shape;
+ * consumed by `startPmWorker`).
+ *
+ * `apply`: pure fold over Triggered events; bumps the `forwarded`
+ *   counter. Runs during PM-state rebuild (PM-C) and on the claimed
+ *   event before `handle`.
+ * `handle`: dispatches one `add{n}` command per Triggered event to
+ *   the target account stream. Never returns `{ complete: true }` --
+ *   the harness needs every partition's snapshot to persist so the
+ *   final PM-FORWARD-TOTAL check can sum across them.
+ */
+export function forwarderPmDefinition(
   name: string,
   counters?: ForwarderCounters,
-): ProcessManagerDefinition<ForwarderState> {
+): PmDefinition<ForwarderState> {
   const Counter = counter();
   return {
     name,
     stream: "$all",
-    routes: {
-      Triggered: (event) => {
-        if (counters) bump(counters.routeCalls, event.event_type);
-        const data = event.data as TriggeredData;
-        return { kind: "continue", processId: data.target };
-      },
-    },
     initialState: () => ({ forwarded: 0 }),
-    async handle(state, event) {
+    apply(state, event) {
+      // PM-C: pure fold. Only Triggered events touch our state; the
+      // routing fn ignores everything else, so in practice this only
+      // sees Triggered, but defend in depth.
+      if (event.event_type !== "Triggered") return state;
+      return { forwarded: state.forwarded + 1 };
+    },
+    async handle(_state, event) {
       if (counters) counters.handleCalls += 1;
       const data = event.data as TriggeredData;
       const commands: DispatchedCommand[] = [
@@ -148,12 +192,8 @@ export function forwarder(
           command: { kind: "add", n: data.n } as CounterCommand,
         },
       ];
-      const result = {
-        state: { forwarded: state.forwarded + 1 },
-        commands,
-      };
       if (counters) counters.handleReturns += 1;
-      return result;
+      return { commands };
     },
   };
 }

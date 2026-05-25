@@ -4,9 +4,19 @@ Performance gauge + invariant fuzzer over time. Composes several
 mechanisms (aggregate OCC, projector subscriptions, process-manager
 dispatch) against a single Postgres for a configurable duration with
 periodic failure injection (worker respawn + lease theft), then runs
-the same invariant checks the per-PR composed-concurrency tests run
-in `sdks/typescript/test/concurrent.test.ts` — but at higher N, over
-longer wall-clock, with deliberately churned leases.
+invariant checks that mirror the per-PR composed-concurrency tests
+— but at higher N, over longer wall-clock, with deliberately churned
+leases.
+
+Under SUB-A (slice 11 re-baseline), each projector / PM "slot"
+actually owns a *pair* of workers: a routing worker (single-active
+per subscription — turns events into `subscription_work_items`
+rows) and a processing worker (claims work items and runs the
+handler — multiple may be active concurrently per subscription).
+The slot-respawn and lease-theft failure injections operate on the
+pair; lease theft specifically affects only the routing-side lease,
+which is the only place a subscription-level lease lives under
+SUB-A.
 
 Scope:
 
@@ -70,39 +80,54 @@ Domain (deliberately minimal — see `domain.ts`):
 
 - **Counter aggregate.** Per-account stream taking `add{n}` commands.
 - **Forwarder process manager.** Subscribed to `$all`, routes
-  `Triggered{n, target}` events to a per-target process instance and
-  dispatches `add{n}` to the `target` account. Many PM instances
-  share the one subscription, so a poison event stalls the whole
-  type — that's intentional and matches v1's PM model.
-- **Balances projection.** Subscribed to `$all`, folds `Added.n` into
-  an in-memory `account → balance` map. The final report compares it
-  against a fresh re-fold from the events table.
+  `Triggered{n, target}` events to a per-target PM partition
+  (PM-F: `partitionKey = target`) and dispatches `add{n}` to the
+  `target` account. The PM is long-lived (never returns
+  `{ complete: true }`) so the final PM-FORWARD-TOTAL check can sum
+  the `forwarded` field across every partition's snapshot. A poison
+  event would stall only its own target partition under SUB-A
+  (per-partition predicate) — the harness's workload doesn't inject
+  poisons.
+- **Balances projection.** Subscribed to `$all` with sequential
+  partitioning (`partitionKey = '_default'`); folds `Added.n` into
+  an in-memory `account → balance` map. The final report compares
+  it against a fresh re-fold from the events table.
 
-Mechanisms composed:
+Mechanisms composed under SUB-A:
 
-- Aggregate OCC retry on `runCommand` (`--any-version-fraction` mixes
-  in exogenous `expected.any` writes so both append modes get tested).
-- Multi-slot competition for one subscription, with short leases and
-  active lease theft.
+- Aggregate OCC retry on `runCommand` (`--any-version-fraction`
+  mixes in exogenous `expected.any` writes so both append modes get
+  tested).
+- **Routing-side rebalancing.** Multi-slot competition for the
+  single routing lease per subscription, with short lease TTL and
+  active lease theft. Only one routing worker per subscription is
+  active at a time; the others wait.
+- **Processing-side parallelism.** All `--projectors` /
+  `--pms` slots run their processing workers simultaneously, racing
+  for work items via `claim_work_item` (`FOR UPDATE SKIP LOCKED`).
+  Per-partition ordering is enforced by the SUB-A claim predicate;
+  parallelism is real across partitions (per-target for the PM, a
+  no-op for the sequential projection which has one partition).
 - PM dispatch over a separate connection pool (D-0011 / D-0012).
-- Process death + restart on every slot type.
+- Process death + restart on every slot type (kills both the
+  routing and processing worker of the affected slot).
 
 ## Drain and quiescence
 
 After the active workload finishes, the harness **drains**: it waits
-for `$all` head to stop growing and every subscription's `last_seen`
-to reach head. Drain time is dominated by PM throughput on a busy
-`$all`: a 60s active run with the default workload drains in roughly
-the same wall time as the active phase (down from ~3x before the
-ignored-event ack coalescing landed — see TODO #10 / ex-ML-0005). A
-larger workload or `--drain-timeout-sec` may still be needed if
-you crank `--trigger-appenders` and `--dispatchers` together.
+for `$all` head to stop growing and every subscription to satisfy
+the SUB-A catch-up predicate (`is_subscription_caught_up`): both the
+routing cursor at or past head AND zero in-flight work items at or
+below head. The PM creates new events while processing triggers, so
+head keeps growing until the PM is itself caught up. A larger
+workload or `--drain-timeout-sec` may still be needed if you crank
+`--trigger-appenders` and `--dispatchers` together.
 
 Two invariants — **PM-FORWARD-TOTAL** and **REFOLD-MATCH** — only hold
 at quiescence. If `--drain-timeout-sec` is hit before drain completes,
 the harness reports those as **INCONCLUSIVE** rather than
-`VIOLATIONS`. The gaplessness / monotonicity / lease-uniqueness
-checks are valid in either case.
+`VIOLATIONS`. The gaplessness / monotonicity / lease-uniqueness /
+failed-work-item checks are valid in either case.
 
 A run that prints `drain: completed` and `lag=0` on every
 subscription is a clean run. A run that prints `drain: INCOMPLETE
@@ -151,8 +176,10 @@ means `runCommand` is reporting success without committing; etc.
 | -------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `INV-APPEND-003`           | Final, on `$all`.                                  | A gap in `event_number` — the global head says N but fewer than N rows exist.         |
 | `INV-APPEND-022`           | Final, per stream.                                 | A per-stream `stream_version` gap.                                                    |
-| `INV-SUB-P-008`            | Continuous sampler + final.                        | `last_seen` went backwards, or advanced past the head.                                |
-| `INV-SUB-P-LEASE-UNIQ`     | Continuous sampler.                                | Two unexpired claims on the same subscription. The SQL contract forbids this.         |
+| `INV-SUB-P-008`            | Continuous sampler + final.                        | Routing cursor (`subscriptions.last_seen`) went backwards, or advanced past the head. |
+| `INV-SUB-P-LEASE-UNIQ`     | Continuous sampler.                                | Two unexpired claims on the same subscription — the routing-side lease. The SQL contract forbids this. |
+| `INV-SUB-W-LEASE-UNIQ`     | Continuous sampler.                                | (SUB-A) Two unexpired processing-worker claims on the same `(subscription, partition, event_number)` work item. |
+| `INV-SUB-W-NO-FAILED`      | Final.                                             | (SUB-A) A `failed` row appeared in `subscription_work_items`. The soak workload never injects poisons, so a `failed` row indicates an SDK bug. |
 | `PM-024`                   | Final.                                             | A PM snapshot's `source_version` exceeded the subscription's `last_seen`.             |
 | `PM-FORWARD-TOTAL`         | Final.                                             | The Forwarder snapshots' total `forwarded` count differs from the trigger count.      |
 | `REFOLD-MATCH`             | Final.                                             | Per-account: the projector's running balance differs from a fresh re-fold of `Added` events. |
@@ -160,6 +187,10 @@ means `runCommand` is reporting success without committing; etc.
 The continuous sampler runs every `--sample-interval-ms` while the
 harness is live; transient lease-uniqueness or non-monotone cursor
 violations would be invisible to a final-only scan.
+
+The two `INV-SUB-W-*` codes are SUB-A-shaped and don't yet have a
+corresponding entry in `docs/invariants.md`; slice 12's `INV-SUB-*`
+triage pass will reconcile naming and add formal definitions.
 
 ## Reading the report
 
@@ -252,6 +283,21 @@ The harness currently does **not**:
   for invariant-fuzzing intent (the `pg` library does real
   network I/O so the concurrency is genuine) but means the harness
   doesn't exercise multi-host clock skew.
+- Exercise SUB-B convenience wrappers (`retryUpTo`,
+  `quarantineAfter`, etc.) — those ship after SUB-A. The default
+  error policy (exponential backoff, retry forever) is what the
+  soak workload runs against; the `INV-SUB-W-NO-FAILED` check
+  relies on this (a workload that injects a poison event under a
+  `quarantineAfter` policy would legitimately produce `failed`
+  rows).
+- Inject failures at the *processing*-worker lease boundary
+  specifically. The current lease-theft path backdates
+  `subscriptions.claim_expires_at`, which is the routing lease.
+  A future stretch goal would backdate
+  `subscription_work_items.lease_expires_at` to force a
+  processing-worker takeover (today these only happen indirectly
+  when a respawn kills the processing worker before its in-flight
+  item completes).
 
 See TODO `#3b` for the long-form motivation and the framing this
 harness landed against.

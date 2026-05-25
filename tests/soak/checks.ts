@@ -12,15 +12,27 @@
  * Continuous samples:
  *   - per-subscription `last_seen` monotonicity
  *     (INV-SUB-P-008 / advance-monotonicity)
- *   - lease uniqueness: at most one *unexpired* claim per
- *     (stream, name) — the SQL contract enforces this via a partial
- *     unique index; the sampler verifies it holds at every instant
+ *   - subscription-level lease uniqueness: at most one *unexpired*
+ *     claim per (stream, name) on `subscriptions` -- the SQL
+ *     contract enforces this via a partial unique index; the
+ *     sampler verifies it holds at every instant. Under SUB-A this
+ *     covers the routing-worker lease only; processing workers do
+ *     not take subscription leases.
+ *   - work-item-level lease uniqueness (SUB-A): at most one
+ *     processing worker should own an unexpired lease on any given
+ *     `(subscription, partition_key, event_number)` work item.
+ *     Tagged `INV-SUB-W-LEASE-UNIQ`; pending the `INV-SUB-*` triage
+ *     in docs/invariants.md slice 12.
  *
  * Final checks:
  *   - `$all` event_number gapless 1..head (INV-APPEND-003)
  *   - per-stream stream_version gapless 1..head (INV-APPEND-022)
  *   - subscription cursors never advanced past head, never went
  *     backwards in the recorded sample stream (INV-SUB-P-008)
+ *   - no `failed` work items remain (SUB-A: `failed` rows require
+ *     operator action; the soak workload never injects poison
+ *     events, so any `failed` row is an SDK bug). Tagged
+ *     `INV-SUB-W-NO-FAILED`.
  *   - every Forwarder PM snapshot satisfies
  *     `source_version <= last_seen` (PM-024)
  *   - aggregate re-folds: balance per account == projector's
@@ -110,9 +122,10 @@ export async function sampleOnce(
     state.lastSeenByKey.set(key, history);
   }
 
-  // --- lease uniqueness: ≤ 1 *unexpired* claim per (stream, name) -------
-  // The SQL contract enforces this via a partial unique index. The
-  // sample is a belt-and-braces correctness probe — if it ever
+  // --- subscription-level lease uniqueness ------------------------------
+  // Routing-worker lease lives on `subscriptions.claim_*`. The SQL
+  // contract enforces uniqueness via a partial unique index. The
+  // sample is a belt-and-braces correctness probe -- if it ever
   // triggers, the index is wrong, not the SDK.
   const dupes = await ctx.pool.query<{
     stream_id: number;
@@ -132,6 +145,39 @@ export async function sampleOnce(
       message:
         `multiple unexpired claims on (stream_id=${r.stream_id}, ` +
         `name=${r.subscription_name}): n=${r.n}`,
+    });
+  }
+
+  // --- work-item-level lease uniqueness (SUB-A) -------------------------
+  // Per-work-item lease lives on `subscription_work_items.claimed_by` +
+  // `lease_expires_at`. A row in state='claimed' with an unexpired
+  // lease MUST have a unique `claimed_by`; multiple unexpired leases
+  // on the same (sub, partition, event_number) would mean two
+  // processing workers think they own the same item. The schema
+  // models claimed_by as a single text column and the procedure
+  // overwrites it on takeover, so by construction this can only
+  // misbehave if a procedure update is non-atomic.
+  const wiDupes = await ctx.pool.query<{
+    subscription_name: string;
+    partition_key: string;
+    event_number: string;
+    n: string;
+  }>(
+    `SELECT subscription_name, partition_key, event_number::text,
+            count(*)::text AS n
+       FROM instructed.subscription_work_items
+      WHERE state = 'claimed'
+        AND lease_expires_at IS NOT NULL
+        AND lease_expires_at > now()
+      GROUP BY subscription_name, partition_key, event_number
+     HAVING count(*) > 1`,
+  );
+  for (const r of wiDupes.rows) {
+    state.violations.push({
+      code: "INV-SUB-W-LEASE-UNIQ",
+      message:
+        `multiple unexpired work-item claims on (sub=${r.subscription_name}, ` +
+        `pk=${r.partition_key}, event_number=${r.event_number}): n=${r.n}`,
     });
   }
 }
@@ -243,6 +289,34 @@ export async function runFinalChecks(
         code: "INV-APPEND-022",
         message:
           `stream ${r.stream_uuid}: ${n} rows but version=${head} — gap`,
+      });
+    }
+  }
+
+  // --- no `failed` work items (SUB-A) -----------------------------------
+  // `failed` rows are operator-only-resolution per SUB-A; the soak
+  // workload doesn't inject poison events, so any failed row is an
+  // SDK bug. Surface the count and a sample row.
+  const failedR = await ctx.pool.query<{
+    subscription_name: string;
+    partition_key: string;
+    event_number: string;
+    error_text: string | null;
+  }>(
+    `SELECT subscription_name, partition_key, event_number::text,
+            error_text
+       FROM instructed.subscription_work_items
+      WHERE state = 'failed'
+      LIMIT 5`,
+  );
+  if (failedR.rowCount && failedR.rowCount > 0) {
+    for (const r of failedR.rows) {
+      violations.push({
+        code: "INV-SUB-W-NO-FAILED",
+        message:
+          `failed work item on (sub=${r.subscription_name}, ` +
+          `pk=${r.partition_key}, event_number=${r.event_number}): ` +
+          `${r.error_text ?? "(no error_text)"}`,
       });
     }
   }

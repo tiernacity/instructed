@@ -7,11 +7,13 @@ this file when the work lands.
 
 ## Status snapshot (for a fresh session picking this up)
 
-**Done:** Slices 1–10.
+**Done:** Slices 1–11.
 
 Commit log (newest first):
-- `<this commit>` SUB-A slice 10: bank-account example migration
-  to the SUB-A registration shapes + PM-F upgrade note.
+- `<this commit>` SUB-A slice 11: soak harness re-baseline on the
+  SUB-A worker substrate.
+- `492cfb2` SUB-A slice 10: bank-account example migration to
+  the SUB-A registration shapes + PM-F upgrade note.
 - `d22b663` SUB-A slice 9: Instructed facade onto the SUB-A
   worker modules.
 - (prior) SUB-A slice 8: `waitForProjection`
@@ -33,7 +35,7 @@ Commit log (newest first):
 - `1b08e1c` SUB-A slice 2: core work-queue procedures.
 - `fbd7b9c` SUB-A slice 1: subscription_work_items schema.
 
-**Next:** Slice 11 (soak harness re-baseline).
+**Next:** Slice 12 (documentation patches and working-file close-out).
 
 Slice 9 is the breaking-API-change slice for the SDK surface:
 it removes the legacy `registerProjection(name, handler)` and
