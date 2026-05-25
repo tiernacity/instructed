@@ -1,27 +1,43 @@
 /**
- * Layer 5: the `Instructed` facade.
+ * Layer 5: the `Instructed` facade (SUB-A slice 9 rewrite).
  *
- * Thin composition over Layers 0–4 (sdk-design.md §3 layer 3.5).
- * `register*` declares what this process can do; `startWorker()`
- * fans out to one subscription loop per registered projection /
- * process manager. `dispatch(aggregateType, ...)` resolves the
- * aggregate definition through the registry and delegates to
- * `runCommand`. `dispatch` also accepts a `consistency` list and
- * a `consistencyTimeout` which, after the append commits, waits
- * via {@link waitForProjection} for the named subscriptions to
- * catch up — no `:strong` shorthand (D-0010).
+ * Thin composition over Layers 0-4. `register*` declares what this
+ * process can do; `startWorker()` fans out one **routing worker** +
+ * one **processing worker** per registered projection / process
+ * manager. `dispatch(aggregateType, ...)` resolves the aggregate
+ * through the registry and delegates to `runCommand`. `dispatch`
+ * also accepts a `consistency` list and a `consistencyTimeout`
+ * which, after the append commits, waits via {@link waitForProjection}
+ * for the named subscriptions to catch up (D-0010: no `:strong`
+ * shorthand).
+ *
+ * SUB-A registration surface (PRJ-A + PM-F, slice 9):
+ *
+ *   registerProjection(name, { partitionBy? | routeFn?, handler,
+ *                              stream?, errorPolicy?, startFrom? },
+ *                      opts?)
+ *     - `partitionBy` and `routeFn` are mutually exclusive.
+ *     - Default: `{ kind: 'sequential' }`.
+ *     - The legacy `selector` parameter is removed; the same
+ *       observable behaviour is recoverable via a `routeFn` that
+ *       returns `"ignore"` for would-be-skipped events.
+ *
+ *   registerProcessManager(name, { routeFn, apply, handle,
+ *                                  initialState, snapshotModuleVersion?,
+ *                                  stream?, errorPolicy?, startFrom? },
+ *                          opts?)
+ *     - The old single-`handle` signature is **removed** (breaking;
+ *       not deprecated).
  *
  * Pool management:
  *   - the persist client wraps the user's `db` (env-var or default
  *     when omitted); ownership tracked so `close()` ends owned pools.
  *   - the dispatch client wraps `dispatchDb` (or a sibling pool with
- *     the same connection string); **materialised lazily** — a process
- *     that only registers aggregates and dispatches never opens it.
- *     The first `registerProcessManager` or PM-driven dispatch
- *     triggers materialisation (whichever comes first). v1 considers
- *     `dispatch` itself NOT a PM-driven dispatch — it uses the persist
- *     pool. The PM worker is the only path that needs the dispatch
- *     pool today.
+ *     the same connection string); materialised lazily on the first
+ *     `registerProcessManager` or PM-driven dispatch. v1 considers
+ *     `dispatch` itself NOT a PM-driven dispatch -- it uses the
+ *     persist pool. The PM worker is the only path that needs the
+ *     dispatch pool today.
  */
 
 import * as pg from "pg";
@@ -34,19 +50,23 @@ import {
   type RunCommandOptions,
 } from "./aggregate.ts";
 import {
-  startProjection,
-  DEFAULT_BATCH_SIZE,
-  DEFAULT_LEASE_SECONDS,
-  DEFAULT_POLL_INTERVAL_MS,
-  type ProjectionDefinition,
-  type ProjectionWorkerOptions,
-  type RunningWorker,
-} from "./subscription.ts";
+  startRoutingWorker,
+  DEFAULT_ROUTING_BATCH_SIZE,
+  DEFAULT_ROUTING_LEASE_SECONDS,
+  DEFAULT_ROUTING_POLL_INTERVAL_MS,
+  type RoutingFn,
+} from "./routing-worker.ts";
 import {
-  startProcessManager,
-  type ProcessManagerDefinition,
-  type ProcessManagerWorkerOptions,
-} from "./process-manager.ts";
+  startProjectionWorker,
+  routingFnForPartitionBy,
+  type PartitionBy,
+  type ProjectionHandler,
+} from "./projection-worker.ts";
+import {
+  startPmWorker,
+  type PmDefinition,
+} from "./pm-worker.ts";
+import type { ErrorPolicy } from "./processing-worker.ts";
 import {
   waitForProjection,
   type SubscriptionRef,
@@ -56,12 +76,22 @@ import type {
   AppendedEvent,
   ExpectedVersion,
   Queryable,
+  StartFrom,
 } from "./types.ts";
+import type { RunningWorker } from "./internal/running-worker.ts";
+
+// ============================================================================
+// Public surface
+// ============================================================================
 
 export interface InstructedDefaults {
+  /** Lease (seconds) for both the routing and processing workers. */
   leaseSeconds?: number;
+  /** Routing-worker batch size (events per `route_batch` call). */
   batchSize?: number;
+  /** Poll interval (ms) used by both worker kinds. */
   pollInterval?: number;
+  /** Aggregate retry budget on conflict. */
   retryBudget?: number;
 }
 
@@ -73,6 +103,7 @@ export interface InstructedOptions {
   defaults?: InstructedDefaults;
 }
 
+/** Per-registration knobs (applied to both routing and processing). */
 export interface RegistrationOptions {
   batchSize?: number;
   leaseSeconds?: number;
@@ -85,7 +116,7 @@ export interface DispatchOptions {
   /**
    * Either a list of subscription names (sugar for `$all` subs) or
    * an explicit `[{stream, name}]` list. The list is always explicit
-   * — no `:strong` shorthand (D-0010).
+   * -- no `:strong` shorthand (D-0010).
    */
   consistency?: string[] | SubscriptionRef[];
   /** Total budget for the consistency wait in ms. Default 5_000. */
@@ -94,14 +125,62 @@ export interface DispatchOptions {
   expectedVersion?: ExpectedVersion;
 }
 
+/**
+ * Projection registration shape (PRJ-A, SUB-A slice 9).
+ *
+ * `partitionBy` and `routeFn` are mutually exclusive. Default is
+ * `{ kind: 'sequential' }`. A projection that needs routing-side
+ * filtering (the legacy `selector` parameter's role) passes
+ * `routeFn: (event) => 'ignore' | { partitionKey }`.
+ */
+export interface RegisterProjectionInput<E = unknown> {
+  /** Source stream; default `$all`. */
+  stream?: string;
+  /** Sugar over a `RoutingFn`. */
+  partitionBy?: PartitionBy<E>;
+  /** Raw routing function escape hatch (mutually exclusive with `partitionBy`). */
+  routeFn?: RoutingFn<E>;
+  /** Honoured only on the first claim that creates the subscription. */
+  startFrom?: StartFrom;
+  /** User-supplied projection handler. Opaque to the SDK (D-0016). */
+  handler: ProjectionHandler<E>;
+  /** SUB-B error-policy hook. Default: exponential backoff, retry forever. */
+  errorPolicy?: ErrorPolicy;
+}
+
+/**
+ * Process-manager registration shape (PM-F + PM-C, SUB-A slice 9).
+ *
+ * The legacy single-`handle` signature is removed. `routeFn` is the
+ * PM-F routing primitive (`'ignore' | { partitionKey }`); `apply` is
+ * the PM-C pure state fold; `handle` produces commands and/or signals
+ * partition completion (`complete: true`).
+ */
+export interface RegisterProcessManagerInput<S, E = unknown>
+  extends Omit<PmDefinition<S, E>, "name"> {
+  /** PM-F routing decision per event. */
+  routeFn: RoutingFn<E>;
+  /** Honoured only on the first claim that creates the subscription. */
+  startFrom?: StartFrom;
+}
+
 interface RegisteredProjection {
-  def: ProjectionDefinition<any>;
+  name: string;
+  stream: string;
+  input: RegisterProjectionInput<any>;
   opts: RegistrationOptions;
 }
+
 interface RegisteredProcessManager {
-  def: ProcessManagerDefinition<any, any>;
+  name: string;
+  stream: string;
+  input: RegisterProcessManagerInput<any, any>;
   opts: RegistrationOptions;
 }
+
+// ============================================================================
+// Implementation
+// ============================================================================
 
 export class Instructed {
   private readonly persistPool: pg.Pool | Queryable;
@@ -135,9 +214,6 @@ export class Instructed {
     // Persist pool.
     let dbArg: pg.Pool | Queryable | string | undefined = o.db;
     if (dbArg === undefined) {
-      // Mirror absurd's default: env var or a localhost fallback. We
-      // use PGDATABASE-style env vars (pg picks them up automatically
-      // when we instantiate a Pool with no connection options).
       dbArg = process.env.INSTRUCTED_DATABASE_URL || undefined;
     }
     if (dbArg === undefined) {
@@ -160,9 +236,9 @@ export class Instructed {
     this.dispatchOwned = false;
 
     this.defaults = {
-      leaseSeconds: o.defaults?.leaseSeconds ?? DEFAULT_LEASE_SECONDS,
-      batchSize: o.defaults?.batchSize ?? DEFAULT_BATCH_SIZE,
-      pollInterval: o.defaults?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
+      leaseSeconds: o.defaults?.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS,
+      batchSize: o.defaults?.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE,
+      pollInterval: o.defaults?.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS,
       retryBudget: o.defaults?.retryBudget ?? DEFAULT_RETRY_BUDGET,
     };
   }
@@ -180,21 +256,36 @@ export class Instructed {
     this.aggregates.set(def.type, def);
   }
 
-  registerProjection<E>(
-    def: ProjectionDefinition<E>,
+  registerProjection<E = unknown>(
+    name: string,
+    input: RegisterProjectionInput<E>,
     opts: RegistrationOptions = {},
   ): void {
-    this.projections.push({ def, opts });
+    if (input.partitionBy !== undefined && input.routeFn !== undefined) {
+      throw new Error(
+        `Instructed.registerProjection("${name}"): \`partitionBy\` and \`routeFn\` are mutually exclusive`,
+      );
+    }
+    this.projections.push({
+      name,
+      stream: input.stream ?? "$all",
+      input,
+      opts,
+    });
   }
 
-  registerProcessManager<S, E>(
-    def: ProcessManagerDefinition<S, E>,
+  registerProcessManager<S, E = unknown>(
+    name: string,
+    input: RegisterProcessManagerInput<S, E>,
     opts: RegistrationOptions = {},
   ): void {
-    this.processManagers.push({ def, opts });
+    this.processManagers.push({
+      name,
+      stream: input.stream ?? "$all",
+      input,
+      opts,
+    });
     // Materialise the dispatch pool eagerly when a PM is registered.
-    // This is the contract from §3 layer 3.5 ("materialised on the
-    // first registerProcessManager or first PM-driven dispatch").
     this.ensureDispatchClient();
   }
 
@@ -245,25 +336,74 @@ export class Instructed {
     }
 
     const workers: RunningWorker[] = [];
+
+    // Projections: one routing worker + one processing worker per
+    // registration. Both honour the same per-registration knobs.
     for (const p of this.projections) {
-      workers.push(
-        startProjection(this.persistClient_, p.def, this.projOpts(p.opts, opts.workerId)),
-      );
+      const routeFn = this.resolveProjectionRouteFn(p);
+      const routingOpts = this.routingOpts(p.opts, opts.workerId);
+      const processingOpts = this.processingOpts(p.opts, opts.workerId);
+      const routing = startRoutingWorker(this.persistClient_, {
+        name: p.name,
+        stream: p.stream,
+        routeFn,
+        ...(p.input.startFrom !== undefined
+          ? { startFrom: p.input.startFrom }
+          : {}),
+      }, routingOpts);
+      const processing = startProjectionWorker(this.persistClient_, {
+        name: p.name,
+        stream: p.stream,
+        handler: p.input.handler,
+        ...(p.input.errorPolicy !== undefined
+          ? { errorPolicy: p.input.errorPolicy }
+          : {}),
+      }, processingOpts);
+      workers.push(routing, processing);
     }
+
+    // PMs: one routing worker + one processing worker per registration.
+    // The processing worker takes the dispatch client too (D-0011).
     for (const pm of this.processManagers) {
-      workers.push(
-        startProcessManager(
-          this.persistClient_,
-          this.ensureDispatchClient(),
-          pm.def,
-          this.pmOpts(pm.opts, opts.workerId),
-        ),
+      const routingOpts = this.routingOpts(pm.opts, opts.workerId);
+      const processingOpts = this.processingOpts(pm.opts, opts.workerId);
+      const routing = startRoutingWorker(this.persistClient_, {
+        name: pm.name,
+        stream: pm.stream,
+        routeFn: pm.input.routeFn,
+        ...(pm.input.startFrom !== undefined
+          ? { startFrom: pm.input.startFrom }
+          : {}),
+      }, routingOpts);
+      const pmDef: PmDefinition<any, any> = {
+        name: pm.name,
+        stream: pm.stream,
+        initialState: pm.input.initialState,
+        apply: pm.input.apply,
+        handle: pm.input.handle,
+        ...(pm.input.snapshotModuleVersion !== undefined
+          ? { snapshotModuleVersion: pm.input.snapshotModuleVersion }
+          : {}),
+        ...(pm.input.errorPolicy !== undefined
+          ? { errorPolicy: pm.input.errorPolicy }
+          : {}),
+      };
+      const processing = startPmWorker(
+        this.persistClient_,
+        this.ensureDispatchClient(),
+        pmDef,
+        processingOpts,
       );
+      workers.push(routing, processing);
     }
 
     const composite: RunningWorker = {
       stopped: Promise.all(workers.map((w) => w.stopped)).then(() => {}),
       close: async () => {
+        // Parallel close: routing-worker dropping mid-batch is the
+        // same observable behaviour as a crash (ML-0012); processing
+        // workers honour the AbortSignal and finish their in-flight
+        // item before exiting.
         await Promise.all(workers.map((w) => w.close()));
       },
     };
@@ -302,11 +442,20 @@ export class Instructed {
 
   // ---- internals ----
 
-  private projOpts(
+  private resolveProjectionRouteFn(
+    p: RegisteredProjection,
+  ): RoutingFn<unknown> {
+    if (p.input.routeFn) return p.input.routeFn;
+    const pb: PartitionBy<unknown> =
+      p.input.partitionBy ?? { kind: "sequential" };
+    return routingFnForPartitionBy(pb);
+  }
+
+  private routingOpts(
     o: RegistrationOptions,
     workerId: string | undefined,
-  ): ProjectionWorkerOptions {
-    const out: ProjectionWorkerOptions = {
+  ) {
+    const out: Parameters<typeof startRoutingWorker>[2] = {
       batchSize: o.batchSize ?? this.defaults.batchSize,
       leaseSeconds: o.leaseSeconds ?? this.defaults.leaseSeconds,
       pollInterval: o.pollInterval ?? this.defaults.pollInterval,
@@ -317,11 +466,20 @@ export class Instructed {
     return out;
   }
 
-  private pmOpts(
+  private processingOpts(
     o: RegistrationOptions,
     workerId: string | undefined,
-  ): ProcessManagerWorkerOptions {
-    return this.projOpts(o, workerId);
+  ) {
+    // The processing worker has no `batchSize` knob (it claims one
+    // item at a time); the other knobs map 1:1.
+    const out: Parameters<typeof startProjectionWorker>[2] = {
+      leaseSeconds: o.leaseSeconds ?? this.defaults.leaseSeconds,
+      pollInterval: o.pollInterval ?? this.defaults.pollInterval,
+    };
+    if (o.heartbeatInterval !== undefined) out.heartbeatInterval = o.heartbeatInterval;
+    if (o.onError !== undefined) out.onError = o.onError;
+    if (workerId !== undefined) out.workerId = workerId;
+    return out;
   }
 
   private ensureDispatchClient(): Client {
@@ -329,26 +487,17 @@ export class Instructed {
 
     let src: pg.Pool | Queryable | string | undefined = this.dispatchSource;
     if (src === undefined) {
-      // Default: sibling Pool with the same connection string as
-      // persist, when persist was opened from a string; otherwise
-      // a default Pool that picks up PG* env vars. The crucial
-      // invariant is that this is a *different* pool from the
-      // persist pool (D-0011 / D-0012).
       if (this.persistConnString !== undefined) {
         this.dispatchPool = new pg.Pool({
           connectionString: this.persistConnString,
         });
         this.dispatchOwned = true;
       } else if (this.persistOwned) {
-        // Persist was a default Pool (env-var-driven); spin a sibling.
         this.dispatchPool = new pg.Pool();
         this.dispatchOwned = true;
       } else {
-        // The user handed us a Pool / Queryable for persist. We have
-        // no connection string and cannot safely guess. The caller
-        // must supply `dispatchDb` if they want process managers.
         throw new Error(
-          "Instructed: cannot materialise a dispatch pool — when `db` is a Pool/Queryable, `dispatchDb` must also be supplied (D-0011 / D-0012)",
+          "Instructed: cannot materialise a dispatch pool -- when `db` is a Pool/Queryable, `dispatchDb` must also be supplied (D-0011 / D-0012)",
         );
       }
     } else if (typeof src === "string") {

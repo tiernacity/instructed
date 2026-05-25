@@ -37,7 +37,7 @@ import {
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
 } from "./processing-worker.ts";
-import type { RunningWorker } from "./subscription.ts";
+import type { RunningWorker } from "./internal/running-worker.ts";
 
 // ============================================================================
 // PartitionBy + RoutingFn translation (sugar)

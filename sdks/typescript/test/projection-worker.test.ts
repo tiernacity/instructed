@@ -34,7 +34,7 @@ import {
   type ProjectionHandlerContext,
 } from "../src/projection-worker.ts";
 import type pg from "pg";
-import type { RunningWorker } from "../src/subscription.ts";
+import type { RunningWorker } from "../src/internal/running-worker.ts";
 import type { RecordedEvent } from "../src/types.ts";
 
 const ALL = "$all";

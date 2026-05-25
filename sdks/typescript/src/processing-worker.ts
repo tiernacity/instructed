@@ -46,7 +46,8 @@ import {
   WorkItemLeaseLost,
 } from "./errors.ts";
 import type { RecordedEvent } from "./types.ts";
-import type { RunningWorker } from "./subscription.ts";
+import type { RunningWorker } from "./internal/running-worker.ts";
+export type { RunningWorker };
 import { defaultWorkerId } from "./internal/worker-id.ts";
 import { sleep } from "./internal/sleep.ts";
 

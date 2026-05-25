@@ -28,7 +28,7 @@ import {
   type ProcessingWorkerDefinition,
 } from "../src/processing-worker.ts";
 import type pg from "pg";
-import type { RunningWorker } from "../src/subscription.ts";
+import type { RunningWorker } from "../src/internal/running-worker.ts";
 
 const ALL = "$all";
 

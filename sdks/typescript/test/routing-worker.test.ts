@@ -23,7 +23,7 @@ import {
   type RoutingDecision,
 } from "../src/routing-worker.ts";
 import type pg from "pg";
-import type { RunningWorker } from "../src/subscription.ts";
+import type { RunningWorker } from "../src/internal/running-worker.ts";
 
 const ALL = "$all";
 

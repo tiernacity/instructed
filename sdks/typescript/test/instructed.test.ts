@@ -1,18 +1,18 @@
 /**
- * Layer 5: `Instructed` facade tests — facade-specific behaviour only.
+ * Layer 5: `Instructed` facade tests -- facade-specific behaviour only.
  *
  * Underlying correctness is covered by the layered tests (client,
- * aggregate, subscription, process-manager, consistency). Cases here:
+ * aggregate, routing-worker, processing-worker, projection-worker,
+ * pm-worker, consistency). Cases here:
  *
  *   - registerAggregate + dispatch (by-name lookup, UnknownAggregateType)
- *   - startWorker fans out to a registered projection and a registered
- *     PM under one handle; close() stops them all
+ *   - registerProjection: partitionBy / routeFn mutual exclusivity
+ *   - startWorker fans out routing+processing workers for a
+ *     projection and a PM under one handle; close() stops them all
  *   - lazy dispatch-pool materialisation (no second pool until a PM
  *     is registered)
- *   - default propagation (defaults.batchSize / leaseSeconds /
- *     pollInterval / retryBudget are visible to the registered workers)
- *   - dispatch( ... , { consistency: [...] }) waits for projection to
- *     catch up
+ *   - dispatch( ... , { consistency: [...] }) waits for the
+ *     projection to catch up
  */
 
 import { after, before, beforeEach, describe, test } from "node:test";
@@ -29,8 +29,7 @@ import type {
   AggregateDefinition,
   DispatchedCommand,
   DomainEvent,
-  ProcessManagerDefinition,
-  ProjectionDefinition,
+  RecordedEvent,
 } from "../src/index.ts";
 
 let pool: pg.Pool;
@@ -84,7 +83,7 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
 
 // ---------------------------------------------------------------------------
 
-describe("Instructed — dispatch (registry lookup)", () => {
+describe("Instructed -- dispatch (registry lookup)", () => {
   test("dispatches a registered aggregate by name; throws UnknownAggregateType otherwise", async () => {
     const app = new Instructed({ db: pool });
     try {
@@ -116,7 +115,6 @@ describe("Instructed — dispatch (registry lookup)", () => {
     app.registerAggregate(counter());
     await app.dispatch<CounterCommand>("Counter", randomUUID(), { kind: "add", n: 1 });
     await app.close();
-    // The shared test Pool is still alive.
     const r = await pool.query("SELECT 1 AS x");
     assert.equal(r.rows[0].x, 1);
   });
@@ -124,7 +122,28 @@ describe("Instructed — dispatch (registry lookup)", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("Instructed — startWorker fan-out", () => {
+describe("Instructed -- registerProjection validation", () => {
+  test("registerProjection rejects mutually-exclusive partitionBy + routeFn", () => {
+    const app = new Instructed({ db: pool });
+    try {
+      assert.throws(
+        () =>
+          app.registerProjection("p", {
+            partitionBy: { kind: "sequential" },
+            routeFn: () => ({ partitionKey: "k" }),
+            async handler() {},
+          }),
+        /mutually exclusive/,
+      );
+    } finally {
+      void app.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("Instructed -- startWorker fan-out", () => {
   test("runs a registered projection and PM under one handle; close stops both", async () => {
     const dispatchPool = new pg.Pool({
       host: process.env.PGHOST ?? "127.0.0.1",
@@ -140,34 +159,54 @@ describe("Instructed — startWorker fan-out", () => {
     app.registerAggregate(Counter);
 
     // A projection on $all that counts events of type "Triggered".
+    // SUB-A: legacy `selector` is recovered via a routeFn that
+    // returns `"ignore"` for the would-be-skipped events.
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let projSeen = 0;
-    const proj: ProjectionDefinition = {
-      name: projName,
-      selector: (e) => e.event_type === "Triggered",
-      async handle() {
-        projSeen++;
+    app.registerProjection(
+      projName,
+      {
+        routeFn: (e) =>
+          e.event_type === "Triggered"
+            ? { partitionKey: "_default" }
+            : "ignore",
+        async handler() {
+          projSeen++;
+        },
       },
-    };
-    app.registerProjection(proj, { pollInterval: 25, heartbeatInterval: 1_000 });
+      { pollInterval: 25, heartbeatInterval: 1_000 },
+    );
 
     // A PM on $all that forwards each Triggered event into Counter.
+    // PM-F routing: every "Triggered" event spins its own partition
+    // (so the PM stops after one event per partition).
     const pmName = `pm-${randomUUID().slice(0, 8)}`;
     const targetStream = randomUUID();
-    const pm: ProcessManagerDefinition<{ done: boolean }> = {
-      name: pmName,
-      routes: {
-        Triggered: (e) => ({ kind: "start", processId: (e.data as { processId: string }).processId }),
+    app.registerProcessManager<{ done: boolean }>(
+      pmName,
+      {
+        routeFn: (e) =>
+          e.event_type === "Triggered"
+            ? {
+                partitionKey:
+                  (e.data as { processId: string }).processId,
+              }
+            : "ignore",
+        initialState: () => ({ done: false }),
+        apply: (state) => state,
+        async handle() {
+          const commands: DispatchedCommand[] = [
+            {
+              streamUuid: targetStream,
+              aggregate: Counter,
+              command: { kind: "add", n: 1 } as CounterCommand,
+            },
+          ];
+          return { commands, complete: true };
+        },
       },
-      initialState: () => ({ done: false }),
-      async handle(_s, _e) {
-        const commands: DispatchedCommand[] = [
-          { streamUuid: targetStream, aggregate: Counter, command: { kind: "add", n: 1 } as CounterCommand },
-        ];
-        return { state: { done: true }, commands };
-      },
-    };
-    app.registerProcessManager(pm, { pollInterval: 25, heartbeatInterval: 1_000 });
+      { pollInterval: 25, heartbeatInterval: 1_000 },
+    );
 
     const handle = await app.startWorker();
     try {
@@ -206,7 +245,7 @@ describe("Instructed — startWorker fan-out", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("Instructed — lazy dispatch pool", () => {
+describe("Instructed -- lazy dispatch pool", () => {
   test("does not materialise dispatch pool until a PM is registered", async () => {
     const app = new Instructed({ db: pool });
     app.registerAggregate(counter());
@@ -214,7 +253,7 @@ describe("Instructed — lazy dispatch pool", () => {
     await app.dispatch<CounterCommand>("Counter", randomUUID(), { kind: "add", n: 1 });
 
     // No PM registered yet; `dispatchClient` would have to materialise
-    // a sibling pool — but since `db` is a Pool/Queryable with no
+    // a sibling pool -- but since `db` is a Pool/Queryable with no
     // connection string, the only safe behaviour is to throw.
     let caught: unknown;
     try {
@@ -235,15 +274,17 @@ describe("Instructed — lazy dispatch pool", () => {
     const connString = `postgresql://${process.env.PGUSER ?? "postgres"}:${process.env.PGPASSWORD ?? "postgres"}@${process.env.PGHOST ?? "127.0.0.1"}:${Number(process.env.PGPORT ?? 5432)}/${process.env.PGDATABASE ?? "instructed_test"}`;
     const app = new Instructed({ db: connString });
     try {
-      const pm: ProcessManagerDefinition<{}> = {
-        name: `pm-${randomUUID().slice(0, 8)}`,
-        routes: {},
-        initialState: () => ({}),
-        async handle(s) {
-          return { state: s };
+      app.registerProcessManager<{}>(
+        `pm-${randomUUID().slice(0, 8)}`,
+        {
+          routeFn: () => "ignore",
+          initialState: () => ({}),
+          apply: (s) => s,
+          async handle() {
+            return {};
+          },
         },
-      };
-      app.registerProcessManager(pm);
+      );
       // Dispatch client exists and is distinct from the persist client.
       assert.notEqual(app.dispatchClient(), app.client());
     } finally {
@@ -254,7 +295,7 @@ describe("Instructed — lazy dispatch pool", () => {
 
 // ---------------------------------------------------------------------------
 
-describe("Instructed — dispatch consistency wait", () => {
+describe("Instructed -- dispatch consistency wait", () => {
   test("waits for a named subscription to catch up before returning", async () => {
     const app = new Instructed({ db: pool });
     app.registerAggregate(counter());
@@ -262,10 +303,11 @@ describe("Instructed — dispatch consistency wait", () => {
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let seen = 0;
     app.registerProjection(
+      projName,
       {
-        name: projName,
-        selector: (e) => e.event_type === "Added",
-        async handle() {
+        routeFn: (e: RecordedEvent) =>
+          e.event_type === "Added" ? { partitionKey: "_default" } : "ignore",
+        async handler() {
           seen++;
         },
       },
@@ -280,7 +322,7 @@ describe("Instructed — dispatch consistency wait", () => {
         { consistency: [projName], consistencyTimeout: 5_000 },
       );
       // After dispatch returns, the projection must have advanced
-      // past the appended event — its handler ran.
+      // past the appended event -- its handler ran.
       assert.ok(seen >= 1, `expected handler to have run, got ${seen}`);
     } finally {
       await handle.close();

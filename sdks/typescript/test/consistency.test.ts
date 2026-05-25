@@ -16,14 +16,49 @@ import {
   Client,
   ConsistencyTimeout,
   expected,
-  startProjection,
+  routingFnForPartitionBy,
+  startProjectionWorker,
+  startRoutingWorker,
   waitForProjection,
 } from "../src/index.ts";
 import type {
-  ProjectionDefinition,
   RunningWorker,
   SubscriptionRef,
 } from "../src/index.ts";
+
+/**
+ * Wire a routing+processing pair for `name` against `stream`.
+ * Returns a composite RunningWorker so the test bodies stay short.
+ */
+function startProjPair(
+  client: Client,
+  name: string,
+  stream: string,
+  handler: () => Promise<void>,
+  startFrom?: "origin" | "current",
+): RunningWorker {
+  const router = startRoutingWorker(
+    client,
+    {
+      name,
+      stream,
+      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
+      ...(startFrom !== undefined ? { startFrom } : {}),
+    },
+    { pollInterval: 25, heartbeatInterval: 1_000 },
+  );
+  const proc = startProjectionWorker(
+    client,
+    { name, stream, handler },
+    { pollInterval: 25, heartbeatInterval: 1_000 },
+  );
+  return {
+    stopped: Promise.all([router.stopped, proc.stopped]).then(() => {}),
+    close: async () => {
+      await Promise.all([router.close(), proc.close()]);
+    },
+  };
+}
 import type pg from "pg";
 
 let pool: pg.Pool;
@@ -42,22 +77,20 @@ beforeEach(async () => {
 
 // ---------------------------------------------------------------------------
 
-describe("waitForProjection — happy path", () => {
+describe("waitForProjection -- happy path", () => {
   test("returns once a running $all projection catches up", async () => {
     const stream = randomUUID();
     const name = `p-${randomUUID().slice(0, 8)}`;
 
     let handled = 0;
-    const def: ProjectionDefinition = {
+    const worker = startProjPair(
+      client,
       name,
-      async handle() {
+      "$all",
+      async () => {
         handled++;
       },
-    };
-    const worker: RunningWorker = startProjection(client, def, {
-      pollInterval: 25,
-      heartbeatInterval: 1_000,
-    });
+    );
     try {
       const appended = await client.appendToStream(stream, expected.noStream, [
         { event_type: "A", data: {} },
@@ -91,18 +124,15 @@ describe("waitForProjection — happy path", () => {
     const appended = await client.appendToStream(stream, expected.noStream, [
       { event_type: "X", data: {} },
     ]);
-    const def: ProjectionDefinition = {
+    const worker = startProjPair(
+      client,
       name,
       stream,
-      startFrom: "origin",
-      async handle() {
+      async () => {
         /* no-op */
       },
-    };
-    const worker = startProjection(client, def, {
-      pollInterval: 25,
-      heartbeatInterval: 1_000,
-    });
+      "origin",
+    );
     try {
       await waitForProjection(
         client,
@@ -110,13 +140,10 @@ describe("waitForProjection — happy path", () => {
         [{ stream, name }],
         { timeout: 5_000, pollInterval: 10 },
       );
-      // Predicate-true guarantees both conjuncts; cursor reached the
-      // event_number target. (The legacy worker stores the
-      // single-cursor value here, which is fine -- the SUB-A
-      // predicate's NOT EXISTS over work-items is vacuously true
-      // for the legacy worker because it doesn't write any.)
+      // Predicate-true guarantees both conjuncts; the cursor reached
+      // the event_number target.
       const pos = await client.readSubscriptionPosition(stream, name);
-      assert.ok(pos.lastSeen >= appended[0].stream_version);
+      assert.ok(pos.lastSeen >= appended[0].event_number);
     } finally {
       await worker.close();
     }
