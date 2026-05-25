@@ -21,10 +21,15 @@ Status legend: **Decided** / **Designed, awaiting confirmation** /
 ## PRJ-A — Projection registration surface
 
 **Status:** Decided. Three-mode `PartitionBy` (`sequential` /
-`per-event` / `per-key`) as the v1 SDK surface, default
-`sequential`. A future refinement toward a less-opinionated
-surface (e.g. a free-form partition function) is deferred to
-ML-0011; not in scope for the initial implementation.
+`per-event` / `per-key`) as the v1 SDK surface for the common
+case, default `sequential`; plus a raw `routeFn: RoutingFn`
+escape hatch for the projection that also wants to ignore
+some events at routing time (option (c) of the SUB-A
+slice-6 course-correction, see commit history of
+`sub-a-implementation.md`). A future refinement toward a
+fully less-opinionated surface (e.g. a free-form partition
+function that subsumes both) is deferred to ML-0011; not in
+scope for the initial implementation.
 **Release-relevance:** Pre-release (rides on SUB-A).
 
 ### Problem
@@ -43,14 +48,35 @@ type PartitionBy =
   | { kind: "per-event" }                           // each event its own partition; full parallelism
   | { kind: "per-key", key: (event) => string }     // parallel across keys, ordered within
 
+type RoutingDecision = { partitionKey: string } | "ignore"
+type RoutingFn<E> = (event: RecordedEvent<E>) =>
+  RoutingDecision | Promise<RoutingDecision>
+
 registerProjection(name, {
-  partitionBy?: PartitionBy,                        // default: { kind: "sequential" }
+  // Sugar over RoutingFn. Default: { kind: "sequential" }.
+  // Mutually exclusive with routeFn.
+  partitionBy?: PartitionBy,
+  // Escape hatch: full routing power. Can return "ignore"; the
+  // routing worker drops those events and no work item is
+  // created. Mutually exclusive with partitionBy.
+  routeFn?: RoutingFn<E>,
   handler: (event, ctx) => Promise<void>,
 })
 ```
 
-Default is `sequential` so existing projections continue to work
-without code change. The three modes map directly onto SUB-A's
+Unified routing surface with PMs (PM-F): at the routing-layer
+core there is one shape, `RoutingFn → { partitionKey } | "ignore"`.
+Projections that don't need to filter use the `partitionBy`
+sugar; projections that do (or that want to express anything
+the three named modes can't) use the raw `routeFn`. PMs always
+use `routeFn` directly. What differs between projections and
+PMs is the *processing-side* contract (DELETE on success vs
+UPDATE-to-done plus the `apply`/`handle` split), not the
+routing surface.
+
+Default is `sequential` so a projection registered without a
+`partitionBy` or `routeFn` matches today's strict-sequential
+behaviour. The three sugar modes map directly onto SUB-A's
 generalisation table:
 
 | `partitionBy`                           | Concurrency                                    | Application responsibility                 |
@@ -62,7 +88,21 @@ generalisation table:
 The `key` function is pure, runs at the routing layer (same place
 PMs' `RouteFn` runs), and may not access projection state — by
 construction routing is stateless w.r.t. processing state, same
-as PMs.
+as PMs. None of the three sugar modes emit `"ignore"`; if
+you need that, use `routeFn`.
+
+### Replaces the legacy `selector` parameter
+
+The legacy single-cursor projection worker accepted a
+`selector: (event) => boolean` that gated whether the handler
+ran, while still advancing the cursor (per OQ-0003). Under
+SUB-A the equivalent is a `routeFn` returning `"ignore"`:
+rather than advancing-past-and-skipping at the processing
+layer, the routing worker drops the event entirely (no work
+item ever exists). Observable behaviour is the same; the
+mechanism is cleaner because there is no
+phantom-routed-but-skipped state. The slice-10 upgrade note
+should flag this for porting.
 
 ### Why three modes and not a free-form function (v1 stance)
 
@@ -89,17 +129,23 @@ narrowing is not.
 
 ### What lands
 
-1. Type definitions for `PartitionBy` in the TS SDK.
-2. `registerProjection` accepts the optional `partitionBy`;
-   default = `sequential`.
-3. The convenience layer translates `partitionBy` into the
-   routing-layer `RouteFn` that the SUB-A core expects.
+1. Type definitions for `PartitionBy` and a re-export of
+   `RoutingFn` in the TS SDK (the latter already exists from
+   slice 4 of SUB-A).
+2. `registerProjection` accepts `partitionBy` *or* `routeFn`
+   (mutually exclusive); defaults to
+   `partitionBy: { kind: "sequential" }`.
+3. The convenience layer translates `partitionBy` into a
+   `RoutingFn` (the translation helper lands in slice 6 of
+   SUB-A so the projection-worker module owns it; the slice-9
+   facade wires it together with `routeFn`).
 4. Worked examples in `docs/concepts.md` (or wherever
-   projections are documented) showing each of the three modes.
+   projections are documented) showing each of the three
+   sugar modes plus one raw `routeFn` filter example.
 5. One-line callout in the porting checklist (TODO #2): the
-   *core* SDK only needs the routing-layer primitive; the
-   `PartitionBy` ergonomics are convenience-layer surface and
-   may differ per language.
+   *core* SDK only needs the routing-layer primitive (a
+   `RoutingFn`); the `PartitionBy` ergonomics are
+   convenience-layer surface and may differ per language.
 
 ---
 

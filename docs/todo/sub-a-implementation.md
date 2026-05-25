@@ -520,8 +520,16 @@ guard ships separately.
 ### Slice 9 — `Instructed` facade updates
 
 **Scope:**
-- `registerProjection(name, { partitionBy?, handler })` —
-  three-mode `PartitionBy`, default `sequential`.
+- `registerProjection(name, { partitionBy?, routeFn?, handler })`
+  — three-mode `PartitionBy` sugar, default `sequential`;
+  *or* a raw `routeFn: RoutingFn` escape hatch for projections
+  that need routing-side filtering or a partition shape the
+  three sugar modes can't express. `partitionBy` and `routeFn`
+  are mutually exclusive; supplying both is a registration-time
+  error. The legacy `selector` parameter has no direct
+  replacement; its observable behaviour is recovered by a
+  `routeFn` that returns `"ignore"` for the would-be-skipped
+  events. Surface this in the slice-10 upgrade note.
 - `registerProcessManager(name, { routeFn, apply, handle,
   initialState, snapshotModuleVersion?, snapshotPolicy? })` —
   new shape; the old single-`handle` signature is removed
