@@ -167,10 +167,34 @@ provides the analogous surface for absurd.
 - **Subscription lifecycle:** `release` a stuck claim (where the
   worker is known dead but lease hasn't expired); `delete` a
   subscription by name; `claim` for diagnostic purposes.
+- **Projection rebuild (was PRJ-D in the SUB-A working files).**
+  Reset a projection by name: `delete_subscription` cascades the
+  work-queue rows, then a fresh claim from `start_from = 'origin'`
+  re-routes the whole history. The read-store wipe (truncate the
+  projection's tables, flush its Redis namespace, drop its
+  Elasticsearch index, etc.) is application-domain and is the
+  operator's responsibility before the rebuild command runs --
+  the SDK doesn't know where the read-store is. `instructedctl`
+  provides the framework-side half: a one-shot "forget this
+  subscription's state" that's safe to run while the worker is
+  stopped.
+- **Work-item operator surface.** Inspect the SUB-A work queue
+  per subscription (counts by state; oldest in-flight item;
+  list `failed` rows with their `error_text`). One
+  `skip_work_item_with_audit` command that moves a stuck
+  `failed` row to a terminal state with an operator-supplied
+  audit note. The default error policy never produces `failed`
+  rows, so this surface is the dedicated escape hatch for the
+  future `quarantineAfter` convenience wrapper (SUB-B) and for
+  manual operator action on poison events. Per
+  [INV-SUB-W-013](docs/invariants.md), `failed` rows are
+  operator-only; this is the operator's tool.
 - **Snapshot inspection:** show a snapshot by `source_uuid`.
+  A future `force-snapshot` command for aggregates is sketched
+  in ML-0009.
 - **Health:** a quick "is the store sound" check — `$all`
   contiguous, no orphaned `stream_events` rows, no expired-lease
-  zombies.
+  zombies, no orphaned `subscription_work_items` rows.
 
 **Likely shape:** a small Go or Rust binary so it can be
 distributed as a single static executable. Connects directly to
