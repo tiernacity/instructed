@@ -116,7 +116,7 @@ See `src/errors.ts` for the full mapping.
 - **Distribute one subscription across multiple workers.** Single
   active worker per subscription. Throughput scales by splitting into
   multiple named subscriptions. Partitioned consumers are deferred
-  (ML-0001).
+  (ML-0013).
 
 ## Layout
 

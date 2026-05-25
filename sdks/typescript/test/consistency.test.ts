@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import {
   Client,
+  ConsistencyTargetError,
   ConsistencyTimeout,
   expected,
   routingFnForPartitionBy,
@@ -420,6 +421,141 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
       assert.ok(handled >= 1, "handler must have run before wait returned");
     } finally {
       await Promise.all([router.close(), proj.close()]);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CON-B: cross-stream guard
+//
+// A per-stream `SubscriptionRef` whose `stream` does not match any
+// appended event's `stream_uuid` is meaningless: the subscription's
+// `last_seen` lives in its own stream's coordinate space, the target
+// lives in the appended stream's coordinate space, and comparing
+// them silently produces wrong answers (under SUB-A: vacuously true,
+// the router never enqueued anything for the unrelated event).
+// The guard rejects this synchronously.
+//
+// See `docs/todo/consistency.md` :: CON-B.
+// ---------------------------------------------------------------------------
+
+describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
+  test("per-stream ref matching an appended stream resolves normally", async () => {
+    const stream = randomUUID();
+    const name = `con-b-ok-${randomUUID().slice(0, 8)}`;
+    // Per-stream sources require the stream to exist before
+    // claim_subscription (IS003), so append first, then start the
+    // workers (mirrors the pattern used by the timeout tests).
+    const appended = await client.appendToStream(stream, expected.noStream, [
+      { event_type: "A", data: {} },
+    ]);
+    const worker = startProjPair(client, name, stream, async () => {});
+    try {
+      // Per-stream ref pointing at the appended stream: must not
+      // throw the guard, and must drain normally.
+      await waitForProjection(
+        client,
+        appended,
+        [{ stream, name }],
+        { timeout: 5_000, pollInterval: 10 },
+      );
+    } finally {
+      await worker.close();
+    }
+  });
+
+  test("per-stream ref differing from every appended stream rejects fast (before pollInterval)", async () => {
+    // `waitForProjection` is async, so the pre-await throw
+    // surfaces as a rejected promise on the next microtask. The
+    // "synchronous" intent in CON-B is fast-fail: the rejection
+    // must materialise long before `pollInterval` would have
+    // elapsed. We assert on error class and on elapsed time.
+    const appendedStream = randomUUID();
+    const otherStream = randomUUID();
+    const appended = await client.appendToStream(
+      appendedStream,
+      expected.noStream,
+      [{ event_type: "A", data: {} }],
+    );
+
+    const start = Date.now();
+    await assert.rejects(
+      () =>
+        waitForProjection(
+          client,
+          appended,
+          [{ stream: otherStream, name: "x" }],
+          { timeout: 10_000, pollInterval: 250 },
+        ),
+      (err: unknown) => {
+        assert.ok(
+          err instanceof ConsistencyTargetError,
+          `expected ConsistencyTargetError, got ${err}`,
+        );
+        const e = err as ConsistencyTargetError;
+        assert.equal(e.subscriptionStream, otherStream);
+        assert.equal(e.subscriptionName, "x");
+        assert.deepEqual(e.appendedStreams, [appendedStream]);
+        return true;
+      },
+    );
+    const elapsed = Date.now() - start;
+    assert.ok(
+      elapsed < 100,
+      `must reject before pollInterval (${elapsed}ms elapsed; pollInterval=250)`,
+    );
+  });
+
+  test("mixed list: one valid ref + one invalid ref rejects (invalid prevents wait)", async () => {
+    const appendedStream = randomUUID();
+    const otherStream = randomUUID();
+    const validName = `con-b-mixed-${randomUUID().slice(0, 8)}`;
+    // Append first; per-stream source requires the stream to exist
+    // before claim_subscription.
+    const appended = await client.appendToStream(
+      appendedStream,
+      expected.noStream,
+      [{ event_type: "A", data: {} }],
+    );
+    const worker = startProjPair(client, validName, appendedStream, async () => {});
+    try {
+      await assert.rejects(
+        () =>
+          waitForProjection(
+            client,
+            appended,
+            [
+              { stream: appendedStream, name: validName },
+              { stream: otherStream, name: "bad" },
+            ],
+            { timeout: 10_000, pollInterval: 250 },
+          ),
+        (err: unknown) =>
+          err instanceof ConsistencyTargetError &&
+          (err as ConsistencyTargetError).subscriptionStream === otherStream,
+      );
+    } finally {
+      await worker.close();
+    }
+  });
+
+  test("$all refs are never rejected regardless of appended streams", async () => {
+    const stream = randomUUID();
+    const name = `con-b-all-${randomUUID().slice(0, 8)}`;
+    const worker = startProjPair(client, name, "$all", async () => {});
+    try {
+      const appended = await client.appendToStream(stream, expected.noStream, [
+        { event_type: "A", data: {} },
+      ]);
+      // $all ref is always valid; guard must not fire.
+      await waitForProjection(
+        client,
+        appended,
+        [{ stream: "$all", name }],
+        { timeout: 5_000, pollInterval: 10 },
+      );
+    } finally {
+      await worker.close();
     }
   });
 });

@@ -387,6 +387,33 @@ describe("subscriptions — delivery", () => {
     );
   });
 
+  // INV-SUB-P-001 / INV-SUB-P-030 (subscription scope isolation):
+  //   a per-stream subscription on stream A MUST NOT deliver events
+  //   appended to stream B. The lone positive test above asserts
+  //   stream-A delivery; this one asserts stream-B non-delivery in
+  //   the same store. (TODO #11 / §4 gap-list item 1.)
+  test("per-stream subscription on A does not deliver events from B", async () => {
+    const a = await seedStream(3); // global event_numbers 1..3
+    const b = await seedStream(3); // global event_numbers 4..6
+    await claim(a, "h", "w1");
+    const batch = await readBatch(a, "h", "w1", 100);
+    assert.equal(batch.length, 3, "only A's events should be delivered");
+    for (const row of batch) {
+      assert.equal(row.stream_uuid, a);
+    }
+    assert.deepEqual(batch.map((r) => r.stream_version), [1n, 2n, 3n]);
+    // Sanity: the B-events exist in the store (so the test is
+    // actually exercising the filter, not a setup that wrote
+    // nothing).
+    const bRows = await pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM instructed.stream_events se
+         JOIN instructed.streams s USING (stream_id)
+        WHERE s.stream_uuid = $1`,
+      [b],
+    );
+    assert.equal(bRows.rows[0].n, "3");
+  });
+
   // INV-SUB-P-030: '$all' subscriptions deliver in event_number order
   test("'$all' subscription delivers events in event_number order across streams", async () => {
     const a = await seedStream(2); // events 1,2
@@ -524,8 +551,17 @@ describe("subscriptions — advance and monotonicity", () => {
     await rejectsWithCode(() => advance(s, "no-such", "w1", 1n), "IS020");
   });
 
-  // INV-SUB-P-031 (redelivery): if a worker reads, processes, but crashes
-  //   before advance, the next claim re-reads the same events.
+  // INV-SUB-P-031 (routing-layer at-least-once): with no advance call
+  //   between read and re-claim, the next claim re-reads the same
+  //   events. This pins the routing-cursor's no-auto-ack contract.
+  //
+  //   Under SUB-A, application-facing redelivery on handler failure
+  //   is realised at the work-item layer (lease takeover on expired
+  //   `claimed` rows). See
+  //   `subscription-work-items-procedures.test.ts` :: "lease
+  //   takeover: expired 'claimed' row is re-claimable" for that
+  //   case. The routing-layer test below remains load-bearing for
+  //   INV-SUB-P-031's no-auto-ack half.
   test("redelivery: crash-before-advance is recovered by re-claim", async () => {
     const s = await seedStream(3);
     await claim(s, "h", "w1");
@@ -628,6 +664,36 @@ describe("subscriptions — lifecycle", () => {
       () => deleteSub(randomUUID(), "h"),
       "IS020",
     );
+  });
+
+  // INV-SUB-P-011 (composed lease-expiry → takeover → IS022 on
+  //   original): the routing-side three-step case called out in
+  //   TODO #11 / §4 gap-list item 7. SP:322 covers "different worker
+  //   claims after expiry"; SP:357 covers "non-holder heartbeat
+  //   raises IS022"; this one composes them into the single
+  //   end-to-end sequence the invariant's wording promises, with
+  //   *no* administrative action in between.
+  test("after lease expiry + takeover, the original holder's next op raises IS022", async () => {
+    const s = await seedStream(2);
+    const w1 = await claim(s, "h", "worker-A", 30);
+    assert.equal(w1.result, "claimed");
+
+    // No admin action — just lease expiry.
+    await expireLease(s, "h");
+
+    // A second worker takes over.
+    const w2 = await claim(s, "h", "worker-B", 30);
+    assert.equal(w2.result, "claimed");
+    assert.equal(w2.claimed_by, "worker-B");
+
+    // Original holder's *next* op on any of the three routing-side
+    // procedures must raise IS022 (subscription_lease_lost).
+    await rejectsWithCode(() => extend(s, "h", "worker-A"), "IS022");
+    await rejectsWithCode(
+      () => readBatch(s, "h", "worker-A", 10),
+      "IS022",
+    );
+    await rejectsWithCode(() => release(s, "h", "worker-A"), "IS022");
   });
 
   // read_subscription_position (supporting CON-010 strong-consistency-on-

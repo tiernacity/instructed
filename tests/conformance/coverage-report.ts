@@ -122,6 +122,22 @@ const CATALOGUE = {
     "INV-SUB-P-061",
     "INV-SUB-P-062",
   ],
+  "Part E — Subscriptions (work queue, SUB-A)": [
+    "INV-SUB-W-001",
+    "INV-SUB-W-002",
+    "INV-SUB-W-003", // [mechanism-only]
+    "INV-SUB-W-010",
+    "INV-SUB-W-011",
+    "INV-SUB-W-012",
+    "INV-SUB-W-013",
+    "INV-SUB-W-020",
+    "INV-SUB-W-021",
+    "INV-SUB-W-022",
+    "INV-SUB-W-030",
+  ],
+  "Part E — Catch-up predicate (SUB-A)": [
+    "INV-SUB-CATCHUP-001",
+  ],
   "Part F — Cross-cutting": [
     "INV-META-001",
     "INV-META-010",

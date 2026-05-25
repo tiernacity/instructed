@@ -1,15 +1,17 @@
 # Consistency-wait — outstanding work
 
-Two coordinated SDK changes to the strong-consistency-on-dispatch
-path settled during the 2026-05-23 Commanded re-review. Both are
-pre-release and contained in scope — focused implementations,
-each one or two SDK files plus tests plus a short docs paragraph.
+One remaining SDK change to the strong-consistency-on-dispatch
+path settled during the 2026-05-23 Commanded re-review (CON-A).
 
-The work-queue model under design in
-[`subscriptions.md`](./subscriptions.md) SUB-A will require a
-*second pass* on CON-B's underlying SQL compare; CON-A is
-mechanism-independent and survives unchanged. Implement both now
-against today's schema; revisit CON-B's compare when SUB-A lands.
+CON-B (cross-stream `waitForProjection` guard) landed as part of
+TODO #11's conformance-criteria revisit:
+`ConsistencyTargetError` in `sdks/typescript/src/errors.ts`, the
+synchronous validation in `waitForProjection`
+(`sdks/typescript/src/consistency.ts`), and four tests in
+`sdks/typescript/test/consistency.test.ts` under the
+"cross-stream guard (CON-B)" describe block. The SUB-A underlying
+compare is the catch-up predicate already; nothing further is
+owed.
 
 ---
 
@@ -69,7 +71,16 @@ self-deadlock until `consistencyTimeout` fires.
 
 ---
 
-## CON-B — `waitForProjection` cross-stream guard (plus future SUB-A re-fit)
+## CON-B — `waitForProjection` cross-stream guard (LANDED)
+
+**Status:** shipped. Implementation and tests as described below;
+the SUB-A re-fit collapsed into a no-op because the underlying
+compare is the SUB-A catch-up predicate already. Retained here
+for historical reference until the next docs tidy.
+
+---
+
+## Original CON-B brief
 
 **Why.** A per-stream `SubscriptionRef` whose `stream` does not
 match any appended event's `stream_uuid` is meaningless: the

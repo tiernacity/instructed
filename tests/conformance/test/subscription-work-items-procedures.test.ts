@@ -146,6 +146,9 @@ describe("SUB-A slice 2 — route_batch", () => {
     void e1;
   });
 
+  // INV-SUB-W-001: PK (stream_id, subscription_name, shard,
+  //   partition_key, event_number) absorbs duplicate INSERTs on
+  //   routing-worker re-run, making route_batch idempotent.
   test("ON CONFLICT DO NOTHING absorbs crash-replay (idempotent)", async () => {
     const [e1] = await appendN(pool, "s1", 1);
     const decisions = JSON.stringify([
@@ -162,6 +165,47 @@ describe("SUB-A slice 2 — route_batch", () => {
     );
     assert.equal(r2.rows[0].inserted_count, "0");
     assert.equal(r2.rows[0].new_last_seen, e1.toString());
+  });
+
+  // INV-SUB-P-033: the routing cursor MAY advance past events that
+  //   route to `ignore` (no work item written for them). Under SUB-A,
+  //   an "ignored" event is simply one whose event_number is in
+  //   (last_seen, p_new_last_seen] but absent from the decisions
+  //   array. SWP:138 covers the all-ignored degenerate case; this
+  //   test pins the *mixed* case: cursor advances past the ignored
+  //   event_numbers, and no work-item row is written for them.
+  //   (TODO #11 / Pass-A finding.)
+  test("route_batch with mixed decisions: cursor jumps past ignored event_numbers, no work item written for them", async () => {
+    const [e1, e2, e3] = await appendN(pool, "s1", 3);
+    // Decisions only mention e1 and e3; e2 is ignored.
+    const r = await pool.query<{ inserted_count: string; new_last_seen: string }>(
+      `SELECT * FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
+      [
+        ALL,
+        SUB,
+        WORKER,
+        e3.toString(),
+        JSON.stringify([
+          { partition_key: "p", event_number: Number(e1) },
+          { partition_key: "p", event_number: Number(e3) },
+        ]),
+      ],
+    );
+    assert.equal(r.rows[0].inserted_count, "2");
+    assert.equal(
+      r.rows[0].new_last_seen,
+      e3.toString(),
+      "cursor must advance past the ignored event_number",
+    );
+    const items = await pool.query<{ event_number: string }>(
+      `SELECT event_number FROM instructed.subscription_work_items
+        ORDER BY event_number`,
+    );
+    assert.deepEqual(
+      items.rows.map((row) => row.event_number),
+      [e1.toString(), e3.toString()],
+      "no work-item row should exist for the ignored event_number",
+    );
   });
 
   test("cursor advance is monotone (lower target is a no-op)", async () => {
@@ -240,6 +284,75 @@ describe("SUB-A slice 2 — route_batch", () => {
     );
   });
 
+  // INV-SUB-P-061 composed with INV-SUB-W-001: delete_subscription
+  //   cascades the queued work items via the schema FK, and a
+  //   subsequent claim with `start_from = 'origin'` behaves as a
+  //   first claim. Re-routing from origin re-creates the work-item
+  //   rows that were cascaded away. (TODO #11 / §4 gap-list item 5.
+  //   SP:605 covers the "subsequent claim is fresh" half;
+  //   subscription-work-items-schema.test.ts covers the FK cascade
+  //   half; this test composes them with route_batch to demonstrate
+  //   the end-to-end redelivery contract.)
+  test("delete_subscription cascades queued work items; re-claim from 'origin' redelivers", async () => {
+    const [e1, e2, e3] = await appendN(pool, "s1", 3);
+    await pool.query(
+      `SELECT * FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
+      [
+        ALL,
+        SUB,
+        WORKER,
+        e3.toString(),
+        JSON.stringify([
+          { partition_key: "p", event_number: Number(e1) },
+          { partition_key: "p", event_number: Number(e2) },
+          { partition_key: "p", event_number: Number(e3) },
+        ]),
+      ],
+    );
+    const before = await pool.query(
+      `SELECT 1 FROM instructed.subscription_work_items
+        WHERE subscription_name = $1`,
+      [SUB],
+    );
+    assert.equal(before.rowCount, 3);
+
+    // Drop the subscription. FK cascade removes the work items in
+    // the same transaction (INV-SUB-W-001 via the schema FK).
+    await pool.query(`SELECT instructed.delete_subscription($1, $2)`, [ALL, SUB]);
+    const after = await pool.query(
+      `SELECT 1 FROM instructed.subscription_work_items
+        WHERE subscription_name = $1`,
+      [SUB],
+    );
+    assert.equal(after.rowCount, 0, "FK cascade must remove queued items");
+
+    // Re-claim from origin behaves as a first claim.
+    const reclaim = await pool.query<{ result: string; last_seen: string }>(
+      `SELECT * FROM instructed.claim_subscription($1, $2, $3, $4, $5::jsonb)`,
+      [ALL, SUB, WORKER, 30, JSON.stringify({ start_from: "origin" })],
+    );
+    assert.equal(reclaim.rows[0].result, "claimed");
+    assert.equal(reclaim.rows[0].last_seen, "0");
+
+    // Re-routing from origin reproduces the same work items —
+    // "redelivers from the start" in the SUB-A shape.
+    const reroute = await pool.query<{ inserted_count: string }>(
+      `SELECT * FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
+      [
+        ALL,
+        SUB,
+        WORKER,
+        e3.toString(),
+        JSON.stringify([
+          { partition_key: "p", event_number: Number(e1) },
+          { partition_key: "p", event_number: Number(e2) },
+          { partition_key: "p", event_number: Number(e3) },
+        ]),
+      ],
+    );
+    assert.equal(reroute.rows[0].inserted_count, "3");
+  });
+
   test("malformed inputs raise 22023", async () => {
     await rejectsWithCode(
       () =>
@@ -294,6 +407,10 @@ describe("SUB-A slice 2 — claim_work_item", () => {
     assert.equal(r, null);
   });
 
+  // INV-SUB-W-002: state machine pending -> claimed -> (done | failed).
+  //   This test pins the pending -> claimed edge; the other edges are
+  //   pinned by complete_work_item_projection / complete_work_item_pm /
+  //   fail_work_item tests below.
   test("claim transitions pending -> claimed with lease metadata", async () => {
     const [e1] = await seedRouted([{ pk: "p1" }]);
     const r = await claim(pool);
@@ -313,6 +430,10 @@ describe("SUB-A slice 2 — claim_work_item", () => {
     assert.equal(row.rows[0].claimed_by, WORKER);
   });
 
+  // INV-SUB-W-010: per-partition ordering. At most one
+  //   unexpired-claimed work item per (subscription, partition_key);
+  //   claim_work_item refuses a row whose partition has a
+  //   non-terminal predecessor.
   test("per-partition ordering: serial within a partition", async () => {
     const [e1, e2] = await seedRouted([{ pk: "p1" }, { pk: "p1" }]);
     const c1 = await claim(pool, "wA");
@@ -330,6 +451,8 @@ describe("SUB-A slice 2 — claim_work_item", () => {
     assert.equal(c2?.event_number, e2.toString());
   });
 
+  // INV-SUB-W-011: across partitions, processing is concurrent
+  //   via FOR UPDATE SKIP LOCKED.
   test("parallel across partitions: two claimants get disjoint partitions (SKIP LOCKED)", async () => {
     await seedRouted([{ pk: "p1" }, { pk: "p2" }, { pk: "p3" }]);
     // Use two concurrent transactions so SKIP LOCKED is exercised.
@@ -354,6 +477,8 @@ describe("SUB-A slice 2 — claim_work_item", () => {
     }
   });
 
+  // INV-SUB-W-013: failed rows are operator-only and permanently
+  //   block their partition until operator action.
   test("failed row blocks its partition only", async () => {
     const [e1, e2, e3] = await seedRouted([
       { pk: "p1" },
@@ -377,6 +502,9 @@ describe("SUB-A slice 2 — claim_work_item", () => {
     void e2;
   });
 
+  // INV-SUB-W-012: a processing worker taking over an
+  //   expired-claimed row sees the same work item; the previous
+  //   worker's next op raises IS030 work_item_lease_lost.
   test("lease takeover: expired 'claimed' row is re-claimable", async () => {
     const [e1] = await seedRouted([{ pk: "p1" }]);
     // Claim with a 1-second lease then back-date it so it's already expired.
@@ -525,6 +653,7 @@ describe("SUB-A slice 2 — complete_work_item_projection", () => {
     return en;
   }
 
+  // INV-SUB-W-020: projection-side terminal success DELETEs the row.
   test("happy path: DELETEs the row", async () => {
     const en = await seedAndClaim();
     await pool.query(
@@ -580,6 +709,9 @@ describe("SUB-A slice 2 — complete_work_item_pm", () => {
     await closePool();
   });
 
+  // INV-SUB-W-021: PM-side terminal success (non-terminal
+  //   instance) UPDATEs the row to 'done' AND UPSERTs the PM-state
+  //   snapshot in one transaction.
   test("UPDATEs row to 'done' and UPSERTs snapshot in one tx", async () => {
     const [en] = await appendN(pool, "s1", 1);
     await pool.query(
@@ -688,6 +820,9 @@ describe("SUB-A slice 2 — complete_pm_instance", () => {
     await closePool();
   });
 
+  // INV-SUB-W-022: PM-side terminal success (terminal instance)
+  //   DELETEs the PM-state snapshot AND every work item for the
+  //   partition in one transaction.
   test("DELETEs snapshot AND all work items for the partition in one tx", async () => {
     const ens = await appendN(pool, "s1", 3);
     await pool.query(
@@ -792,6 +927,12 @@ describe("SUB-A slice 2 — complete_pm_instance", () => {
   });
 });
 
+// INV-SUB-W-030: closed error set for the work-queue surface:
+//   IS020 subscription_not_found, IS030 work_item_lease_lost,
+//   plus standard Postgres errors. The non-claimant / missing-row /
+//   wrong-state tests in this and the preceding describe blocks
+//   pin the IS030 surface; subscription-not-found IS020 is pinned
+//   in the route_batch and claim_work_item describes.
 describe("SUB-A slice 2 — fail_work_item", () => {
   let pool: pg.Pool;
   before(async () => {
@@ -864,6 +1005,11 @@ describe("SUB-A slice 2 — fail_work_item", () => {
   });
 });
 
+// INV-SUB-CATCHUP-001: the catch-up predicate returns true iff
+//   BOTH the routing cursor has reached the target AND no
+//   subscription_work_items row at or below the target is in a
+//   non-terminal state. Either alone is insufficient. Each test in
+//   this describe block pins one half of the conjunction.
 describe("SUB-A slice 2 — is_subscription_caught_up", () => {
   let pool: pg.Pool;
   before(async () => {

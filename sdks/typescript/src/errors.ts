@@ -253,6 +253,36 @@ export class ConsistencyTimeout extends InstructedError {
   }
 }
 
+/**
+ * Raised synchronously by `waitForProjection` (CON-B) when a
+ * per-stream `SubscriptionRef` targets a stream that none of the
+ * appended events touched. Comparing the subscription's `last_seen`
+ * (in its own stream's coordinate space) against the appended
+ * events' target (in the appended stream's coordinate space) would
+ * silently produce wrong answers; raising up front prevents that.
+ *
+ * `$all` refs are never rejected by this check, regardless of which
+ * streams were appended to.
+ */
+export class ConsistencyTargetError extends InstructedError {
+  readonly subscriptionStream: string;
+  readonly subscriptionName: string;
+  readonly appendedStreams: string[];
+  constructor(
+    message: string,
+    opts: {
+      subscriptionStream: string;
+      subscriptionName: string;
+      appendedStreams: string[];
+    },
+  ) {
+    super(message);
+    this.subscriptionStream = opts.subscriptionStream;
+    this.subscriptionName = opts.subscriptionName;
+    this.appendedStreams = opts.appendedStreams;
+  }
+}
+
 export class UnknownAggregateType extends InstructedError {
   readonly aggregateType: string;
   constructor(aggregateType: string) {

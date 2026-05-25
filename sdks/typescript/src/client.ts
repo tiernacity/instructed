@@ -181,6 +181,7 @@ export class Client {
     );
     return res.rows.map((r) => ({
       event_id: r.event_id,
+      stream_uuid: streamUuid,
       stream_version: toBigInt(r.stream_version),
       event_number: toBigInt(r.event_number),
       created_at: toDate(r.created_at),

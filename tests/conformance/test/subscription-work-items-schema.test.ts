@@ -159,6 +159,10 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     );
   });
 
+  // INV-SUB-W-003 [mechanism-only]: per-state column invariants
+  //   enforced by CHECK constraints (claimed iff claimed_by and
+  //   lease_expires_at; failed iff failed_at; error_text only on
+  //   failed rows).
   test("per-state column invariants are enforced by CHECK constraints", async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions

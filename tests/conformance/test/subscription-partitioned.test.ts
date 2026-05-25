@@ -1,7 +1,7 @@
 /**
  * Part E — Partitioned-consumer conformance (Phase 9, step 6/8).
  *
- * All three cases here are SKIPPED per **D-0024** (ML-0001 / D-0002):
+ * All three cases here are SKIPPED per **D-0024** (ML-0013 / D-0002):
  * partitioned subscriptions are deferred from v1. The cases exist
  * now so that the INV-coverage matrix renders them as "deferred"
  * rather than "missing", and so the shape of the future
@@ -27,14 +27,15 @@
  * See:
  *   - `docs/decisions.md` :: D-0024 (case shapes)
  *   - `docs/decisions.md` :: D-0002 (concurrency_limit = 1 in v1)
- *   - `docs/maybe-later.md` :: ML-0001 (partitioned consumers)
+ *   - `docs/maybe-later.md` :: ML-0013 (multi-routing-worker
+ *     subscriptions; supersedes the removed ML-0001)
  *   - `docs/invariants.md` :: INV-SUB-P-040..042
  */
 
 import { describe, test } from "node:test";
 
-describe("subscriptions — partitioned consumers (deferred per D-0024 / ML-0001)", () => {
-  // INV-SUB-P-040: deferred — see ML-0001 / D-0002
+describe("subscriptions — partitioned consumers (deferred per D-0024 / ML-0013)", () => {
+  // INV-SUB-P-040: deferred — see ML-0013 / D-0002
   //
   // When `concurrency_limit > 1`, every event MUST be delivered to
   // exactly one of the live subscribers; the total number of live
@@ -59,7 +60,7 @@ describe("subscriptions — partitioned consumers (deferred per D-0024 / ML-0001
     // slot.
   });
 
-  // INV-SUB-P-041: deferred — see ML-0001 / D-0002
+  // INV-SUB-P-041: deferred — see ML-0013 / D-0002
   //
   // With a `partition_by` selector supplied, every event for which
   // `partition_by(event)` returns the same value MUST be delivered
@@ -91,7 +92,7 @@ describe("subscriptions — partitioned consumers (deferred per D-0024 / ML-0001
     // Intentionally empty — see comment above.
   });
 
-  // INV-SUB-P-042: deferred — see ML-0001 / D-0002
+  // INV-SUB-P-042: deferred — see ML-0013 / D-0002
   //
   // Without a `partition_by` selector, the contract is silent on
   // which subscriber receives which event. The ONLY guarantee is

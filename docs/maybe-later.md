@@ -324,3 +324,54 @@ restart, or if a per-worker option `closeBehaviour: 'drop' |
 - A future per-worker option (`closeBehaviour`, or a callback
   the worker invokes at close time deciding flush vs drop)
   is additive; current callers see no behaviour change.
+
+---
+
+## ML-0013 — Multi-routing-worker subscriptions (`concurrency_limit > 1`)
+
+The SUB-A routing worker is single-active per subscription:
+`claim_subscription` returns a non-error `'already_claimed'` row to
+any would-be second claimer, and `concurrency_limit` is effectively
+fixed at 1 in v1 (D-0002). Within-subscription parallelism is
+provided entirely on the processing side via the work queue
+(INV-SUB-W-010/011 — N processing workers, partitioned by
+`partition_key`).
+
+A future variant would let multiple routing workers share a
+subscription, each routing a disjoint shard of the source stream
+(or of `$all`). This is a different axis of parallelism to the
+work queue's: it scales the routing-decision throughput, not the
+handler throughput. Plausible motivations: a `$all` subscription
+whose routing decision is expensive (server-side JSONB-path
+selectors per ML-0003), or a workload where the routing worker is
+CPU-bound on `interested?` evaluation for a high-fanout PM.
+
+**Why deferred:** no observed need. The processing-side
+parallelism SUB-A ships handles every workload we've modelled.
+Adding a second axis of distribution before there's a concrete
+pain point would complicate the lease model (per-shard leases on
+the subscriptions row), the cursor model (one `last_seen` per
+shard, or a merge function), and the conformance surface (the
+three deferred INV-SUB-P-040..042 cases come back into scope, in a
+form shaped by whichever shard mechanism lands).
+
+**Forward-compat constraints on v1:**
+
+- The `shard` column reserved on `subscriptions` (v1 default 0;
+  see invariants.md "Identity" paragraph for Part E) is the
+  forward-compat hook. Identity is `(stream_uuid, name, shard)`;
+  v1 collapses to one shard per `(stream_uuid, name)`.
+- `IS021 subscription_already_claimed` is reserved but not raised
+  in v1 (sql-contract.md). A multi-routing-worker variant would
+  raise it once the per-shard claim count exceeded
+  `concurrency_limit`.
+- A partition-selector API (per ML-0003 / the file-level docstring
+  of `tests/conformance/test/subscription-partitioned.test.ts`)
+  becomes a prerequisite for stickiness across routing workers,
+  not just within a single routing worker's work queue.
+
+**Picks up when implemented:** the three skipped tests in
+`tests/conformance/test/subscription-partitioned.test.ts`
+(INV-SUB-P-040/041/042). Their case shapes are recorded in D-0024
+and stay accurate; the setup lines will need re-writing against
+the chosen claim / shard / selector API.

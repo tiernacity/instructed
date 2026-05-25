@@ -34,7 +34,7 @@
 --   subscriptions   -- persistent leased cursors (D-0006). One row per
 --                      `(stream_id, subscription_name, shard)`. The `shard`
 --                      column is reserved at v1 with default 0 so that
---                      ML-0001 (partitioned consumers) can be added without
+--                      ML-0013 (partitioned consumers) can be added without
 --                      breaking v1 callers. Under SUB-A the `last_seen`
 --                      column is conceptually the *routing cursor*: it is
 --                      advanced by the routing worker as it inserts work
@@ -59,7 +59,7 @@
 --   is_subscription_caught_up, list_pm_rebuild_events.
 --
 -- All procedures that accept caller-tunable knobs do so via a `p_options jsonb`
--- parameter rather than positional arguments, so that ML-0001 / ML-0002 can
+-- parameter rather than positional arguments, so that ML-0013 / ML-0002 can
 -- grow the surface without breaking callers. (Following absurd's convention.)
 
 create extension if not exists "uuid-ossp";
@@ -228,7 +228,7 @@ create table instructed.snapshots (
 --
 -- One row per persistent subscription. Identity is
 -- `(stream_id, subscription_name, shard)`. The `shard` column is reserved at
--- v1 with default 0 per ML-0001 so that partitioned-consumer support can be
+-- v1 with default 0 per ML-0013 so that partitioned-consumer support can be
 -- added without a v1-breaking migration.
 --
 -- Leased ownership (D-0006): `claimed_by` records the current worker (or
@@ -354,7 +354,7 @@ create index subscriptions_claim_expires_idx
 -- composite PK `(stream_id, subscription_name, shard)` and no surrogate id
 -- column. We expand the FK / PK accordingly here rather than retrofit a
 -- surrogate id onto `subscriptions` in this slice. If a surrogate id is
--- introduced later (e.g. for cross-table joins or ML-0001 ergonomics) this
+-- introduced later (e.g. for cross-table joins or ML-0013 ergonomics) this
 -- table's PK shrinks to `(subscription_id, partition_key, event_number)`
 -- with no semantic change.
 create table instructed.subscription_work_items (
@@ -489,7 +489,7 @@ create trigger stream_events_no_delete
 -- competes for those locks because it only touches the dispatch set.
 --
 -- Forward-compat: every procedure that takes caller-tunable knobs accepts
--- them via a `p_options jsonb default '{}'::jsonb` parameter so ML-0001 and
+-- them via a `p_options jsonb default '{}'::jsonb` parameter so ML-0013 and
 -- ML-0002 can grow the surface without breaking v1 callers. Recognised keys
 -- per procedure are documented in each docstring; unknown keys are
 -- silently ignored.
@@ -1262,7 +1262,7 @@ $$;
 --                                        event_number for '$all').
 --                                      integer N -> last_seen = N.
 --                         'shard'      :: smallint (default 0). Reserved
---                                      for ML-0001; v1 callers should
+--                                      for ML-0013; v1 callers should
 --                                      omit. Unknown shard values raise
 --                                      invalid_parameter_value.
 --
@@ -1450,7 +1450,7 @@ $$;
 --                         current claimed_by.
 --   p_lease_seconds     integer, the new lease duration (> 0).
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   claim_expires_at    timestamptz, the new lease expiry (= now() +
@@ -1559,7 +1559,7 @@ $$;
 --                         claimed_by; releasing someone else's lease is an
 --                         error.
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: void.
 --
@@ -1666,7 +1666,7 @@ $$;
 --   p_worker_id         text, must match the row's claimed_by.
 --   p_qty               integer, batch size cap. MUST be > 0.
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --                       OQ-0003 (selector evaluation locus) is deferred to
 --                       Phase 8; if server-side selector evaluation is
 --                       chosen there, it lands here as an additive
@@ -1852,7 +1852,7 @@ $$;
 --                         '$all' subscriptions an event_number. MUST be
 --                         >= 0.
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   last_seen  bigint, the cursor's value after the update.
@@ -1976,7 +1976,7 @@ $$;
 --   p_stream_uuid       text
 --   p_subscription_name text
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   last_seen  bigint
@@ -2065,7 +2065,7 @@ $$;
 --   p_stream_uuid       text
 --   p_subscription_name text
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: void.
 --
@@ -2180,7 +2180,7 @@ $$;
 --                         feature (the routing worker is single-active per
 --                         subscription via the subscription lease).
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   inserted_count  bigint, the number of rows actually inserted
@@ -2347,7 +2347,7 @@ $$;
 --   p_lease_seconds     integer, > 0. The claim's lease window. On expiry
 --                         the row becomes eligible to a takeover claim.
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: zero or one row:
 --   partition_key     text
@@ -2508,7 +2508,7 @@ $$;
 --   p_partition_key     text
 --   p_event_number      bigint
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: void.
 --
@@ -2645,7 +2645,7 @@ $$;
 --   p_snapshot_metadata       jsonb, may be null. The SDK encodes
 --                               `snapshot_module_version` here per SNAP-002.
 --   p_options                 jsonb, default '{}'. Recognised keys:
---                               'shard' :: smallint (default 0; ML-0001).
+--                               'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: void.
 --
@@ -2813,7 +2813,7 @@ $$;
 --   p_partition_key     text
 --   p_snapshot_uuid     text, the PM instance's snapshot source_uuid.
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   work_items_deleted bigint
@@ -2924,7 +2924,7 @@ $$;
 --   p_error_text        text, may be NULL (diagnostic only; not parsed
 --                         by the framework).
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: void.
 --
@@ -3059,7 +3059,7 @@ $$;
 --   p_subscription_name text
 --   p_target            bigint, the target event_number.
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   caught_up  boolean
@@ -3155,7 +3155,7 @@ $$;
 --   p_event_number      bigint
 --   p_lease_seconds     integer, the new lease duration (> 0).
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: exactly one row:
 --   lease_expires_at    timestamptz, the new lease expiry (= now() +
@@ -3303,7 +3303,7 @@ $$;
 --   p_event_number      bigint, exclusive upper bound (typically the
 --                         claimed event's event_number).
 --   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0001).
+--                         'shard' :: smallint (default 0; ML-0013).
 --
 -- Output: a set of rows in the read_all shape, ordered by event_number
 -- ascending. Empty set if the partition has no 'done' rows below the

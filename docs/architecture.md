@@ -331,6 +331,14 @@ The list is explicit. There is no "wait for everything"
 shorthand because there is no in-store registry of which
 subscriptions exist for which application.
 
+A per-stream subscription target can only wait on appends to its
+own stream. Passing a per-stream subscription target for an
+append to a different stream raises a typed error
+(`ConsistencyTargetError`) before the wait begins, because the
+subscription's cursor lives in its own stream's coordinate space
+and the comparison would otherwise vacuously succeed. `$all`
+targets are exempt; they validly observe every append.
+
 ## Concurrency model summary
 
 | Scenario | Mechanism |

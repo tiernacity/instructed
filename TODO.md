@@ -323,92 +323,6 @@ opportunistically):
 
 ---
 
-## 11. Conformance criteria — revisit once the subscription model stabilises
-
-**Why this exists.** The 2026-05-23 Commanded re-review (TODO #1)
-produced a list of conformance-test gaps in `§4` of the review
-document — cases that the conformance harness should cover but
-probably doesn't (subscription scope isolation, lease takeover
-without admin action, monotone cumulative ack, etc.). Those gaps
-were written against the **current** single-cursor subscription
-model.
-
-During the same review walkthrough, the subscription model itself
-became a parked design question. The decision (SUB-A; see
-`docs/architecture.md` "How a worker runs" and
-`docs/decisions.md` D-0002) replaced the single-cursor + per-event
-ack model with a routing-cursor + work-queue model. Several of
-the §4 conformance cases either no longer apply (the cursor
-behaviours they test are internal routing-layer details, not
-application-facing contract) or change shape (per-partition
-ordering, work-item state transitions, claim semantics over
-`SELECT … FOR UPDATE SKIP LOCKED`).
-
-Rather than codify conformance cases against a model we are
-actively redesigning, the work is parked.
-
-**What to do (when SUB-A is decided):**
-
-1. Walk the gap list below with the chosen SUB-A design in mind.
-   For each conformance case decide:
-   - Still applies as written → land the test.
-   - Applies in modified form → reshape and land.
-   - No longer meaningful (was about cursor mechanics that are now
-     internal) → drop, record why.
-2. Add the new conformance cases SUB-A introduces:
-   - Per-partition ordering under concurrent claimants.
-   - Failed work item blocks subsequent items for the same
-     partition; does not block other partitions.
-   - Routing-cursor advance is atomic with the batch of work-item
-     INSERTs.
-   - `waitForProjection` catch-up predicate (both conditions:
-     routing cursor past target AND no outstanding work items ≤
-     target).
-   - Cross-stream `waitForProjection` guard (review §2.3.2; the
-     guard itself ships earlier against today's schema but the
-     test is part of the SUB-A acceptance set).
-   - Claim leasing, lease expiry takeover, lease-loss detection at
-     the work-item layer.
-3. Decide the v1 conformance surface. The current `INV-*`
-   catalogue mixes "intrinsic store contract" with "single-cursor
-   subscription mechanism". Under SUB-A, only the former survives
-   as the application-facing contract; the latter becomes
-   `[mechanism-only]` on the routing-layer internals. The split
-   is part of this work.
-
-**Depends on.** SUB-A has landed (SDK slices 1–12, ending in
-`docs/`-only documentation). The conformance harness rewrite is
-now un-blocked; modify `tests/conformance/` as part of this work.
-
-**Original gap list (against today's model).** Tests worth adding
-in the current shape; some will translate, some won't, per the
-walk above.
-
-- Subscription scope isolation: a subscription on stream A does
-  not deliver events appended to stream B. (`INV-READ-006`,
-  `INV-SUB-P-030` imply it; not explicitly tested.)
-- `:current` `start_from` skips all currently-existing events.
-  (`INV-SUB-P-020`.)
-- Resume from last successful ack: an un-ack'd event redelivers.
-  (`INV-SUB-P-031`.)
-- `$all` event rows carry their **original** `stream_id` /
-  `stream_version`. (`INV-READ-006/007`.)
-- Delete-subscription + re-subscribe from `:origin` redelivers
-  from the start. (`INV-SUB-P-061`.)
-- `release_subscription` preserves cursor; subsequent claim
-  resumes from `last_seen`. (`INV-SUB-P-060`.)
-- Lease expiry without administrative action; takeover by another
-  worker; original worker's next op raises `IS022`.
-  (`INV-SUB-P-012`.)
-- Monotone cumulative-ack absorbs a lower-position advance
-  silently. (`INV-SUB-P-034`.)
-
-**Output.** An updated `tests/conformance/` plus a clear statement
-of what the conformance harness verifies and why each case is in
-or out, reflecting the SUB-A subscription model.
-
----
-
 ## 12. Apply re-review outcomes
 
 **Status: SUB-A / PM-F / PM-C / PRJ-A landed. Re-review outcomes
@@ -432,15 +346,8 @@ What's still open from the re-review:
   (DOC-A handler purity, DOC-B D-0004 one-liner, DOC-C D-0010
   "Why" tighten). Independent of SUB-A; pick up when convenient.
 - `docs/todo/consistency.md` — CON-A (`exclude` mechanism for
-  `dispatch`) and CON-B (`waitForProjection` cross-stream
-  guard). CON-B's underlying-compare-after-SUB-A note is now
-  trivial: SUB-A's catch-up predicate already handles the
-  spurious-true case for cross-stream targets (no in-flight
-  work items for a target on an unrelated stream is vacuously
-  true; the SDK-side guard is still needed to reject the
-  misuse synchronously).
-- TODO #11 above — conformance criteria revisit. Now
-  un-blocked; SUB-A has settled.
+  `dispatch`). CON-B (`waitForProjection` cross-stream guard)
+  landed as part of TODO #11.
 - The follow-on items still hanging off this index entry
   (`ML-0006..0012` in `docs/maybe-later.md`, the SDK-level
   PM-fan-out non-goal, PM-E for deterministic event IDs on
@@ -515,3 +422,59 @@ meaning. Gaps in the numbering are expected.
   removed from `docs/maybe-later.md`; architecture / soak docs
   updated. Full TS SDK suite (84 tests) green. Soak re-baseline
   deferred to next harness run.
+- **#11 Conformance criteria — revisit once the subscription
+  model stabilises.** Walked the 2026-05-23 §4 gap list and
+  TODO #11 step-2 SUB-A acceptance set against the landed
+  subscription model. Outcome:
+  - Four new tests landed:
+    `subscription-persistent.test.ts` gains scope isolation
+    (per-stream A doesn't deliver B) and the composed
+    lease-expiry → takeover → IS022 case for INV-SUB-P-011;
+    `subscription-work-items-procedures.test.ts` gains mixed
+    route_batch (cursor jumps past ignored event_numbers; no
+    work-item written) for INV-SUB-P-033 and the composed
+    delete-with-queued-items → re-claim from `:origin` →
+    re-route case for INV-SUB-P-061.
+  - One re-label (no behaviour change) on SP "redelivery:
+    crash-before-advance is recovered by re-claim" to clarify
+    it pins the routing-layer no-auto-ack contract; the
+    application-facing redelivery contract under SUB-A is the
+    work-item lease takeover already covered at SWP.
+  - Six §4 cases dropped as already covered: `:current`
+    start_from, `$all` original-identity echo (per
+    INV-READ-006/007), release-preserves-cursor,
+    monotone cumulative ack, plus the SUB-A step-2 items for
+    per-partition ordering, failed-row partition blocking,
+    atomic route_batch, work-item lease leasing/expiry/loss,
+    and `waitForProjection` end-to-end (the latter already
+    covered three ways at
+    `sdks/typescript/test/consistency.test.ts` "SUB-A
+    work-item conjunct").
+  - CON-B `waitForProjection` cross-stream guard landed
+    alongside: new `ConsistencyTargetError`, synchronous (fast
+    pre-await) rejection in `waitForProjection`, four tests in
+    `sdks/typescript/test/consistency.test.ts` (positive,
+    negative, mixed-list, `$all`-exempt). Required adding
+    `stream_uuid` to the SDK's `AppendedEvent` shape
+    (populated client-side; no SQL change). `docs/todo/
+    consistency.md` CON-B marked landed; CON-A still open.
+  - INV catalogue `[mechanism-only]` split deemed already
+    correct (INV-SUB-P-011, INV-SUB-W-003, INV-APPEND-022,
+    INV-STREAM-002 already carry the marker); the
+    application-facing vs routing-mechanism split is now
+    explicit in `tests/conformance/COVERAGE.md` under "TODO
+    #11 / SUB-A re-fit notes".
+  - ML-0001 (removed during the 2026-05-23 doc tidy) replaced
+    with ML-0013 (multi-routing-worker subscriptions /
+    `concurrency_limit > 1`) in `docs/maybe-later.md` to
+    capture the forward-looking work that the three skipped
+    INV-SUB-P-040/041/042 conformance tests are parked behind.
+    The 22 stale `ML-0001` references across
+    `sql/instructed.sql`, `sdks/typescript/src/types.ts`,
+    `sdks/typescript/README.md`, and `tests/conformance/
+    COVERAGE.md` updated to ML-0013.
+  - Architecture / guarantees docs gained the one-sentence
+    per-stream-target guard callout per CON-B step 5.
+  - Full conformance suite (171/171 active, +4 new; 3 skipped
+    as deferred per ML-0013) and full TS SDK suite (133/133,
+    +4 new CON-B tests) green.

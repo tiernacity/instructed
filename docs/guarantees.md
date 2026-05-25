@@ -72,6 +72,11 @@ for the mechanisms see [`architecture.md`](architecture.md).
   only the wait failed.
 - The consistency list must be explicit. There is no shorthand
   for "wait for everything".
+- A per-stream subscription target can only wait on appends to
+  its own stream. Passing a per-stream subscription target for
+  an append to a different stream raises
+  `ConsistencyTargetError` before the wait begins. `$all`
+  targets are exempt.
 
 ## What snapshots give you
 

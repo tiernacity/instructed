@@ -58,9 +58,15 @@ export interface NewEvent<E = unknown> {
   correlation_id?: string;
 }
 
-/** One row returned by `append_to_stream`, in append order. */
+/** One row returned by `append_to_stream`, in append order.
+ *
+ *  `stream_uuid` is populated client-side from the `appendToStream`
+ *  argument (the SQL procedure doesn't echo it back). It is
+ *  load-bearing for the CON-B cross-stream guard in
+ *  `waitForProjection`. */
 export interface AppendedEvent {
   event_id: string;
+  stream_uuid: string;
   stream_version: bigint;
   event_number: bigint;
   created_at: Date;
@@ -129,7 +135,7 @@ export type StartFrom = "origin" | "current" | bigint | number;
 
 export interface ClaimSubscriptionOptions {
   startFrom?: StartFrom;
-  /** Reserved (ML-0001); v1 callers should omit. */
+  /** Reserved (ML-0013); v1 callers should omit. */
   shard?: number;
 }
 

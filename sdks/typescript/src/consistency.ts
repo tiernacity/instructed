@@ -39,15 +39,21 @@
  * Throws {@link ConsistencyTimeout} on timeout (named subscriptions
  * whose predicate never returned true are listed in `missing`).
  *
- * Out of scope here: the cross-stream guard (CON-B; a caller waiting
- * on a projection whose source stream is different from the one just
- * appended to can today silently get back a spurious "caught-up"
- * because the appended events were never routed to that
- * subscription). The guard ships separately.
+ * Cross-stream guard (CON-B): a per-stream `SubscriptionRef` whose
+ * `stream` is not one of the appended streams is rejected
+ * synchronously with {@link ConsistencyTargetError} before the
+ * polling loop starts. Under SUB-A this case would otherwise
+ * vacuously succeed -- the router never enqueued anything for the
+ * unrelated event, so "no outstanding work items" is trivially true.
+ * `$all` refs are exempt; they validly observe every append.
  */
 
 import type { Client } from "./client.ts";
-import { ConsistencyTimeout, InstructedError } from "./errors.ts";
+import {
+  ConsistencyTargetError,
+  ConsistencyTimeout,
+  InstructedError,
+} from "./errors.ts";
 import type { AppendedEvent } from "./types.ts";
 import { sleep } from "./internal/sleep.ts";
 
@@ -87,6 +93,31 @@ export async function waitForProjection(
   const rows = Array.isArray(appended) ? appended : [appended];
   if (rows.length === 0) return;
   if (subscriptions.length === 0) return;
+
+  // CON-B: cross-stream guard. Reject per-stream refs that don't
+  // match any appended stream BEFORE the polling loop. Throwing
+  // synchronously (no preceding await) means the caller sees the
+  // error immediately, not after `pollInterval` ms.
+  const appendedStreams = new Set<string>();
+  for (const r of rows) appendedStreams.add(r.stream_uuid);
+  for (const sub of subscriptions) {
+    if (sub.stream === "$all") continue;
+    if (!appendedStreams.has(sub.stream)) {
+      throw new ConsistencyTargetError(
+        `waitForProjection: per-stream subscription target ` +
+          `"${sub.stream}::${sub.name}" cannot wait on an append to ` +
+          `[${[...appendedStreams].join(", ")}]. ` +
+          `A per-stream subscription on stream X can only wait on ` +
+          `appends to stream X. Use { stream: "$all", name } if the ` +
+          `subscription is cross-stream.`,
+        {
+          subscriptionStream: sub.stream,
+          subscriptionName: sub.name,
+          appendedStreams: [...appendedStreams],
+        },
+      );
+    }
+  }
 
   const pollInterval = opts.pollInterval ?? DEFAULT_WAIT_POLL_INTERVAL_MS;
   const timeout = opts.timeout ?? DEFAULT_WAIT_TIMEOUT_MS;
