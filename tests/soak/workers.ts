@@ -14,8 +14,15 @@
  * concurrency at once:
  *
  *   - **Routing-side rebalancing.** Only one routing worker per
- *     subscription holds the lease at a time; the others wait. Slot
- *     respawn and lease theft both cause a routing handover.
+ *     subscription holds the lease at any single instant
+ *     (INV-SUB-P-010). Under D-0025 the lease is claimed and
+ *     released per batch, so the active worker rotates per batch
+ *     across whichever slots are polling — spinning up extra slots
+ *     immediately shares routing load rather than idling on
+ *     `already_claimed` until the current holder dies. Slot
+ *     respawn and lease theft both cause a routing handover; the
+ *     latter manifests as IS022 on the in-flight route_batch and
+ *     is recovered by the next claim, not by aborting the worker.
  *   - **Processing-side parallelism.** All processing workers per
  *     subscription run simultaneously, racing for work items via
  *     `claim_work_item`. The per-partition predicate keeps the
@@ -31,10 +38,14 @@
  *      have their per-item lease expire and are taken over by other
  *      processing workers (or the respawned one).
  *   2. **Lease theft.** Periodically run an UPDATE that backdates a
- *      random subscription's `claim_expires_at`, forcing the routing
- *      worker's next heartbeat to detect lease loss (`IS022`) and
- *      another slot's routing worker to take over. Processing
- *      workers are unaffected by this (they hold per-item leases on
+ *      random subscription's `claim_expires_at`, simulating an
+ *      out-of-band lease loss. Under D-0025 the routing worker no
+ *      longer heartbeats; lease theft is observable to it only when
+ *      it next calls `route_batch` (IS022, recoverable: drop batch
+ *      and re-claim) or `claim_subscription` (sees `already_claimed`
+ *      if a thief grabbed the now-expired lease). Either way the
+ *      worker keeps polling. Processing workers are unaffected
+ *      (they hold per-item leases on
  *      `subscription_work_items.lease_expires_at`, not on
  *      `subscriptions`).
  */
@@ -204,6 +215,8 @@ export interface ProjectorSlotOptions {
 
 export function projectorSlot(opts: ProjectorSlotOptions): SlotInternal {
   const stream = opts.routingDef.stream ?? "$all";
+  // Processing-side heartbeat is still in effect; routing-side
+  // heartbeat was removed in D-0025 (per-batch claim/release).
   const heartbeatInterval = Math.max(500, (opts.leaseSeconds * 1000) / 3);
   const handle = keepAlive(
     opts.slotLabel,
@@ -212,7 +225,6 @@ export function projectorSlot(opts: ProjectorSlotOptions): SlotInternal {
         workerId: `${workerId}-r`,
         leaseSeconds: opts.leaseSeconds,
         pollInterval: opts.pollInterval,
-        heartbeatInterval,
         onError: noop,
       });
       const proc = startProjectionWorker(client, opts.projectionDef, {
@@ -252,6 +264,8 @@ export interface PmSlotOptions {
 
 export function pmSlot(opts: PmSlotOptions): SlotInternal {
   const stream = opts.routingDef.stream ?? "$all";
+  // Processing-side heartbeat is still in effect; routing-side
+  // heartbeat was removed in D-0025 (per-batch claim/release).
   const heartbeatInterval = Math.max(500, (opts.leaseSeconds * 1000) / 3);
   const handle = keepAlive(
     opts.slotLabel,
@@ -260,7 +274,6 @@ export function pmSlot(opts: PmSlotOptions): SlotInternal {
         workerId: `${workerId}-r`,
         leaseSeconds: opts.leaseSeconds,
         pollInterval: opts.pollInterval,
-        heartbeatInterval,
         onError: noop,
       });
       const proc = startPmWorker(

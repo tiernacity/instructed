@@ -460,7 +460,10 @@ export class Instructed {
       leaseSeconds: o.leaseSeconds ?? this.defaults.leaseSeconds,
       pollInterval: o.pollInterval ?? this.defaults.pollInterval,
     };
-    if (o.heartbeatInterval !== undefined) out.heartbeatInterval = o.heartbeatInterval;
+    // Note: `heartbeatInterval` is intentionally ignored for routing
+    // workers under D-0025 (per-batch claim/release; no heartbeat).
+    // The option is preserved on `RegistrationOptions` because
+    // processing workers still use it.
     if (o.onError !== undefined) out.onError = o.onError;
     if (workerId !== undefined) out.workerId = workerId;
     return out;

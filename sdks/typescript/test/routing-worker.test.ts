@@ -1,5 +1,5 @@
 /**
- * SUB-A slice 4 — routing worker tests.
+ * SUB-A routing worker tests.
  *
  * Slice acceptance items:
  *   - batch atomicity (cursor and inserts commit together)
@@ -10,7 +10,9 @@
  *   - race safety: last_seen >= N implies work-item rows for events <= N
  *     are visible
  *
- * Plus lifecycle: lease-loss aborts the worker; close() releases the lease.
+ * Plus D-0025 work-stealing semantics: per-batch claim/release, no
+ * heartbeat, `already_claimed` and `IS022` are recoverable (the worker
+ * continues its poll loop), routeFn throws are fatal.
  */
 
 import { after, before, beforeEach, describe, test } from "node:test";
@@ -410,57 +412,138 @@ describe("routing worker — race safety", () => {
 });
 
 describe("routing worker — lifecycle", () => {
-  test("external lease takeover aborts the worker via onError", async () => {
-    const name = `routing-lease-${randomUUID().slice(0, 8)}`;
+  test("`already_claimed` is not fatal under D-0025: worker waits and retries", async () => {
+    // A second routing worker for the same subscription must not exit
+    // when it observes `already_claimed`; it simply backs off and
+    // retries on the next tick. Under the per-batch model the first
+    // worker releases between batches, so the second eventually wins
+    // some claims.
+    const name = `routing-shared-${randomUUID().slice(0, 8)}`;
+    await appendN("shared", 20);
+    const errorsA: Error[] = [];
+    const errorsB: Error[] = [];
+    const wA = startRoutingWorker(
+      client,
+      { name, routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }) },
+      { workerId: "A", onError: (e) => errorsA.push(e) },
+    );
+    const wB = startRoutingWorker(
+      client,
+      { name, routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }) },
+      { workerId: "B", onError: (e) => errorsB.push(e) },
+    );
+    try {
+      await waitFor(async () => {
+        const items = await workItems(name);
+        return items.length >= 20 ? true : null;
+      });
+      // Both workers should be alive (their .stopped promises
+      // unresolved). Neither should have surfaced an error —
+      // `already_claimed` is silent.
+      assert.deepEqual(errorsA, []);
+      assert.deepEqual(errorsB, []);
+      // Cursor advanced past all 20 events; no duplicates from PK
+      // absorption.
+      const items = await workItems(name);
+      assert.equal(items.length, 20);
+    } finally {
+      await Promise.all([wA.close(), wB.close()]);
+    }
+  });
+
+  test("IS022 mid-batch is recoverable: worker drops batch and continues", async () => {
+    // Force-expire the lease while the worker is mid-batch (stuck in
+    // routeFn). When route_batch fires it will raise IS022; under
+    // D-0025 the worker drops the batch and re-enters the loop
+    // rather than exiting. Eventually it (or another worker) routes
+    // every event.
+    const name = `routing-is022-${randomUUID().slice(0, 8)}`;
+    const { ens } = await appendN("is022", 3);
     const errors: Error[] = [];
-    const w = startRoutingWorker(
+    let release!: () => void;
+    const block = new Promise<void>((r) => {
+      release = r;
+    });
+    let blocked = false;
+    const w = startRoutingWorker<unknown>(
       client,
       {
         name,
-        routeFn: () => "ignore",
+        routeFn: async (e): Promise<RoutingDecision> => {
+          if (e.event_type === "E0" && !blocked) {
+            blocked = true;
+            await block;
+          }
+          return { partitionKey: "p" };
+        },
       },
       {
+        workerId: "original",
         leaseSeconds: 1,
-        heartbeatInterval: 200,
+        pollInterval: 100,
         onError: (e) => errors.push(e),
       },
     );
-    // Give the worker time to claim.
-    await waitFor(async () => {
-      const r = await pool.query(
-        `SELECT 1 FROM instructed.subscriptions WHERE subscription_name = $1`,
+    try {
+      // Wait until the worker is stuck inside routeFn for E0.
+      await waitFor(async () => (blocked ? true : null));
+      // Force the lease to expire and have someone else claim it.
+      // Then release the block so route_batch fires and raises IS022.
+      await pool.query(
+        `UPDATE instructed.subscriptions
+            SET claim_expires_at = now() - interval '5 seconds'
+          WHERE subscription_name = $1`,
         [name],
       );
-      return r.rowCount! > 0 ? true : null;
-    });
-    // Steal the lease: force-expire it, then claim as another worker.
-    await pool.query(
-      `UPDATE instructed.subscriptions
-          SET claim_expires_at = now() - interval '5 seconds'
-        WHERE subscription_name = $1`,
-      [name],
-    );
-    await client.claimSubscription(ALL, name, "thief", 30);
-    await w.stopped;
-    assert.ok(
-      errors.some((e) => e instanceof SubscriptionLeaseLost),
-      `expected SubscriptionLeaseLost, got ${errors.map((e) => e.constructor.name).join(",")}`,
-    );
+      await client.claimSubscription(ALL, name, "thief", 30);
+      // Thief immediately releases so our worker can re-claim and
+      // finish the work itself.
+      await client.releaseSubscription(ALL, name, "thief");
+      release();
+      // The worker must eventually route all 3 events (its own batch
+      // got dropped via IS022, then it re-claimed and re-routed).
+      await waitFor(async () => {
+        const items = await workItems(name);
+        return items.length >= 3 ? true : null;
+      });
+      const items = await workItems(name);
+      assert.equal(items.length, 3);
+      assert.deepEqual(
+        items.map((i) => i.event_number),
+        ens.map((e) => e.toString()),
+      );
+      // The worker MUST NOT have surfaced an error for IS022 — it's
+      // recoverable under D-0025.
+      assert.ok(
+        !errors.some((e) => e instanceof SubscriptionLeaseLost),
+        `expected no SubscriptionLeaseLost surfaced; got: ${errors.map((e) => e.constructor.name).join(",")}`,
+      );
+    } finally {
+      try {
+        release();
+      } catch {
+        /* ignore */
+      }
+      await w.close();
+    }
   });
 
-  test("close() releases the lease so a fresh worker can claim", async () => {
+  test("close() between batches leaves the lease released", async () => {
+    // Under D-0025 the lease is released per batch in the steady
+    // state. After a worker has processed all available events and
+    // entered the idle poll, the lease is already released. close()
+    // simply prevents the next claim.
     const name = `routing-release-${randomUUID().slice(0, 8)}`;
+    await appendN("rel", 2);
     const w1 = startRoutingWorker(client, {
       name,
       routeFn: () => "ignore",
     });
+    // Wait for the cursor to advance — evidence that at least one
+    // batch completed and the lease was released.
     await waitFor(async () => {
-      const r = await pool.query<{ claimed_by: string | null }>(
-        `SELECT claimed_by FROM instructed.subscriptions
-          WHERE subscription_name = $1`,
-        [name],
-      );
-      return r.rowCount! > 0 && r.rows[0].claimed_by ? true : null;
+      const ls = await lastSeen(name);
+      return ls !== null && ls > 0n ? true : null;
     });
     await w1.close();
     const r = await pool.query<{ claimed_by: string | null }>(

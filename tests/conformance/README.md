@@ -49,10 +49,12 @@ tests/conformance/
 
 Step 2/8 onwards adds `append.test.ts`, `read.test.ts`,
 `snapshot.test.ts`, `subscription-persistent.test.ts`,
-`subscription-partitioned.test.ts` (all skipped per D-0024),
 `subscription-transient.test.ts` (dropped-shape documentation),
 and `cross-cutting.test.ts`. See `docs/ROADMAP.md` Phase 9 for the
-full sequencing.
+full sequencing. (A previous `subscription-partitioned.test.ts`
+slot held skipped placeholders for sharded-routing cases; those
+are unbuilt — see `docs/maybe-later.md` ML-0013 — and the file
+has been removed.)
 
 ## Annotation grammar
 

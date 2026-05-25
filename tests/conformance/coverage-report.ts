@@ -114,9 +114,8 @@ const CATALOGUE = {
     "INV-SUB-P-032",
     "INV-SUB-P-033",
     "INV-SUB-P-034",
-    "INV-SUB-P-040", // deferred (D-0024)
-    "INV-SUB-P-041", // deferred (D-0024)
-    "INV-SUB-P-042", // deferred (D-0024)
+    // INV-SUB-P-040/041/042 omitted: sharded routing is unbuilt; see
+    // docs/maybe-later.md ML-0013.
     "INV-SUB-P-050", // above adapter line
     "INV-SUB-P-060",
     "INV-SUB-P-061",

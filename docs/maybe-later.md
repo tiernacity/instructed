@@ -351,9 +351,17 @@ parallelism SUB-A ships handles every workload we've modelled.
 Adding a second axis of distribution before there's a concrete
 pain point would complicate the lease model (per-shard leases on
 the subscriptions row), the cursor model (one `last_seen` per
-shard, or a merge function), and the conformance surface (the
-three deferred INV-SUB-P-040..042 cases come back into scope, in a
+shard, or a merge function), and the conformance surface (three
+new INV-SUB-P-04x cases come into scope, sketched below, in a
 form shaped by whichever shard mechanism lands).
+
+Note: the per-batch claim/release work-stealing model the v1
+routing worker uses (see [D-0025](decisions.md#d-0025)) is
+**not** ML-0013. That model keeps one active routing worker per
+subscription at any instant; the active worker just rotates per
+batch across processes. ML-0013 is specifically about
+*concurrent* routing workers, each owning a disjoint shard,
+holding live leases simultaneously.
 
 **Forward-compat constraints on v1:**
 
@@ -365,13 +373,58 @@ form shaped by whichever shard mechanism lands).
   in v1 (sql-contract.md). A multi-routing-worker variant would
   raise it once the per-shard claim count exceeded
   `concurrency_limit`.
-- A partition-selector API (per ML-0003 / the file-level docstring
-  of `tests/conformance/test/subscription-partitioned.test.ts`)
-  becomes a prerequisite for stickiness across routing workers,
-  not just within a single routing worker's work queue.
+- A partition-selector API (per ML-0003) becomes a prerequisite
+  for stickiness across routing workers, not just within a
+  single routing worker's work queue.
 
-**Picks up when implemented:** the three skipped tests in
-`tests/conformance/test/subscription-partitioned.test.ts`
-(INV-SUB-P-040/041/042). Their case shapes are recorded in D-0024
-and stay accurate; the setup lines will need re-writing against
-the chosen claim / shard / selector API.
+**Conformance shapes to add when implemented.** These were
+previously stubbed as skipped tests in
+`tests/conformance/test/subscription-partitioned.test.ts`; that
+file has been removed (it referenced functionality we haven't
+built). The shapes are recorded here so they survive the file's
+deletion:
+
+- **INV-SUB-P-040 — multi-subscriber distribution under
+  `concurrency_limit > 1`.** Every event MUST be delivered to
+  exactly one of the live subscribers; the total number of live
+  subscribers is capped at `concurrency_limit`.
+  *Setup (under the future API):* claim subscription with
+  `concurrency_limit: 3` from three workers; a 4th claim returns
+  `IS021 subscription_already_claimed`; append K events; each
+  worker reads its batch and advances.
+  *Assertions:* union of received event-ids has size K; pairwise
+  intersection is empty; the 4th claim raises IS021.
+
+- **INV-SUB-P-041 — `partition_by` stickiness, intra-partition
+  order, and rebalance.** With a `partition_by` selector, every
+  event for which `partition_by(event)` returns the same value
+  MUST be delivered to the same subscriber (modulo subscriber
+  failure + rebalance); intra-partition order MUST equal
+  `event_number` order.
+  *Setup:* three workers with `concurrency_limit = 3` and a
+  selector extracting `partition_key` from each event; append
+  events tagged `A, A, B, A, B` in that global order.
+  *Assertions:* the worker that received the first A-event
+  received every A-event (same for B); each worker's events
+  appear in `event_number`-ascending order. Rebalance variant:
+  the A-worker releases or its lease expires; a fresh worker
+  claims and resumes from the A-partition cursor; the still-live
+  B-worker continues to see only B-events.
+
+- **INV-SUB-P-042 — no `partition_by`:
+  exactly-once-among-live-subscribers, no stickiness.** Without
+  a selector, the ONLY guarantee is "every event is delivered
+  to exactly one of the live subscribers". This is
+  INV-SUB-P-040's weaker companion — it documents what is *not*
+  promised. An implementation that routes every event to
+  worker-1 would still satisfy INV-SUB-P-042 (it would only
+  fail INV-SUB-P-040's stronger "distribute" wording).
+  *Setup:* three workers with `concurrency_limit = 3` and no
+  selector; append K events.
+  *Assertions:* union has size K; pairwise intersection is
+  empty; NO assertion on stickiness, order across workers, or
+  distribution fairness.
+
+When ML-0013 lands, these shapes get re-written against the
+chosen claim / shard / selector API and added as real tests
+(probably in a fresh `subscription-sharded.test.ts` or similar).

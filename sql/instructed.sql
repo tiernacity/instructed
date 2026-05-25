@@ -1287,18 +1287,35 @@ $$;
 --                                    p_options.start_from; negative
 --                                    shard.
 --
--- Lock-acquisition order:
+-- Lock-acquisition order (per D-0025):
 --   1. The target stream's `streams` row, read-only (lookup of
 --      stream_id, no lock).
---   2. The `subscriptions` row keyed by
---      (stream_id, subscription_name, shard):
---        a. On first create: INSERT (row-level lock until commit).
---        b. On re-claim: SELECT ... FOR UPDATE; if unclaimed or expired,
---           UPDATE claimed_by, claim_expires_at; otherwise return
---           'already_claimed' without modifying the row.
+--   2. MVCC-snapshot existence + lease check on the `subscriptions` row
+--      (no lock). Three outcomes:
+--        a. Row missing  -> proceed to first-create branch.
+--        b. Row exists, lease live, held by another worker -> return
+--           'already_claimed' immediately, without taking a row lock.
+--           This is the fast path for the per-batch routing loop's
+--           steady-state miss: M-1 of M concurrent claimers per
+--           subscription return through here every tick with zero
+--           lock contention.
+--        c. Row exists, lease free / expired / held by self -> proceed
+--           to the locked branch below to re-verify and commit.
+--   3. Locked branch:
+--        - First-create: INSERT ... ON CONFLICT DO NOTHING. If the
+--          INSERT conflicted (because another worker raced us in
+--          between the MVCC check and the INSERT), fall through to
+--          the SKIP LOCKED branch on the now-existing row.
+--        - Re-claim: SELECT ... FOR UPDATE SKIP LOCKED. If 0 rows
+--          (someone else is mid-write on the row), return
+--          'already_claimed' -- the contention is observationally
+--          equivalent to a live lease held by that writer. If 1 row,
+--          re-verify the lease state (the MVCC snapshot may have been
+--          stale) and either UPDATE to claim or return
+--          'already_claimed'.
 --
--- Lock-set disjointness: holds the subscriptions row only. Does not
--- contend with append_to_stream's lock set.
+-- Lock-set disjointness: holds the subscriptions row only, briefly.
+-- Does not contend with append_to_stream's lock set.
 -- ----------------------------------------------------------------------------
 create or replace function instructed.claim_subscription (
   p_stream_uuid       text,
@@ -1352,6 +1369,9 @@ begin
   v_start_from := coalesce(p_options->>'start_from', 'origin');
   v_expires    := v_now + make_interval(secs => p_lease_seconds);
 
+  -- (the rest of the procedure body — stream resolution, MVCC pre-check,
+  -- locked branch — is below; the MVCC pre-check fast-path was added per
+  -- D-0025.)
   -- Resolve target stream_id ('$all' resolves to 0 via the seed row).
   select stream_id into v_stream_id
     from instructed.streams
@@ -1361,14 +1381,36 @@ begin
       using errcode = 'IS003';
   end if;
 
-  -- Lock the subscription row if it exists; insert otherwise.
+  -- ----- Step 2: MVCC pre-check (no lock) per D-0025 ------------------
+  -- The common case for the per-batch routing loop is "someone else
+  -- holds a live lease right now". An unlocked snapshot read lets
+  -- M-1 of M concurrent claimers exit through here every tick
+  -- without queueing on a row lock.
   select * into v_row
     from instructed.subscriptions
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
-   for update;
+     and shard = v_shard;
 
+  if found
+     and v_row.claimed_by is not null
+     and v_row.claimed_by <> p_worker_id
+     and v_row.claim_expires_at is not null
+     and v_row.claim_expires_at > v_now
+  then
+    -- Live lease held by another worker; surface that without locking.
+    -- The snapshot can be stale by the time the caller reads it, but
+    -- that staleness is benign: the worst case is the caller retries
+    -- and wins on a subsequent tick.
+    return query
+    select 'already_claimed'::text,
+           v_row.last_seen,
+           v_row.claimed_by,
+           v_row.claim_expires_at;
+    return;
+  end if;
+
+  -- ----- Step 3: locked branch ----------------------------------------
   if not found then
     -- First-create path. Compute initial cursor from start_from.
     if v_start_from = 'origin' then
@@ -1393,21 +1435,73 @@ begin
       end if;
     end if;
 
+    -- Race: another worker may have inserted between our MVCC check
+    -- and this INSERT. ON CONFLICT DO NOTHING lets us fall through to
+    -- the locked re-claim path on the now-existing row.
     insert into instructed.subscriptions
       (stream_id, subscription_name, shard, last_seen,
        claimed_by, claim_expires_at)
     values
       (v_stream_id, p_subscription_name, v_shard, v_initial,
-       p_worker_id, v_expires);
+       p_worker_id, v_expires)
+    on conflict (stream_id, subscription_name, shard) do nothing
+    returning last_seen into v_initial;
 
-    return query
-    select 'claimed'::text, v_initial, p_worker_id, v_expires;
+    if found then
+      return query
+      select 'claimed'::text, v_initial, p_worker_id, v_expires;
+      return;
+    end if;
+    -- INSERT lost the race; another worker created the row. Fall
+    -- through to the locked re-claim path.
+  end if;
+
+  -- Take the lock with SKIP LOCKED so we never queue on a concurrent
+  -- writer. Zero rows means "another transaction is mid-write"; we
+  -- treat that observationally as "already_claimed" and let the caller
+  -- retry on its next poll. The cursor value reported back uses the
+  -- MVCC snapshot if we have one; otherwise NULL claimed_by /
+  -- claim_expires_at carry the "unknown" signal forward.
+  select * into v_row
+    from instructed.subscriptions
+   where stream_id = v_stream_id
+     and subscription_name = p_subscription_name
+     and shard = v_shard
+   for update skip locked;
+
+  if not found then
+    -- Row exists (we either just observed it in step 2, or another
+    -- worker just inserted) but it's locked by someone else right now.
+    -- Report 'already_claimed'. Re-read the row without a lock so we
+    -- can carry useful diagnostics; if even that fails, return nulls.
+    select * into v_row
+      from instructed.subscriptions
+     where stream_id = v_stream_id
+       and subscription_name = p_subscription_name
+       and shard = v_shard;
+    if found then
+      return query
+      select 'already_claimed'::text,
+             v_row.last_seen,
+             v_row.claimed_by,
+             v_row.claim_expires_at;
+    else
+      -- The row was deleted between our checks. Treat as a transient
+      -- contention signal; the caller will retry and either create or
+      -- claim on the next poll.
+      return query
+      select 'already_claimed'::text,
+             0::bigint,
+             null::text,
+             null::timestamptz;
+    end if;
     return;
   end if;
 
-  -- Row exists. Either we can take it (unclaimed or expired) or another
-  -- worker holds a live lease. INV-SUB-P-021: start_from is ignored on
-  -- subsequent claims.
+  -- We hold the row lock. Re-verify the lease state under the lock
+  -- (the MVCC snapshot may have been stale: the lease could have
+  -- expired, or the same-worker case may apply). INV-SUB-P-021:
+  -- start_from is ignored on subsequent claims.
   if v_row.claimed_by is null
      or v_row.claim_expires_at is null
      or v_row.claim_expires_at <= v_now
@@ -1425,7 +1519,8 @@ begin
     return;
   end if;
 
-  -- A different worker holds a live lease.
+  -- Under-lock re-verify says another worker took the lease between
+  -- our MVCC pre-check and our lock. Surface that as 'already_claimed'.
   return query
   select 'already_claimed'::text,
          v_row.last_seen,

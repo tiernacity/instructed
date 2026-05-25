@@ -46,7 +46,7 @@ function startProjPair(
       routeFn: routingFnForPartitionBy({ kind: "sequential" }),
       ...(startFrom !== undefined ? { startFrom } : {}),
     },
-    { pollInterval: 25, heartbeatInterval: 1_000 },
+    { pollInterval: 25 },
   );
   const proc = startProjectionWorker(
     client,

@@ -20,8 +20,11 @@ conveniences).
 - Wrappers over the SQL procedures with SQLSTATE → typed-error translation.
 - The aggregate load-execute-append loop with OCC retry (the AGG-001..010
   semantics; `runCommand` in the TS SDK).
-- A persistent-subscription worker loop with lease + heartbeat + cursor
-  advance (the HND-* semantics; `startProjection` in the TS SDK).
+- A persistent-subscription worker loop with lease management and cursor
+  advance (the HND-* semantics; `startProjection` in the TS SDK). Under
+  [D-0025](docs/decisions.md#d-0025) the SDK's routing worker uses
+  per-batch claim/release rather than a long-lived lease + heartbeat;
+  processing workers still use a per-item lease + heartbeat.
 - Saga state persistence via the snapshot primitive.
 - A way to subscribe to the event stream.
 

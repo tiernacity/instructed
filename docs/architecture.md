@@ -125,46 +125,79 @@ kinds. Both are spun up automatically by
 them with `startRoutingWorker` + `startProjectionWorker` /
 `startPmWorker` directly.
 
-### Routing worker (single-active per subscription)
+### Routing worker (single-active per subscription, per-batch claim)
+
+The SDK's routing worker claims the subscription's lease per
+batch, not once at startup. At any single instant there is at
+most one routing worker holding the lease for a given
+subscription (INV-SUB-P-010); the *identity* of that worker
+rotates per batch across whichever processes are polling. See
+[D-0025](decisions.md#d-0025) for the rationale.
 
 ```
-claim_subscription(stream, name, worker_id, lease_seconds)
-    → 'claimed' or 'already_claimed'   -- if already_claimed, sleep + retry
-
 loop while not stopped:
-    events = read_all(last_seen + 1, batch_size)        -- or read_stream
+    result = claim_subscription(stream, name, worker_id, lease_seconds)
+    if result.result == 'already_claimed':
+        sleep poll_interval                  -- another worker is mid-batch
+        continue
+    events = read_all(result.last_seen + 1, batch_size)   -- or read_stream
     if events empty:
+        release_subscription(stream, name, worker_id)
         sleep poll_interval
         continue
     decisions = []
     for e in events:
-        d = routeFn(e)                                   -- pure; no I/O
+        d = routeFn(e)                       -- pure; no I/O; fast
         if d != "ignore":
             decisions.append((e.event_number, d.partitionKey))
-    route_batch(stream, name, worker_id, decisions, max(events).event_number)
+    try:
+        route_batch(stream, name, worker_id,
+                    decisions, max(events).event_number)
         -- ONE tx: cursor advance + work-item INSERTs
-    in parallel, every heartbeat_interval:
-        extend_subscription_claim(...)
+    catch IS022 subscription_lease_lost:
+        continue        -- lease expired mid-batch; drop and re-loop
+    release_subscription(stream, name, worker_id)
 
 on shutdown:
-    release_subscription(stream, name, worker_id)
+    release_subscription(stream, name, worker_id)   -- best-effort
 ```
 
 Key points:
 
-- `routeFn` is pure user code: no I/O, no aggregate loads. A
-  thrown routeFn stalls the worker (and is surfaced via
-  `onError`) -- the alternative, silent skip, would violate
-  "no silent skip on any event".
-- `route_batch` commits the cursor advance and the work-item
-  INSERTs in one transaction. This atomicity is load-bearing
+- **Work-stealing across processes is the natural default.** M
+  processes each running this loop for subscription S share the
+  routing load: each tick is a race for `claim_subscription`,
+  the winner does one batch, releases, and the next tick is a
+  fresh race. No process monopolises a subscription. This is
+  symmetric with the per-work-item claim model on the processing
+  side. See [D-0025](decisions.md#d-0025).
+- **`routeFn` is pure user code: no I/O, no aggregate loads,
+  fast.** "Fast" is bounded: a batch that exceeds `lease_seconds`
+  has its `route_batch` raise `IS022` and the work is redone by
+  the next worker. The right configuration is `lease_seconds`
+  comfortably larger than expected worst-case `batch_size ×
+  routeFn` duration; if you can't bound that, shrink
+  `batch_size`. A thrown `routeFn` stalls the worker (and is
+  surfaced via `onError`) — the alternative, silent skip, would
+  violate "no silent skip on any event".
+- **`route_batch` commits the cursor advance and the work-item
+  INSERTs in one transaction.** This atomicity is load-bearing
   for the catch-up predicate: once `last_seen >= N` is
   observable, the work items for events up to N are observable
   too.
-- The work-item PK absorbs duplicate INSERTs (`ON CONFLICT DO
-  NOTHING`), so a crashed mid-batch routing worker is
-  recoverable: the next routing worker re-reads from
-  `last_seen` and the re-inserts are no-ops.
+- **The work-item PK absorbs duplicate INSERTs**
+  (`ON CONFLICT DO NOTHING`). A crashed or `IS022`-aborted
+  mid-batch routing worker is recoverable: the next routing
+  worker re-reads from `last_seen` and the re-inserts are no-ops.
+- **`IS022` during `route_batch` is not fatal.** It means the
+  lease expired mid-batch (likely because `routeFn` was slower
+  than `lease_seconds`) and another worker may have taken over.
+  The SDK drops the partial batch and loops; the next
+  `claim_subscription` decides what to do.
+- **The SDK does not heartbeat.** `extend_subscription_claim`
+  remains in the SQL contract for callers implementing custom
+  routing loops above the `Client` layer; the per-batch loop
+  doesn't need it.
 
 ### Processing worker (parallel per subscription)
 
@@ -240,6 +273,36 @@ largest behaviour wins of the substrate redesign.
 There are two lease scopes under SUB-A: the subscription-level
 (routing) lease and the per-work-item (processing) lease.
 
+### Lock vs lease
+
+Two distinct mechanisms protect the routing surface, doing two
+different jobs. Earlier sketches of this document were loose
+about the distinction; getting it right matters for reasoning
+about the per-batch loop and ML-0013-style extensions.
+
+| | Postgres row lock | Application-level lease |
+|---|---|---|
+| **What** | `FOR UPDATE` on the `subscriptions` row | `claimed_by` + `claim_expires_at` columns |
+| **Held for** | The duration of one procedure call (claim / extend / route_batch / release) | The lease window the SDK negotiated (one batch under D-0025) |
+| **Released by** | `COMMIT` of the procedure call's transaction | Lease expiry, `release_subscription`, or another worker's takeover |
+| **Scope** | Microseconds | Seconds (per batch) |
+| **Enforces** | Atomic read-modify-write of one row | INV-SUB-P-010 "at most one live routing worker holds the lease at any moment" |
+
+The routing worker does **not** hold a Postgres row lock for the
+duration of a batch. `claim_subscription`'s transaction commits
+as soon as `claimed_by` / `claim_expires_at` are written; the
+row lock is released at that commit. The worker then spends its
+batch time outside any subscription-row lock, reading events and
+running `routeFn`. `route_batch` opens a second short
+transaction, briefly re-locks the row, verifies `claimed_by =
+worker_id` (this is the lease check, expressed as a column
+comparison), advances `last_seen`, INSERTs work-items, and
+commits.
+
+INV-SUB-P-010 is enforced by the application-level lease, not
+by Postgres locks. The lock just makes each procedure call
+atomic.
+
 ### Subscription-level lease (routing worker)
 
 Lives on `subscriptions.claimed_by` /
@@ -252,23 +315,38 @@ Lives on `subscriptions.claimed_by` /
   `'claimed'`.
 - If a row exists with `claim_expires_at > now()` and a
   different `claimed_by`, returns `'already_claimed'` (not an
-  error — the calling worker should back off and retry).
+  error — the calling worker backs off and retries on the next
+  poll).
 - If a row exists with the same `claimed_by`, refreshes the
-  expiry and returns `'claimed'`. (Re-attach on restart.)
+  expiry and returns `'claimed'`. (Re-attach on restart, or
+  per-batch re-claim by the same worker.)
 - If a row exists with an expired claim, takes it over,
   returns `'claimed'`.
 
-`extend_subscription_claim` is the heartbeat: routing workers
-call it periodically (typically every `lease_seconds / 3`) to
-refresh the expiry. If a routing worker pauses long enough for
-its lease to expire and another routing worker takes over, the
-original worker's next call to `extend_subscription_claim`,
-`route_batch`, or `release_subscription` raises
-`IS022 subscription_lease_lost` — its signal to stop.
+Internally, `claim_subscription` does an MVCC-snapshot
+existence + lease check before taking any row lock; only when
+the row appears free or expired does it escalate to `FOR UPDATE
+SKIP LOCKED` and re-verify under the lock. The losing side of a
+contended claim never queues on a row lock; it either reads a
+live lease from the snapshot or gets 0 rows from `SKIP LOCKED`,
+and both translate to `'already_claimed'`. See
+[D-0025](decisions.md#d-0025).
 
-`release_subscription` is the graceful shutdown — it clears
-the lease so another routing worker can claim immediately
-rather than waiting for the expiry.
+`extend_subscription_claim` is a heartbeat for callers that
+choose to hold long leases (custom routing loops above the
+`Client` layer). The SDK's built-in routing worker does **not**
+call it under D-0025 — the lease covers one batch and is
+released explicitly. If a long-lease caller pauses long enough
+for its lease to expire and another worker takes over, the
+original caller's next call to `extend_subscription_claim`,
+`route_batch`, or `release_subscription` raises
+`IS022 subscription_lease_lost`.
+
+`release_subscription` is called per batch by the SDK routing
+worker in the steady state, and also on graceful shutdown if
+the worker happens to hold the lease at that moment. It clears
+the lease so the next polling worker claims immediately rather
+than waiting for the expiry.
 
 ### Per-work-item lease (processing worker)
 
@@ -345,8 +423,8 @@ targets are exempt; they validly observe every append.
 |---|---|
 | Two appenders, same stream, same expected version | Unique constraint on `stream_events (stream_id, stream_version)`. One wins, the other gets `IS001`. |
 | Two appenders, any streams, both targeting `'any_version'` | Row lock on `streams[target]` serialises same-stream; row lock on `streams[$all]` orders globally. |
-| Two routing workers, same subscription | `claim_subscription` row lock — only one holds the subscription lease at a time; the loser sees `already_claimed`. |
-| One routing worker, action after another worker has taken over the lease | `route_batch` / `extend_subscription_claim` / `release_subscription` check `claimed_by`; raise `IS022 subscription_lease_lost` if it doesn't match. |
+| Two routing workers, same subscription | MVCC pre-check + `FOR UPDATE SKIP LOCKED` in `claim_subscription` — only one holds the subscription lease at a time; the loser sees `already_claimed` without queueing on a row lock. Under D-0025 the lease is released per batch, so the next tick is a fresh race. |
+| One routing worker, action after another worker has taken over the lease | `route_batch` / `extend_subscription_claim` / `release_subscription` check `claimed_by`; raise `IS022 subscription_lease_lost` if it doesn't match. Under D-0025 `IS022` is recoverable: the worker drops the batch and loops. |
 | Two processing workers, same subscription, same partition | Per-partition predicate in `claim_work_item` -- only the next-eligible item in a partition can be claimed; other workers skip to other partitions. Within a partition, processing is serial. |
 | Two processing workers, same subscription, different partitions | `FOR UPDATE SKIP LOCKED` on the work-items row — both workers proceed concurrently. |
 | One processing worker, terminal call after another worker has taken over its item | `complete_work_item_*` / `extend_work_item_claim` / `fail_work_item` check `claimed_by`; raise `IS030 work_item_lease_lost` if it doesn't match. |
@@ -389,8 +467,8 @@ APIs on top.
 - Procedure wrappers with `SQLSTATE → typed-error` translation.
 - The aggregate load-execute-append loop with OCC retry.
 - A **routing worker** loop (claim subscription + read events +
-  run `routeFn` + `route_batch`) with subscription-level lease
-  and heartbeat.
+  run `routeFn` + `route_batch` + release) with per-batch
+  subscription-level lease. See [D-0025](decisions.md#d-0025).
 - A **processing worker** loop (claim work item + run handler +
   terminal step) with per-item lease and heartbeat. PM
   processing additionally loads/rebuilds PM state and

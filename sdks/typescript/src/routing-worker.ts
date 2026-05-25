@@ -1,37 +1,50 @@
 /**
- * SUB-A routing worker (slice 4).
+ * SUB-A routing worker.
  *
- * One routing worker per subscription. Holds the subscription's lease
- * (via `claim_subscription` + heartbeat through `extend_subscription_claim`).
- * Reads batches from `$all` (or any single stream) past
- * `subscriptions.last_seen`, runs the user-supplied `RoutingFn` on each
- * event, and atomically writes the routing decisions + advances the
- * cursor via `route_batch`. The actual work is then picked up by
- * processing workers (slice 5+); this worker does not run handlers and
- * is unaware of subscription kind (projection vs PM).
+ * Per-batch claim/release routing worker. At any single instant there is
+ * at most one routing worker holding the subscription's lease
+ * (INV-SUB-P-010); the *identity* of the active worker rotates per batch
+ * across whichever processes are polling. This makes work-stealing across
+ * processes the natural default: spinning up a second process immediately
+ * shares routing load with the first, rather than idling on
+ * `already_claimed` until the first dies. See `docs/decisions.md`
+ * **D-0025** for the design rationale.
  *
- * Per the SUB-A design:
- *   * Routing is pure user code; no I/O, no aggregate loads. If a
- *     RoutingFn throws, the worker stalls and surfaces the error via
- *     `onError` — the alternative (silent skip) violates the "no
- *     silent skip" contract.
+ * The loop:
+ *
+ *   1. claim_subscription(stream, name, workerId, leaseSeconds)
+ *   2. if 'already_claimed' -> sleep pollInterval; goto 1
+ *   3. readAll(lastSeen + 1, batchSize) (or readStream)
+ *   4. if empty -> release_subscription; sleep pollInterval; goto 1
+ *   5. for each event: routeFn -> decisions[]
+ *   6. route_batch (atomic: cursor advance + work-item INSERTs)
+ *      - on IS022 (subscription_lease_lost): drop the batch; goto 1
+ *   7. release_subscription
+ *   8. goto 1
+ *
+ * Key contract points:
+ *
+ *   * `routeFn` is pure user code: no I/O, no aggregate loads, **fast**.
+ *     "Fast" is bounded by `leaseSeconds`: a batch whose `route_batch`
+ *     fires after the lease expires gets `IS022` and the work is
+ *     redone. Configure `leaseSeconds` comfortably larger than expected
+ *     worst-case `batchSize × routeFn` duration; if you can't bound
+ *     that, shrink `batchSize`.
+ *   * A thrown routeFn stalls the worker (and is surfaced via
+ *     `onError`); the alternative -- silent skip -- would violate the
+ *     "no silent skip" contract.
  *   * `route_batch` commits the cursor advance and the work-item
- *     INSERTs in one transaction. This is the load-bearing atomicity
- *     for waitForProjection's race safety: once `last_seen >= N` is
+ *     INSERTs in one transaction. This atomicity is load-bearing for
+ *     waitForProjection's race safety: once `last_seen >= N` is
  *     observable, the corresponding work items are observable too.
  *   * The routing cursor is monotone; a crashed mid-batch worker that
  *     restarts re-reads the same events and the work-item PK absorbs
- *     duplicate INSERTs (ON CONFLICT DO NOTHING in the SQL
- *     procedure).
- *
- * Lifecycle / lease handling mirror `startProjection`: claim ->
- * heartbeat -> poll loop -> release on close. Lease loss aborts the
- * loop via the shared `AbortSignal`.
- *
- * Not yet exposed via `src/index.ts`. The Layer-5 facade
- * (`Instructed.registerProjection` / `registerProcessManager`) wires
- * the routing worker together with the processing worker in slice 9;
- * tests for this slice import the module directly.
+ *     duplicate INSERTs (`ON CONFLICT DO NOTHING` in the SQL
+ *     procedure). The same property absorbs duplicates from an
+ *     `IS022`-aborted batch.
+ *   * The SDK does **not** heartbeat. `extend_subscription_claim`
+ *     remains in the SQL contract for custom long-lease loops above
+ *     the `Client` layer; this worker doesn't call it.
  */
 
 import type { Client } from "./client.ts";
@@ -58,7 +71,7 @@ export interface RoutingDefinition<E = unknown> {
   name: string;
   /** Source stream; default `$all`. */
   stream?: string;
-  /** Per-event routing decision. Pure: no I/O, no side-effects. */
+  /** Per-event routing decision. Pure, deterministic, no I/O, fast. */
   routeFn: RoutingFn<E>;
   /** Honoured only on the first claim that creates the subscription. */
   startFrom?: StartFrom;
@@ -68,23 +81,22 @@ export interface RoutingWorkerOptions {
   workerId?: string;
   /** Max events fetched per readAll round-trip. Default 100. */
   batchSize?: number;
-  /** Lease duration in seconds. Default 30. */
+  /**
+   * Lease duration in seconds. Default 30. Bounds the per-batch
+   * processing budget: if a batch overruns this, route_batch raises
+   * IS022 and the work is redone by the next worker.
+   */
   leaseSeconds?: number;
-  /** Heartbeat tick in ms. Default = `leaseSeconds * 1000 / 3`. */
-  heartbeatInterval?: number;
   /** Idle poll interval in ms. Default 200. */
   pollInterval?: number;
-  /** Called for routing-fn errors, lease loss, and other fatal events. */
+  /** Called for routing-fn errors and other fatal events. */
   onError?: (err: Error) => void;
 }
 
-// Defaults exported for re-use by the facade (slice 9) and tests.
+// Defaults exported for re-use by the facade and tests.
 export const DEFAULT_ROUTING_BATCH_SIZE = 100;
 export const DEFAULT_ROUTING_LEASE_SECONDS = 30;
 export const DEFAULT_ROUTING_POLL_INTERVAL_MS = 200;
-
-/** Single retry delay on a non-lease-loss heartbeat error. */
-const HEARTBEAT_RETRY_DELAY_MS = 250;
 
 export function startRoutingWorker<E = unknown>(
   client: Client,
@@ -95,8 +107,6 @@ export function startRoutingWorker<E = unknown>(
   const workerId = opts.workerId ?? defaultWorkerId();
   const batchSize = opts.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE;
   const leaseSeconds = opts.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS;
-  const heartbeatInterval =
-    opts.heartbeatInterval ?? Math.max(1_000, (leaseSeconds * 1000) / 3);
   const pollInterval = opts.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS;
   const onError = opts.onError ?? noopOnError;
 
@@ -106,7 +116,13 @@ export function startRoutingWorker<E = unknown>(
   let closing = false;
   let aborted = false;
   let closePromise: Promise<void> | null = null;
-  let lastSeen = 0n;
+  /**
+   * Tracks whether we currently hold the lease. Set to true after a
+   * successful claim_subscription returning 'claimed'; cleared after
+   * release_subscription, IS022, or fatal error. Used by the close
+   * path to decide whether to attempt a final release.
+   */
+  let holdingLease = false;
 
   let resolveStopped!: () => void;
   const stopped = new Promise<void>((res) => {
@@ -132,63 +148,23 @@ export function startRoutingWorker<E = unknown>(
     }
   }
 
-  async function heartbeatLoop(): Promise<void> {
-    while (!closing && !aborted) {
-      await sleep(heartbeatInterval, signal);
-      if (closing || aborted) break;
-      try {
-        await client.extendSubscriptionClaim(
-          stream,
-          def.name,
-          workerId,
-          leaseSeconds,
-        );
-        continue;
-      } catch (err) {
-        if (isLeaseLoss(err)) {
-          markAborted(err as Error);
-          return;
-        }
-        await sleep(HEARTBEAT_RETRY_DELAY_MS, signal);
-        if (closing || aborted) return;
-        try {
-          await client.extendSubscriptionClaim(
-            stream,
-            def.name,
-            workerId,
-            leaseSeconds,
-          );
-          continue;
-        } catch (err2) {
-          if (!isLeaseLoss(err2)) safeOnError(err2 as Error);
-          markAborted(err2 as Error);
-          return;
-        }
-      }
-    }
-  }
-
+  /**
+   * Route the events in `batch`. Returns the decisions array and the
+   * highest event_number to advance the cursor to, or null if the
+   * batch must be dropped (close/abort mid-iteration, or a fatal
+   * user-code error already surfaced via markAborted).
+   */
   async function routeOneBatch(
     batch: RecordedEvent<E>[],
   ): Promise<{ decisions: RouteDecision[]; cursorTo: bigint } | null> {
     const decisions: RouteDecision[] = [];
     let cursorTo: bigint | null = null;
     for (const event of batch) {
-      if (closing || aborted) {
-        // Drop the partial batch. The slice-4 acceptance contract is
-        // "crash mid-batch leaves cursor un-advanced"; a graceful
-        // close mid-batch behaves the same. The re-launched worker
-        // re-reads from lastSeen and ON CONFLICT DO NOTHING absorbs
-        // any rows that hypothetically would have been re-routed.
-        return null;
-      }
+      if (closing || aborted) return null;
       let d: RoutingDecision;
       try {
         d = await def.routeFn(event);
       } catch (err) {
-        // Routing is pure user code; a throw is fatal. Stop the worker
-        // without advancing the cursor; an operator must fix the
-        // routeFn before re-launching. (SUB-A "no silent skip".)
         markAborted(
           err instanceof Error
             ? err
@@ -196,8 +172,6 @@ export function startRoutingWorker<E = unknown>(
         );
         return null;
       }
-      // §11.1-equivalent: if the abort fired during the routeFn await
-      // and the routeFn still resolved, the SDK MUST drop the batch.
       if (closing || aborted) return null;
       cursorTo = event.event_number;
       if (d === "ignore") continue;
@@ -220,107 +194,121 @@ export function startRoutingWorker<E = unknown>(
 
   async function loop(): Promise<void> {
     try {
-      // ---- claim ----
-      try {
-        const claimOpts =
-          def.startFrom !== undefined ? { startFrom: def.startFrom } : {};
-        const r = await client.claimSubscription(
-          stream,
-          def.name,
-          workerId,
-          leaseSeconds,
-          claimOpts,
-        );
-        if (r.result === "already_claimed") {
-          safeOnError(
-            new SubscriptionLeaseLost(
-              `routing worker: subscription ${def.name} on ${stream} is already claimed by ${r.claimedBy}`,
-              {
-                code: "IS022",
-                streamUuid: stream,
-                subscriptionName: def.name,
-                holder: r.claimedBy,
-              },
-            ),
+      while (!closing && !aborted) {
+        // ---- claim ----
+        let claimed: { lastSeen: bigint };
+        try {
+          const claimOpts =
+            def.startFrom !== undefined ? { startFrom: def.startFrom } : {};
+          const r = await client.claimSubscription(
+            stream,
+            def.name,
+            workerId,
+            leaseSeconds,
+            claimOpts,
           );
+          if (r.result === "already_claimed") {
+            // Another worker holds the lease for this batch; back off
+            // and try again next tick. NOT fatal under D-0025.
+            await sleep(pollInterval, signal);
+            continue;
+          }
+          claimed = { lastSeen: r.lastSeen };
+          holdingLease = true;
+        } catch (err) {
+          // Genuine errors (stream not found, bad args, transport
+          // failures). Surface and exit.
+          safeOnError(err as Error);
           return;
         }
-        lastSeen = r.lastSeen;
-      } catch (err) {
-        safeOnError(err as Error);
-        return;
-      }
 
-      // ---- heartbeat ----
-      const hb = heartbeatLoop().catch(() => {
-        /* swallowed; heartbeatLoop sets aborted on its own */
-      });
-
-      try {
-        // ---- poll loop ----
-        while (!closing && !aborted) {
-          let batch: RecordedEvent<E>[];
-          try {
-            // readAll's first arg is an inclusive lower bound on
-            // event_number; we want strictly after lastSeen.
-            batch =
-              stream === "$all"
-                ? await client.readAll<E>(lastSeen + 1n, batchSize)
-                : await client.readStream<E>(stream, lastSeen + 1n, batchSize);
-          } catch (err) {
-            safeOnError(err as Error);
-            await sleep(pollInterval, signal);
-            continue;
-          }
-
-          if (batch.length === 0) {
-            await sleep(pollInterval, signal);
-            continue;
-          }
-
-          const routed = await routeOneBatch(batch);
-          if (routed === null) {
-            // routeOneBatch returns null on a fatal user-code error
-            // (already markAborted-ed) or when nothing was processed
-            // because of close/abort mid-iteration. Either way: exit.
-            break;
-          }
-
-          // Advance the cursor + insert work items atomically.
-          try {
-            await client.routeBatch(
-              stream,
-              def.name,
-              workerId,
-              routed.cursorTo,
-              routed.decisions,
-            );
-            lastSeen = routed.cursorTo;
-          } catch (err) {
-            if (isLeaseLoss(err)) {
-              markAborted(err as Error);
-              break;
-            }
-            safeOnError(err as Error);
-            // Cursor not advanced; re-route the same events next iter.
-            await sleep(pollInterval, signal);
-          }
+        if (closing || aborted) {
+          await releaseQuietly();
+          break;
         }
-      } finally {
-        ac.abort();
-        await hb;
-      }
 
-      // ---- release (best-effort) ----
-      try {
-        await client.releaseSubscription(stream, def.name, workerId);
-      } catch (err) {
-        if (!isLeaseLoss(err) && !(err instanceof SubscriptionNotFound)) {
+        // ---- read ----
+        let batch: RecordedEvent<E>[];
+        try {
+          batch =
+            stream === "$all"
+              ? await client.readAll<E>(claimed.lastSeen + 1n, batchSize)
+              : await client.readStream<E>(
+                  stream,
+                  claimed.lastSeen + 1n,
+                  batchSize,
+                );
+        } catch (err) {
           safeOnError(err as Error);
+          await releaseQuietly();
+          await sleep(pollInterval, signal);
+          continue;
         }
+
+        if (batch.length === 0) {
+          // No work; release the lease so another process can claim
+          // immediately, then poll-sleep.
+          await releaseQuietly();
+          await sleep(pollInterval, signal);
+          continue;
+        }
+
+        // ---- route ----
+        const routed = await routeOneBatch(batch);
+        if (routed === null) {
+          // Either: (a) the user-code routeFn threw and markAborted
+          // fired (we'll exit the outer loop), or (b) close/abort hit
+          // mid-iteration. Either way: drop the batch, release if we
+          // can, exit.
+          await releaseQuietly();
+          break;
+        }
+
+        // ---- commit ----
+        try {
+          await client.routeBatch(
+            stream,
+            def.name,
+            workerId,
+            routed.cursorTo,
+            routed.decisions,
+          );
+        } catch (err) {
+          if (isLeaseLoss(err)) {
+            // The lease expired mid-batch (likely a slow routeFn) and
+            // another worker may have taken over. Drop the batch and
+            // loop. Not fatal under D-0025; the work-item PK absorbs
+            // any duplicates the other worker may have already
+            // routed.
+            holdingLease = false;
+            continue;
+          }
+          safeOnError(err as Error);
+          await releaseQuietly();
+          await sleep(pollInterval, signal);
+          continue;
+        }
+
+        // ---- release ----
+        await releaseQuietly();
       }
     } finally {
+      // Best-effort final release if we still hold the lease.
+      await releaseQuietly();
       resolveStopped();
+    }
+  }
+
+  async function releaseQuietly(): Promise<void> {
+    if (!holdingLease) return;
+    holdingLease = false;
+    try {
+      await client.releaseSubscription(stream, def.name, workerId);
+    } catch (err) {
+      if (!isLeaseLoss(err) && !(err instanceof SubscriptionNotFound)) {
+        // Surface but don't abort — release is best-effort.
+        safeOnError(err as Error);
+      }
     }
   }
 

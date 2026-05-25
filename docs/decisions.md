@@ -435,3 +435,122 @@ with sensible defaults; callers who care override."
 - No SQL-contract change. `events.causation_id` and
   `events.correlation_id` are already nullable; the SDK is the
   only thing that decides when to fill them.
+
+---
+
+## D-0025 — Routing workers claim per batch, not per worker lifetime
+
+The SDK's routing worker loop claims and releases the subscription
+lease around each batch, not once at startup with a heartbeat. The
+schema is unchanged; the loop shape and `claim_subscription`'s
+internal locking are tightened to make work-stealing across
+processes the natural default.
+
+**Why:** v1's stated operational property is "any routing worker
+can pick up routing work" — spinning up a second process should
+immediately share routing load with the first, not idle waiting for
+the first to die. The earlier loop sketch in `architecture.md`
+(claim-once + heartbeat + poll + release-on-shutdown) gave one
+worker process *de facto* ownership of every subscription it
+touched at startup; a second process would observe `already_claimed`
+on every claim and never route until the first failed. That is
+the failover model, not the work-stealing model.
+
+Reshaping the loop to claim-per-batch eliminates the monopoly
+without introducing a new axis of parallelism (no concurrent
+routing workers; ML-0013 stays deferred). At any instant there is
+still exactly one routing worker per subscription; the active
+worker just rotates per batch across whichever processes are
+running.
+
+**The loop shape:**
+
+```
+loop while not closing:
+  result = claim_subscription(stream, name, workerId, leaseSeconds)
+  if result.result == 'already_claimed':
+    sleep(pollInterval); continue
+  events = readAll(result.lastSeen + 1, batchSize)
+  if events.empty:
+    release_subscription(...); sleep(pollInterval); continue
+  decisions = [...routeFn per event...]
+  try:
+    route_batch(stream, name, workerId, lastEventNumber, decisions)
+  catch IS022 subscription_lease_lost:
+    continue            -- the batch is dropped; next claim decides
+  release_subscription(stream, name, workerId)
+```
+
+The lease covers one batch. `extend_subscription_claim` is no
+longer called by the SDK routing worker (the procedure stays in
+the SQL contract for callers who want long-lease semantics above
+the `Client` layer). `IS022` during `route_batch` is not fatal;
+it means "your lease expired mid-batch, another worker may have
+claimed; drop this batch and loop". The work-item PK +
+`ON CONFLICT DO NOTHING` absorbs any duplicate INSERTs the dropped
+batch would have caused.
+
+**`claim_subscription` locking change.** With M processes polling
+K subscriptions, every tick produces M − 1 losing claim attempts
+per subscription. Under plain `SELECT ... FOR UPDATE`, each loser
+briefly blocks on the winner's row lock. To eliminate that:
+`claim_subscription` does an MVCC-snapshot existence + lease
+check first (no lock); only when the row appears free / expired
+does it take `FOR UPDATE SKIP LOCKED` and re-verify under the
+lock. Losers either return `'already_claimed'` from the snapshot
+read (live lease held by someone else) or fall through to a 0-row
+`SKIP LOCKED` result (someone else is mid-write) — in both cases
+the caller sees `'already_claimed'` without ever queueing on a
+lock.
+
+**Lock vs lease.** The schema distinguishes two mechanisms that
+the earlier sketch was loose about:
+
+- **Postgres row lock** — held by `FOR UPDATE` inside one
+  procedure call (claim / extend / route_batch / release).
+  Microseconds. Released at commit.
+- **Application-level lease** — the `claimed_by` /
+  `claim_expires_at` columns. Consulted by `route_batch` etc.
+  via column comparison, not via lock holding. Lives for the
+  duration the SDK chooses (per-batch under D-0025; per-worker-
+  lifetime under the old sketch).
+
+INV-SUB-P-010 ("at most one live routing worker holds the lease
+at any moment") is enforced by the application-level lease, not
+by Postgres row locks. The lock just keeps each procedure call's
+read-modify-write atomic.
+
+**RouteFn requirements (sharpened):** pure, deterministic, no
+I/O, fast. Pure + deterministic because routing must be
+replayable — `route_batch`'s PK absorbs duplicates only if the
+second routing of the same event computes the same decision. No
+I/O because routing latency is on the critical path between
+append and projection visibility, scaled by event volume.
+**Fast** specifically because routeFn duration is bounded above
+by `leaseSeconds`: a batch that exceeds its lease has its
+`route_batch` raise `IS022` and the work is redone by the next
+worker. The right configuration is `leaseSeconds` comfortably
+larger than the expected worst-case `batch_size × routeFn`
+duration; if you can't bound that, shrink `batch_size`.
+
+**Implications:**
+
+- SDK option `heartbeatInterval` is removed from
+  `RoutingWorkerOptions` (the SDK no longer heartbeats). The
+  `extend_subscription_claim` SQL procedure remains.
+- `claim_subscription` returning `'already_claimed'` is no
+  longer a fatal startup error in the SDK; it is a back-off
+  signal handled inside the loop.
+- `route_batch` raising `IS022` is no longer fatal; the worker
+  drops the partial batch and loops.
+- `release_subscription` is called per batch in the steady
+  state, not only on shutdown.
+- No SQL contract change: `claim_subscription`'s input/output
+  shape and error set are unchanged. The internal locking is
+  tightened; the externally-observable behaviour envelope is
+  unchanged. All existing conformance tests pass unmodified.
+- ML-0013 (concurrent sharded routing) is **not** addressed by
+  this decision and stays deferred. The work-stealing this
+  decision enables is single-active-per-instant routing with
+  per-batch rotation across processes — a different axis from
+  ML-0013's concurrent live workers on disjoint shards.

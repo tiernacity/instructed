@@ -28,7 +28,7 @@ above) is the authoritative source.
 | 3/8  | Part C — Read (INV-READ-*)             | done           |
 | 4/8  | Part D — Snapshots (INV-SNAP-*)        | done           |
 | 5/8  | Part E persistent (INV-SUB-P-*)        | done           |
-| 6/8  | Part E partitioned (skipped, D-0024)   | done           |
+| 6/8  | Part E partitioned                     | n/a — sharded routing unbuilt, see ML-0013 |
 | 7/8  | Part E transient + Part F cross-cutting| done           |
 | 8/8  | Coverage reporter + non-goals reconcile| done           |
 | —    | SUB-A re-fit (TODO #11)                | done (2026-05-25) |
@@ -107,9 +107,12 @@ INV-SUB-P-010, 011 *[mechanism-only; composed lease-takeover →
 IS022 case in subscription-persistent.test.ts]*, 012,
 INV-SUB-P-020, 021,
 INV-SUB-P-030, 031, 032, 033, 034,
-INV-SUB-P-040, 041, 042 *[deferred per D-0024 / ML-0013]*,
 INV-SUB-P-050. *Above adapter line per D-0023 / ML-0003.*
 INV-SUB-P-060, 061, 062.
+
+*(INV-SUB-P-040/041/042 omitted: sharded routing is unbuilt; see
+`docs/maybe-later.md` ML-0013. The previously stubbed
+`subscription-partitioned.test.ts` has been removed.)*
 
 ### Part E — Subscriptions (work queue, SUB-A)
 INV-SUB-W-001, 002, 003 *[mechanism-only]*,

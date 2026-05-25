@@ -10,13 +10,28 @@ leases.
 
 Under SUB-A (slice 11 re-baseline), each projector / PM "slot"
 actually owns a *pair* of workers: a routing worker (single-active
-per subscription — turns events into `subscription_work_items`
-rows) and a processing worker (claims work items and runs the
-handler — multiple may be active concurrently per subscription).
-The slot-respawn and lease-theft failure injections operate on the
-pair; lease theft specifically affects only the routing-side lease,
-which is the only place a subscription-level lease lives under
-SUB-A.
+per subscription at any single instant — turns events into
+`subscription_work_items` rows) and a processing worker (claims
+work items and runs the handler — multiple may be active
+concurrently per subscription). The slot-respawn and lease-theft
+failure injections operate on the pair; lease theft specifically
+affects only the routing-side lease.
+
+Under [D-0025](../../docs/decisions.md#d-0025) the routing worker
+claims and releases the subscription lease *per batch*. With N
+slots competing for one subscription, all N slots actively share
+routing work batch-by-batch — the active routing-worker identity
+rotates per batch across whichever slots are polling, rather than
+one slot winning at startup and holding the lease until
+respawn/theft. The soak harness's multi-slot competition is
+therefore a real work-stealing scenario in-process; the
+INV-SUB-P-LEASE-UNIQ continuous-sampler check still holds (at most
+one live claim per subscription at any sampled instant) but the
+claim is now usually rotating rather than pinned. Lease theft
+manifests to a victim worker as an `IS022` on its in-flight
+`route_batch` (recoverable: drop the batch and re-claim on the
+next tick) or as `already_claimed` on its next claim (back off
+and retry); neither aborts the worker.
 
 Scope:
 
@@ -99,9 +114,12 @@ Mechanisms composed under SUB-A:
   mixes in exogenous `expected.any` writes so both append modes get
   tested).
 - **Routing-side rebalancing.** Multi-slot competition for the
-  single routing lease per subscription, with short lease TTL and
-  active lease theft. Only one routing worker per subscription is
-  active at a time; the others wait.
+  single-active routing lease per subscription, with short lease
+  TTL and active lease theft. Under D-0025 the lease is claimed
+  and released per batch, so the slots share routing work
+  batch-by-batch — the harness's `--projectors N` / `--pms N`
+  exercise genuine work-stealing across N slots rather than
+  failover from one designated owner.
 - **Processing-side parallelism.** All `--projectors` /
   `--pms` slots run their processing workers simultaneously, racing
   for work items via `claim_work_item` (`FOR UPDATE SKIP LOCKED`).

@@ -72,7 +72,7 @@ raises it. SDKs that see it have bypassed the contract.
 
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
-| `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire routing-side lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else |
+| `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire routing-side lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else or the row is being concurrently written. Uses MVCC pre-check + `FOR UPDATE SKIP LOCKED` internally per [D-0025](decisions.md#d-0025) so contended callers never queue on a row lock. |
 | `extend_subscription_claim`     | `(claim_expires_at)`     | Routing-worker heartbeat |
 | `release_subscription`          | `void`                   | Clean release; cursor and queue preserved |
 | `read_subscription_position`    | `(last_seen)`            | Read routing cursor |
@@ -214,31 +214,38 @@ append:
 Per D-0005, retry on `IS001` is the per-aggregate serialisation
 mechanism; there is no advisory lock.
 
-### Routing worker (SUB-A, [D-0002](decisions.md#d-0002))
+### Routing worker (SUB-A, [D-0002](decisions.md#d-0002), [D-0025](decisions.md#d-0025))
 
-One routing worker per subscription, single-active via the
-subscription lease. Reads events past the cursor, runs the
+One routing worker per subscription at any single instant,
+single-active via the subscription lease. The SDK's default loop
+claims and releases the lease per batch ([D-0025](decisions.md#d-0025))
+so the active worker identity rotates per batch across whichever
+processes are polling. Reads events past the cursor, runs the
 user's `routeFn` per event, atomically writes the new cursor +
 work-item rows.
 
 ```text
-claim_subscription(stream, name, worker_id, lease_secs)
 loop:
-  events = read_all(last_seen + 1, batch_size)    -- or read_stream
-  if events empty: sleep poll_interval; continue
+  result = claim_subscription(stream, name, worker_id, lease_secs)
+  if result.result == 'already_claimed':
+    sleep poll_interval; continue
+  events = read_all(result.last_seen + 1, batch_size)   -- or read_stream
+  if events empty:
+    release_subscription(stream, name, worker_id)
+    sleep poll_interval; continue
   decisions = []
   for e in events:
-    d = routeFn(e)                                -- pure user code
+    d = routeFn(e)                                -- pure; no I/O; fast
     if d != "ignore":
       decisions.append((e.event_number, d.partitionKey))
   BEGIN  -- single atomic tx
     route_batch(stream, name, worker_id, decisions,
                 new_cursor = max(events).event_number)
+      -- on IS022: drop batch, continue loop
   COMMIT
-  -- heartbeat in parallel:
-  extend_subscription_claim(...)                  -- on IS022: stop
-on graceful shutdown:
   release_subscription(stream, name, worker_id)
+on graceful shutdown:
+  release_subscription(stream, name, worker_id)   -- best-effort
 ```
 
 `route_batch` is the only place the routing-cursor advance and
@@ -246,9 +253,15 @@ the work-item INSERTs commit together. This atomicity is
 load-bearing for the catch-up predicate ([INV-SUB-CATCHUP-001]):
 once `last_seen >= N` is observable, the work items for events
 up to N are observable too. The work-items PK absorbs duplicate
-INSERTs (`ON CONFLICT DO NOTHING`), so a crashed mid-batch
-routing worker is recoverable: the next worker re-reads from
-`last_seen` and the re-inserts are no-ops.
+INSERTs (`ON CONFLICT DO NOTHING`), so a crashed or
+`IS022`-aborted mid-batch routing worker is recoverable: the
+next worker re-reads from `last_seen` and the re-inserts are
+no-ops.
+
+Under D-0025 the SDK does not call `extend_subscription_claim`;
+the lease covers one batch and is released explicitly. The
+procedure remains in the contract for callers implementing
+custom long-lease routing loops above the `Client` layer.
 
 ### Processing worker (SUB-A, [D-0016](decisions.md#d-0016))
 
