@@ -176,100 +176,188 @@ infrastructure errors.
 
 ## Store contract — Part E — Subscriptions
 
-Subscriptions are persistent, leased, and addressed by
-`(stream_uuid, name)` (with a reserved `shard` dimension for a
-future partitioned-consumer extension; v1 uses `shard = 0`).
+A subscription is a **routing cursor** plus a **work queue**:
+
+- The cursor (`subscriptions.last_seen`) is advanced by a
+  single-active **routing worker** that turns events into work
+  items.
+- The queue (`subscription_work_items`) carries one row per
+  routed event per partition. Items are claimed and processed
+  by **N processing workers in parallel**, distributed by
+  `FOR UPDATE SKIP LOCKED` plus a per-partition predicate that
+  preserves within-partition ordering.
+
+The routing-side lease lives on the `subscriptions` row. The
+processing-side lease lives on each `subscription_work_items`
+row. The two are unrelated: a processing worker does NOT take
+a subscription lease, and a routing worker does NOT claim work
+items.
+
+The `INV-SUB-P-*` series describes the routing-side invariants;
+the `INV-SUB-W-*` series describes the work-queue invariants.
+Identity is `(stream_uuid, name)` with a reserved `shard`
+dimension at v1 default 0 for a future operator-facing shard
+extension.
 
 ### Identity
 
 - **INV-SUB-P-001** — Identity is `(stream_uuid, name)`. Two
   subscriptions with the same pair are the same subscription.
-- **INV-SUB-P-002** — Claiming a subscription that already exists
-  attaches to its existing cursor; `start_from` is ignored.
+- **INV-SUB-P-002** — Claiming a subscription that already
+  exists attaches to its existing cursor; `start_from` is
+  ignored.
 
-### Single-active-worker
+### Routing worker — single-active
 
-- **INV-SUB-P-010** — At most one live worker holds the lease
-  for a subscription at any moment. Other workers calling
-  `claim_subscription` get a non-error `'already_claimed'`
-  result row.
+- **INV-SUB-P-010** — At most one live routing worker holds the
+  subscription lease at any moment. Other routing workers
+  calling `claim_subscription` get a non-error
+  `'already_claimed'` result row.
 - **INV-SUB-P-011** `[mechanism-only]` — Realised via the
   `claimed_by` / `claim_expires_at` columns on the subscription
-  row with TTL-bounded leases. A worker calling
-  `read_subscription_batch`, `advance_subscription`,
-  `extend_subscription_claim`, or `release_subscription` whose
-  `worker_id` does not match the current `claimed_by` raises
-  `IS022 subscription_lease_lost`.
-- **INV-SUB-P-012** — When a live worker fails (process exit,
-  network failure, lease expiry without renewal), its slot
-  MUST become available for another worker without
-  administrative action.
+  row with TTL-bounded leases. A routing worker whose
+  `worker_id` no longer matches the current `claimed_by` raises
+  `IS022 subscription_lease_lost` on its next
+  `extend_subscription_claim`, `route_batch`, or
+  `release_subscription`.
+- **INV-SUB-P-012** — When a routing worker fails (process exit,
+  network failure, lease expiry without renewal), the
+  subscription slot MUST become available for another routing
+  worker without administrative action.
 
 ### Start position
 
 - **INV-SUB-P-020** — On *first* claim, `start_from` determines
   the initial cursor: `'origin'` → start at 0 (first event
-  delivered is #1); `'current'` → start at the current global
-  head; integer N → start at N (first event delivered is #N+1).
+  routed is #1); `'current'` → start at the current global
+  head; integer N → start at N (first event routed is #N+1).
 - **INV-SUB-P-021** — On *subsequent* claims with the same
   identity, `start_from` is ignored; the cursor resumes from
   `last_seen`.
 
-### Delivery and ack
+### Routing-cursor advance
 
-- **INV-SUB-P-030** — Events are delivered in strictly
-  increasing order: by `stream_version` for single-stream
-  subscriptions, by `event_number` for `$all` subscriptions.
-- **INV-SUB-P-031** — Delivery is at-least-once. An event the
-  worker fails to ack before disconnecting redelivers on the
-  next claim.
-- **INV-SUB-P-032** — `advance_subscription` advances the
-  cursor to a caller-supplied position. Acking position N is
-  taken as acknowledging all events up to and including N.
-- **INV-SUB-P-033** — The cursor MUST NOT advance past unacked
-  events. (In-flight buffer past the cursor is permitted, as
-  long as the durable cursor does not move.)
-- **INV-SUB-P-034** — `advance_subscription` is monotone: a
-  call to advance to a position lower than the current
+- **INV-SUB-P-030** — The routing cursor (`last_seen`) advances
+  in event-number space (for `$all` subscriptions) or
+  event-number space against the source stream (for per-stream
+  subscriptions). It is strictly non-decreasing; concurrent
+  re-reads after a routing-worker takeover are absorbed by the
+  monotone advance ([INV-SUB-P-034]).
+- **INV-SUB-P-031** — At-least-once delivery: a work item
+  whose processing worker fails to call
+  `complete_work_item_*` before its lease expires is redelivered
+  to another processing worker.
+- **INV-SUB-P-032** — `route_batch` advances `last_seen` and
+  INSERTs the new work-item rows in **one transaction**. A
+  reader observing `last_seen >= N` MUST also see the
+  corresponding work-item rows for every routed event up to N
+  (load-bearing for the SUB-A catch-up predicate; see
+  [INV-SUB-CATCHUP-001]).
+- **INV-SUB-P-033** — The routing cursor MAY advance past
+  events that route to `"ignore"` (no work item written for
+  them). It MUST NOT advance past events that the routing
+  worker has not yet inspected.
+- **INV-SUB-P-034** — The routing cursor is monotone: a
+  `route_batch` advancing to a position lower than the current
   `last_seen` is silently absorbed (no regression).
-
-### Partitioned consumers — deferred
-
-- **INV-SUB-P-040 / 041 / 042** — Multi-worker subscriptions
-  with optional `partition_by` are **deferred** in v1; the
-  conformance harness has placeholder `test.skip` slots. See
-  [`maybe-later.md`](maybe-later.md) ML-0001 for the
-  forward-compatibility constraints on the v1 schema.
-
-### Selector — above the adapter line
-
-- **INV-SUB-P-050** — A selector predicate, if supplied, filters
-  events before delivery. Events for which the predicate
-  returns false are not delivered, **but the cursor MUST still
-  advance past them** (otherwise an unmatched event would
-  permanently block the subscription).
-
-  Realised SDK-side in v1: the SDK reads a batch from the store,
-  applies the predicate locally, invokes the handler only for
-  matches, and advances the cursor to the last *fetched*
-  event_number. A future server-side variant is allowed; see
-  [`maybe-later.md`](maybe-later.md) ML-0003.
 
 ### Lifecycle
 
 - **INV-SUB-P-060** — `release_subscription` detaches a live
-  worker. The cursor is preserved; a subsequent claim resumes
-  from `last_seen`.
+  routing worker. The cursor and the queue are preserved; a
+  subsequent claim resumes from `last_seen`.
 - **INV-SUB-P-061** — `delete_subscription` removes the row.
+  By the schema's `ON DELETE CASCADE` from
+  `subscription_work_items.subscription_*` to `subscriptions`,
+  every queued work item for the subscription is also removed.
   A subsequent claim with the same identity behaves as a first
   claim (honours `start_from`).
 - **INV-SUB-P-062** — `delete_subscription` on a non-existent
   subscription raises `IS020 subscription_not_found`.
 
-### Closed error set for subscriptions
+### Closed error set for the routing-worker surface
 
 `IS020 subscription_not_found`, `IS022 subscription_lease_lost`,
 plus standard Postgres infrastructure errors.
+
+### Work queue (`INV-SUB-W-*`)
+
+- **INV-SUB-W-001** — Each row in `subscription_work_items` is
+  identified by `(stream_id, subscription_name, shard,
+  partition_key, event_number)`. The PK absorbs duplicate
+  INSERTs on routing-worker re-run (after crash, after
+  takeover), making `route_batch` idempotent.
+- **INV-SUB-W-002** — State machine:
+  `pending → claimed → (done | failed)`.
+  - `pending`: just routed; not yet claimed.
+  - `claimed`: a processing worker holds a per-item lease.
+    `claimed_by` and `lease_expires_at` are both set.
+  - `done`: terminal-success (PM path -- the row stays for
+    catch-up bookkeeping and for PM-state rebuild). Projection
+    path DELETEs the row directly without an intermediate
+    `done` state.
+  - `failed`: terminal-failure, operator-only resolution. The
+    soak harness and the default error policy never produce
+    these; explicit `fail_work_item` (reserved for a future
+    `quarantineAfter` convenience wrapper) does. `error_text`
+    is non-null on `failed` rows.
+- **INV-SUB-W-003** `[mechanism-only]` — Per-state column
+  invariants are enforced by CHECK constraints on the row:
+  `claimed ⇔ (claimed_by AND lease_expires_at)`,
+  `failed ⇔ failed_at`, `error_text` only on `failed` rows.
+- **INV-SUB-W-010** — Per-partition ordering: at most one
+  *unexpired-claimed* work item per
+  `(subscription, partition_key)`, and `claim_work_item`
+  refuses to claim a row whose partition has a predecessor in
+  any non-terminal state with a lower `event_number`. This is
+  what makes per-partition processing serial.
+- **INV-SUB-W-011** — Across partitions, processing is
+  concurrent: `claim_work_item` distributes work across
+  partitions via `FOR UPDATE SKIP LOCKED`. The number of
+  partitions a subscription has determines its maximum
+  processing parallelism.
+- **INV-SUB-W-012** — A processing worker that takes over an
+  expired `claimed` row (lease takeover) sees the same work
+  item the original worker was holding. The previous worker's
+  next call to `extend_work_item_claim`,
+  `complete_work_item_*`, or `fail_work_item` raises
+  `IS030 work_item_lease_lost`.
+- **INV-SUB-W-013** — `failed` rows are operator-only: no
+  procedure auto-skips or auto-deletes them. They permanently
+  block their partition until operator action transitions them
+  (planned: `instructedctl` admin path).
+- **INV-SUB-W-020** — Projection-side terminal success:
+  `complete_work_item_projection` DELETEs the row. No `done`
+  state persists for projections.
+- **INV-SUB-W-021** — PM-side terminal success (non-terminal
+  instance): `complete_work_item_pm` UPDATEs the row to `done`
+  AND UPSERTs the PM-state snapshot in **one transaction**.
+  Snapshot `source_version = claimed_event.event_number`.
+- **INV-SUB-W-022** — PM-side terminal success (terminal
+  instance): `complete_pm_instance` DELETEs the PM-state
+  snapshot AND DELETEs every work item for the partition (the
+  triggering one included) in **one transaction**. Future
+  events that route to the same partition run from
+  `initialState()` again.
+- **INV-SUB-W-030** — Closed error set for the work-queue
+  surface: `IS020 subscription_not_found`,
+  `IS030 work_item_lease_lost`, plus standard Postgres errors.
+
+### Catch-up predicate (`INV-SUB-CATCHUP-*`)
+
+- **INV-SUB-CATCHUP-001** —
+  `is_subscription_caught_up(stream, name, target)` returns
+  true iff **both** conjuncts hold:
+  1. The routing cursor has reached the target
+     (`subscriptions.last_seen >= target`).
+  2. No `subscription_work_items` row for the subscription with
+     `event_number <= target` is in a non-terminal state
+     (`pending`, `claimed`, or `failed`).
+  Either conjunct alone is insufficient. The atomic write of
+  `route_batch` ([INV-SUB-P-032]) ensures (1) is never
+  observable without (2)'s relevant rows being observable too.
+  `waitForProjection` polls this predicate; the same predicate
+  is the conformance-level definition of "caught up".
 
 ---
 
@@ -349,7 +437,15 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
   attached to each aggregate (`snapshot_every: N`).
 - **SNAP-002** — `metadata.snapshot_module_version` is the
   aggregate-module schema marker. Mismatch on read MUST cause
-  the snapshot to be ignored. **(Honest gap; see AGG-003.)**
+  the snapshot to be ignored and the source to be rebuilt from
+  events. **(Honest gap, v1 TS SDK -- aggregate side only):**
+  the v1 SDK enforces this for *process-manager* snapshots
+  (the PM worker compares `snapshot_module_version` from
+  metadata against `def.snapshotModuleVersion` and rebuilds via
+  `apply` on mismatch); for *aggregate* snapshots the SDK does
+  not yet enforce it. After PM-C the PM rebuild path is no
+  worse than the aggregate rebuild path; closing the aggregate
+  side is now a straight port of the PM-side machinery.
 - **SNAP-003** — A failed snapshot write MUST NOT fail the
   command that triggered it; the events are already durable.
 - **SNAP-004** — `source_version` recorded in a snapshot equals
@@ -374,33 +470,59 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
 
 ### Process manager (PM-\*)
 
-- **PM-001** — A router callback inspects each event and
-  returns `start` / `continue` / `stop` / `ignore` plus the
-  `process_uuid` (for `start` / `continue` / `stop`).
-- **PM-010** — For each routed event the PM's `handle` runs
-  as `(state, event) → (new_state, [commands])`.
-- **PM-011** — Order: handle → dispatch all commands → persist
-  new state (snapshot upsert) and advance the subscription
-  cursor in the same short SDK transaction → done.
+PM-F + PM-C shape: the routing function decides which partition
+an event belongs to; the processing layer's `apply` + `handle`
+split decides what to do with it.
+
+- **PM-001** — The router callback is
+  `(event) -> { partitionKey: string } | "ignore"`. It is a
+  pure function of the event; it does not see state, and it
+  does not emit lifecycle directives. (See [D-0018] for why
+  the Commanded-style `start` / `continue` / `stop` set is not
+  inherited.)
+- **PM-002** — The `apply` callback is
+  `(state, event) -> state`. It is a pure fold; the framework
+  invokes it during PM-state rebuild (when the snapshot is
+  missing, or carries a `snapshot_module_version` that no
+  longer matches `def.snapshotModuleVersion`) and on the
+  claimed event before `handle`. It MUST NOT have side effects.
+- **PM-010** — The `handle` callback is
+  `(staged_state, event) -> { commands?, complete? }`.
+  `staged_state` is `apply(loaded_state, event)` (i.e. the
+  triggering event folded in). `commands` defaults to empty;
+  `complete` defaults to false.
+- **PM-011** — Order, per claimed work item: state-load
+  (snapshot if version matches, otherwise rebuild via `apply`)
+  → `apply(state, event)` → `handle(staged_state, event)` →
+  dispatch all commands on the dispatch session → terminal
+  step (non-terminal: `complete_work_item_pm` UPSERTs the
+  snapshot + UPDATEs the work item to `done` in one tx;
+  terminal: `complete_pm_instance` DELETEs the snapshot + every
+  work item for the partition in one tx).
 - **PM-012** — Dispatched commands inherit
   `causation_id = triggering_event.event_id` and
   `correlation_id = triggering_event.correlation_id`.
 - **PM-020** — PM state is persisted as a snapshot keyed by
-  `"<pm_name>-<process_uuid>"` with `source_version =
+  `"<pm_name>-<partition_key>"` with `source_version =
   triggering_event.event_number`.
-- **PM-022** — On `stop`, the PM's snapshot MUST be deleted.
+- **PM-022** — On `handle` returning `{ complete: true }`, the
+  PM's snapshot AND every work item for the partition are
+  DELETEd in one transaction. Future events to the same
+  partition route as normal and run from `initialState()`
+  again; permanent termination is an application-level pattern.
 - **PM-024** — A PM tracks two positions, not one. The
-  subscription's `last_seen` is the cursor: it determines where
-  to resume reading on re-claim. The snapshot's `source_version`
-  is the state-version marker: it is the `event_number` of the
-  most recent *routed* event folded into state. Both advance
-  together in the ack tx when a routed event is processed. Only
-  `last_seen` advances when an ignored event is ack'd. So
-  `source_version <= last_seen` always, with equality iff the
-  most recent ack'd event was routed. On re-claim, redelivered
-  events with `event_number <= source_version` are already
-  folded into state and the SDK skips them before calling
-  `handle`.
+  subscription's `last_seen` (the routing cursor) determines
+  where the routing worker resumes reading; it advances past
+  every event the routing worker has inspected, regardless of
+  whether the event was routed or ignored. The snapshot's
+  `source_version` is the per-instance state-version marker:
+  the `event_number` of the most recent *routed* event folded
+  into state. So `source_version <= last_seen` always, with
+  equality iff the routing worker has processed exactly up to
+  the last routed event. On PM-state rebuild after a snapshot
+  miss the SDK loads every `done` work-item for the partition
+  with `event_number < claimed_event_number` and folds it
+  through `apply` from `initialState()`.
 
 ### Strong consistency on dispatch (CON-\*)
 
@@ -436,16 +558,29 @@ Three places where what's specified above is not (yet) what's
 delivered by the v1 TypeScript SDK. Each is recorded so the
 gaps don't get lost.
 
-1. **`SNAP-002` / `AGG-003` — snapshot module versioning.** The
-   store provides the metadata column; the v1 TS SDK does not
-   enforce reject-on-mismatch. Applications must handle schema
-   evolution themselves until the SDK adopts it.
-2. **`INV-SUB-P-040..042` — partitioned consumers deferred.**
-   See ML-0001. Apps needing throughput beyond what a single
-   worker provides today must split into multiple named
-   subscriptions over disjoint slices.
-3. **`INV-SUB-P-050` — selector realised above the adapter
-   line.** SDK-side filtering, cursor advances past skipped
-   events. Functionally correct; bandwidth-inefficient for
-   sparse selectors. ML-0003 reserves room for a server-side
-   variant.
+1. **`SNAP-002` / `AGG-003` — snapshot module versioning,
+   aggregate side.** The store provides the metadata column;
+   the v1 TS SDK enforces it for *process-manager* snapshots
+   (PM-C / PM-state rebuild) but not yet for *aggregate*
+   snapshots. Applications that evolve aggregate schemas should
+   implement the check themselves until the SDK adopts it.
+2. **PM-E — deterministic event IDs for PM-dispatched
+   commands.** When a PM `handle` is re-invoked for the same
+   claimed event (SUB-B `retry-in` after a post-dispatch
+   failure, or a lease-takeover redelivery), commands
+   dispatched in the prior attempt that already committed at
+   the aggregate will be re-dispatched and may produce
+   duplicate events at the aggregate (no `IS004
+   duplicate_event` protection without deterministic event
+   IDs). Closing this gap is a separate slice of work (PM-E);
+   the PM-024 snapshot atomicity guarantee still holds (the
+   PM's `forwarded` counter is incremented exactly once per
+   triggering event regardless of redelivery count -- see
+   `tests/soak/` for the verification under churn).
+3. **Routing-worker `close()` is a drop, not a flush.** On
+   graceful close mid-batch the routing worker drops the
+   accumulated decisions; the relaunched worker re-reads from
+   `last_seen` and the work-items PK absorbs duplicate
+   INSERTs. Observationally equivalent to a crash from outside
+   the worker; see ML-0012 for the future-option flush
+   alternative.

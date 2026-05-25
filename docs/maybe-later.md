@@ -10,48 +10,6 @@ about things we deliberately *won't* do.
 
 ---
 
-## ML-0001 — Concurrent partitioned subscription consumers
-
-**Status:** Superseded. The capability still matters, but it is no
-longer a standalone item — it is one of the shapes the
-subscription substrate redesign tracked in
-[`todo/subscriptions.md`](todo/subscriptions.md) SUB-A is expected
-to provide. Under the leading candidate (Design 3, decoupled
-router + work queue), partitioned consumption falls out of varying
-the partition key per subscription; there is no separate
-"partitioned consumer" feature to add later.
-
-The original framing follows for context.
-
-Allow a single named subscription to be consumed by N workers in
-parallel, with a partitioning function (typically over
-`stream_id`) that preserves per-partition order while sacrificing
-global order across partitions.
-
-**Why deferred:** a single cursor advanced atomically with the
-consumer's work is the simplest model that demonstrates the core
-hypothesis, and is correct for any single-worker projection. The
-two realisations both add real complexity (a side table of
-per-shard offsets makes cursor advance non-atomic with projection
-writes; N independent sibling subscriptions over disjoint shards
-push shard management out of the contract and into the SDK).
-Workloads that need this throughput today can split into multiple
-named subscriptions manually.
-
-**Forward-compat constraints on v1:**
-
-- The `subscriptions` table identity is `(stream_id, name, shard)`
-  with `shard = 0` reserved as the v1 default. A future shard
-  dimension fits the existing schema without migration.
-- `claim_subscription` / `advance_subscription` already accept a
-  `p_options jsonb` argument; future shard-aware variants can
-  grow keys without breaking v1 callers.
-- The conformance harness has `test.skip` placeholders for
-  `INV-SUB-P-040..042` so the partitioned-consumer cases can land
-  without rewriting the unpartitioned tests.
-
----
-
 ## ML-0002 — `LISTEN`/`NOTIFY` wake-up optimisation
 
 On commit, `append_to_stream` could emit `pg_notify` on a channel
@@ -78,32 +36,34 @@ surface.
 
 ---
 
-## ML-0003 — Server-side selector evaluation
+## ML-0003 — Server-side routing-decision evaluation
 
-Allow `read_subscription_batch` to accept a `selector` key in its
-`p_options` argument (a JSONB-path expression or SQL predicate
-over `data` / `metadata` / `event_type`) and filter events
-server-side before returning. Reduces bandwidth for sparse
-selectors at the cost of restricting the selector vocabulary to
-the server's predicate language.
+Allow `route_batch`'s caller — or a future `route_batch_eval`
+variant — to express the per-event routing decision as a
+JSONB-path / SQL predicate evaluated server-side, instead of an
+arbitrary callback invoked per event in the routing worker.
+Reduces routing-worker CPU for sparse routes at the cost of
+restricting the routing vocabulary to the server's predicate
+language.
 
-**Why deferred:** v1 ships SDK-side selectors only. The SDK reads
-a batch, runs the application's predicate locally, calls the
-handler only on matches, and advances the cursor to the last
-*fetched* event_number. SDK-side is the simplest and most
-expressive option — the predicate is arbitrary application code.
+**Why deferred:** v1 ships SDK-side routing only. The routing
+worker reads a batch from `read_all`, runs the application's
+`routeFn` per event, and writes the resulting decisions via
+`route_batch`. SDK-side is the simplest and most expressive
+option — the predicate is arbitrary application code.
 
 **Forward-compat constraints on v1:**
 
-- `read_subscription_batch.p_options` is documented to accept a
-  future `selector` key. Adding it MUST NOT change the v1
-  default semantics (no key → all events returned).
-- The SDK's arbitrary-predicate selector stays for use cases the
+- A future server-side variant would be a new procedure
+  (`route_batch_eval`?) or a new key on `route_batch`'s
+  `p_options`. Either way, adding it MUST NOT change v1's
+  `route_batch` semantics (decisions still computed by the
+  caller).
+- The SDK's arbitrary-`routeFn` mode stays for use cases the
   server-evaluable vocabulary doesn't cover; the two are
   composable.
-- Cursor-advance semantics don't change: the highest delivered-
-  or-skipped event_number is what's acked, whether the skip
-  happened server-side or client-side.
+- The atomic `route_batch` cursor advance + work-item INSERTs
+  contract is unchanged.
 
 ---
 
@@ -120,9 +80,9 @@ cases:
 - **Projection side:** an opt-in `coTransactional: true` flag
   for projections that target the same Postgres database the
   event store lives in — the handler runs inside a transaction
-  that also performs `advance_subscription`, re-enabling
-  exactly-once consistency between projection write and cursor
-  advance for that narrow case.
+  that also performs `complete_work_item_projection`,
+  re-enabling exactly-once consistency between projection write
+  and work-item DELETE for that narrow case.
 
 **Why deferred:**
 
@@ -237,10 +197,10 @@ concrete use case asks for it.
 
 ## ML-0011 — Less-opinionated `PartitionBy` for projections
 
-PRJ-A in `docs/todo/projections.md` ships a three-mode
-`PartitionBy` surface (`sequential` / `per-event` /
-`per-key`) as the v1 SDK shape. A future SDK revision may
-collapse this to a less-opinionated surface, e.g.
+The v1 SDK ships a three-mode `PartitionBy` surface
+(`sequential` / `per-event` / `per-key`) for projection
+registration. A future SDK revision may collapse this to a
+less-opinionated surface, e.g.
 
 ```ts
 type PartitionBy = (event) => string | null
@@ -273,10 +233,11 @@ case needs something the three modes can't express.
 
 ## ML-0010 — Configurable post-success retention for projection work-items
 
-Under the SUB-A proposed design (see `docs/todo/subscriptions.md`)
-and PRJ-E in `docs/todo/projections.md`, projection work-items
-are DELETEd in the same transaction as the handler's successful
-read-model write. No `done` row is persisted.
+Under SUB-A, projection work-items are DELETEd as the terminal
+step of a successful handler run. No `done` row is persisted for
+projections (the PM path differs: PMs UPDATE the row to `done`
+plus UPSERT a snapshot in one tx, because the `done` rows back
+PM-state rebuild).
 
 Applications that want a brief ops-visibility window — e.g.
 "keep `done` rows for K minutes so `instructedctl` can show

@@ -23,8 +23,9 @@ Procedures follow three conventions, borrowed from absurd:
 - **Caller-tunable knobs go through a `p_options jsonb` parameter**,
   not positional arguments. The set of recognised keys is documented
   in each procedure's docstring; unknown keys are silently ignored.
-  This is the forward-compatibility lever for ML-0001 (partitioned
-  consumers) and ML-0002 (`LISTEN`/`NOTIFY`).
+  This is the forward-compatibility lever for the operator-facing
+  `shard` dimension on `subscriptions` and for ML-0002
+  (`LISTEN`/`NOTIFY`).
 - **Errors are a closed set per procedure**, raised with custom
   SQLSTATEs in class `IS` (table below). SDKs translate each
   SQLSTATE to a language-native error type.
@@ -40,7 +41,8 @@ Procedures follow three conventions, borrowed from absurd:
 | `events`          | Caller-keyed event rows. Append-only. | INV-APPEND-001, INV-APPEND-030, INV-APPEND-040 |
 | `stream_events`   | (event, stream) join. Carries per-stream + original-stream positions. Unique `(stream_id, stream_version)` is the OCC mechanism ([D-0005](decisions.md#d-0005)). | INV-APPEND-002/022, INV-READ-005..008 |
 | `snapshots`       | At most one per `source_uuid`. Used by aggregates and PMs (PM-020..024). | INV-SNAP-001..004 |
-| `subscriptions`   | Persistent leased cursors. Identity `(stream_id, name, shard)`; `shard` reserved at v1 default 0 for ML-0001. | INV-SUB-P-001/002, [D-0006](decisions.md#d-0006) |
+| `subscriptions`   | Persistent routing cursor + lease per `(stream_id, name, shard)`. Routing-worker hot path. | INV-SUB-P-001/002/010..012, [D-0002](decisions.md#d-0002), [D-0006](decisions.md#d-0006) |
+| `subscription_work_items` | Per-subscription work queue. One row per routed event per partition; carries the per-item lease processing workers compete on. PK absorbs duplicate INSERTs on routing-worker re-run. ON DELETE CASCADE from `subscriptions`. | INV-SUB-W-001..030, [D-0002](decisions.md#d-0002) |
 
 Triggers `events_no_update / events_no_delete /
 stream_events_no_update / stream_events_no_delete` enforce
@@ -50,27 +52,62 @@ raises it. SDKs that see it have bypassed the contract.
 
 ## Procedures at a glance
 
+### Append + read
+
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
 | `append_to_stream`              | `setof (event_id, stream_version, event_number, created_at)` | Atomic N-event append; honours `any`/`no_stream`/`stream_exists`/`exact` |
 | `read_stream`                   | `setof recorded_event`   | Forward read of a single stream from a `stream_version` |
 | `read_all`                      | `setof recorded_event`   | Forward read of `$all` from an `event_number`; rows carry original-stream identity |
+
+### Snapshots
+
+| Procedure                       | Returns                  | Purpose |
+|---------------------------------|--------------------------|---------|
 | `record_snapshot`               | `void`                   | Upsert snapshot by `source_uuid` |
 | `read_snapshot`                 | `(source_uuid, type, version, data, metadata, created_at)` | Fetch or raise `IS010` |
 | `delete_snapshot`               | `void`                   | Idempotent delete |
-| `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else |
-| `extend_subscription_claim`     | `(claim_expires_at)`     | Heartbeat |
-| `release_subscription`          | `void`                   | Clean release; cursor preserved |
-| `read_subscription_batch`       | `setof recorded_event`   | Lock + read batch from cursor; does NOT advance |
-| `advance_subscription`          | `(last_seen)`            | Monotone cursor advance; called in SDK's own short tx after the handler returns ([D-0016](decisions.md#d-0016)) |
-| `read_subscription_position`    | `(last_seen)`            | Read cursor for strong-consistency-on-dispatch polling ([D-0010](decisions.md#d-0010)) |
-| `delete_subscription`           | `void`                   | Removes row; raises `IS020` on missing ([D-0009](decisions.md#d-0009)) |
+
+### Subscription lifecycle
+
+| Procedure                       | Returns                  | Purpose |
+|---------------------------------|--------------------------|---------|
+| `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire routing-side lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else |
+| `extend_subscription_claim`     | `(claim_expires_at)`     | Routing-worker heartbeat |
+| `release_subscription`          | `void`                   | Clean release; cursor and queue preserved |
+| `read_subscription_position`    | `(last_seen)`            | Read routing cursor |
+| `delete_subscription`           | `void`                   | Removes row + cascaded work items; raises `IS020` on missing ([D-0009](decisions.md#d-0009)) |
+
+### Routing-worker hot path (SUB-A)
+
+| Procedure                       | Returns                  | Purpose |
+|---------------------------------|--------------------------|---------|
+| `route_batch`                   | `void`                   | Atomic: INSERT N work items + advance `subscriptions.last_seen`. `ON CONFLICT DO NOTHING` on the work-items PK absorbs duplicate INSERTs on routing-worker re-run. Requires the caller's `worker_id` to match the current subscription `claimed_by` (raises `IS022` otherwise). |
+
+### Processing-worker hot path (SUB-A)
+
+| Procedure                       | Returns                  | Purpose |
+|---------------------------------|--------------------------|---------|
+| `claim_work_item`               | `nullable (partition_key, event_number, was_takeover, prior_claimed_by)` | `FOR UPDATE SKIP LOCKED` + per-partition predicate. Stamps the row with the caller's `worker_id` + lease expiry. Returns null when nothing eligible; non-null with `was_takeover=true` on the lease-takeover branch. Does NOT take a subscription lease. |
+| `extend_work_item_claim`        | `void`                   | Processing-worker heartbeat. Raises `IS030 work_item_lease_lost` on `claimed_by` mismatch. |
+| `complete_work_item_projection` | `void`                   | Projection-side terminal success: DELETEs the row. PRJ-E immediate-delete. Raises `IS030` on lease loss. |
+| `complete_work_item_pm`         | `void`                   | PM-side non-terminal success: UPDATE row to `done` + UPSERT the snapshot in one tx. Raises `IS030` on lease loss. |
+| `complete_pm_instance`          | `(snapshot_deleted, work_items_deleted)` | PM-side terminal success (`handle` returned `{ complete: true }`): DELETE the snapshot + every work item for the partition in one tx. Idempotent. |
+| `fail_work_item`                | `void`                   | UPDATE the row to `failed` with `error_text`. Operator-only resolution thereafter; the default error policy never calls this. Raises `IS030` on lease loss. |
+
+### Catch-up + PM-state rebuild
+
+| Procedure                       | Returns                  | Purpose |
+|---------------------------------|--------------------------|---------|
+| `is_subscription_caught_up`     | `(caught_up boolean)`    | Two-conjunct catch-up predicate (routing cursor at-or-past target AND no in-flight work items at-or-below target). Polled by `waitForProjection`. |
+| `list_pm_rebuild_events`        | `setof recorded_event`   | Cold-path read: every `done` work-item event for `(subscription_name, partition_key)` with `event_number < exclusive_upper`, in event-number order. Used by PM-state rebuild after a snapshot miss / module-version mismatch. |
 
 `recorded_event` is shorthand for the eleven columns: `event_id`,
 `event_number`, `stream_uuid`, `stream_version`, `event_type`,
 `causation_id`, `correlation_id`, `data`, `metadata`, `created_at`.
-For reads through `$all` (both `read_all` and `read_subscription_batch`
-on `$all`), `stream_uuid` / `stream_version` carry the
+For reads through `$all` (via `read_all`, or via
+`list_pm_rebuild_events` when the rebuild walks events sourced
+from `$all`), `stream_uuid` / `stream_version` carry the
 **original** stream identity (INV-READ-006/007).
 
 ## Error-code catalogue
@@ -90,9 +127,10 @@ error type.
 | `IS005`  | `reserved_stream_uuid`        | `append_to_stream`, `read_stream` (on `'$all'`)                           | INV-STREAM-003 |
 | `IS006`  | append-only violation         | triggers on `events` / `stream_events` direct UPDATE/DELETE only          | INV-APPEND-040 — **never** raised by a procedure |
 | `IS010`  | `snapshot_not_found`          | `read_snapshot`                                                           | INV-SNAP-003 |
-| `IS020`  | `subscription_not_found`      | `extend_subscription_claim`, `release_subscription`, `read_subscription_batch`, `advance_subscription`, `read_subscription_position`, `delete_subscription` | INV-SUB-P-062, [D-0009](decisions.md#d-0009) |
+| `IS020`  | `subscription_not_found`      | `extend_subscription_claim`, `release_subscription`, `route_batch`, `read_subscription_position`, `delete_subscription`, `claim_work_item`, `extend_work_item_claim`, `complete_work_item_*`, `complete_pm_instance`, `fail_work_item`, `is_subscription_caught_up`, `list_pm_rebuild_events` | INV-SUB-P-062, [D-0009](decisions.md#d-0009) |
 | `IS021`  | `subscription_already_claimed` | (reserved; v1 surfaces this case as a non-error `result = 'already_claimed'` row from `claim_subscription`. The SQLSTATE is retained in the catalogue for forward use if a future variant of `claim_subscription` chooses to raise.) | [D-0006](decisions.md#d-0006) |
-| `IS022`  | `subscription_lease_lost`     | `extend_subscription_claim`, `release_subscription`, `read_subscription_batch`, `advance_subscription` | [D-0006](decisions.md#d-0006) |
+| `IS022`  | `subscription_lease_lost`     | `extend_subscription_claim`, `release_subscription`, `route_batch` — the routing-worker surface | [D-0006](decisions.md#d-0006) |
+| `IS030`  | `work_item_lease_lost`        | `extend_work_item_claim`, `complete_work_item_projection`, `complete_work_item_pm`, `fail_work_item` — the processing-worker terminal surface. Covers both "row gone" (taken over) and "`claimed_by` mismatch"; either way the worker should stop and let redelivery happen. | INV-SUB-W-012 |
 | `22023`  | `invalid_parameter_value`     | every procedure, on null / malformed / out-of-range input                 | (standard SQLSTATE) |
 | `0A000`  | `feature_not_supported`       | reserved; not raised by any v1 procedure                                  | (standard SQLSTATE) |
 
@@ -129,17 +167,26 @@ reference. Authoritative copy lives in the SQL file.)
 | `claim_subscription`            | `subscriptions[stream,name,shard]`                                       |
 | `extend_subscription_claim`     | `subscriptions[stream,name,shard]`                                       |
 | `release_subscription`          | `subscriptions[stream,name,shard]`                                       |
-| `read_subscription_batch`       | `subscriptions[stream,name,shard]` (`FOR UPDATE`), `events` (MVCC)       |
-| `advance_subscription`          | `subscriptions[stream,name,shard]`                                       |
+| `route_batch`                   | `subscriptions[stream,name,shard]` → `subscription_work_items[*]` (PK)   |
 | `read_subscription_position`    | none                                                                     |
-| `delete_subscription`           | `subscriptions[stream,name,shard]`                                       |
+| `delete_subscription`           | `subscriptions[stream,name,shard]` → cascaded `subscription_work_items`  |
+| `claim_work_item`               | `subscription_work_items[row]` (`FOR UPDATE SKIP LOCKED`)                |
+| `extend_work_item_claim`        | `subscription_work_items[row]`                                           |
+| `complete_work_item_projection` | `subscription_work_items[row]`                                           |
+| `complete_work_item_pm`         | `subscription_work_items[row]` → `snapshots[source_uuid]`                |
+| `complete_pm_instance`          | `subscription_work_items[*]` → `snapshots[source_uuid]`                  |
+| `fail_work_item`                | `subscription_work_items[row]`                                           |
+| `is_subscription_caught_up`     | none (MVCC reads)                                                        |
+| `list_pm_rebuild_events`        | none (MVCC reads)                                                        |
 
-The dispatch lock set (`streams`, `events`, `stream_events`) and the
-persist-and-ack lock set (`snapshots`, `subscriptions`) are
-**disjoint**. A handler that opens one transaction to persist its
-projection and advance its cursor (`record_snapshot` +
-`advance_subscription`) never blocks a dispatcher in another session
-calling `append_to_stream` and vice versa.
+The **dispatch** lock set (`streams`, `events`, `stream_events`),
+the **routing** lock set (`subscriptions`,
+`subscription_work_items`), and the **processing terminal** lock
+set (`subscription_work_items`, `snapshots`) are pairwise
+disjoint. A handler-side terminal step never blocks a dispatcher
+in another session calling `append_to_stream`, and a routing
+worker writing a batch never blocks a processing worker claiming
+a previously-routed item.
 
 ## Recommended call patterns
 
@@ -167,91 +214,152 @@ append:
 Per D-0005, retry on `IS001` is the per-aggregate serialisation
 mechanism; there is no advisory lock.
 
-### Subscription worker ([D-0016](decisions.md#d-0016))
+### Routing worker (SUB-A, [D-0002](decisions.md#d-0002))
 
-The handler is opaque to the SDK; it runs outside any SDK
-transaction. The SDK opens two short transactions per batch —
-one to read, one to advance — with the handler call between
-them:
+One routing worker per subscription, single-active via the
+subscription lease. Reads events past the cursor, runs the
+user's `routeFn` per event, atomically writes the new cursor +
+work-item rows.
 
 ```text
 claim_subscription(stream, name, worker_id, lease_secs)
 loop:
-  BEGIN  -- short read tx
-    events = read_subscription_batch(stream, name, worker_id, batch_size)
-  COMMIT
+  events = read_all(last_seen + 1, batch_size)    -- or read_stream
   if events empty: sleep poll_interval; continue
-  for e in events: handler(e)              -- NO SDK transaction
-  BEGIN  -- short ack tx
-    advance_subscription(stream, name, worker_id, last_position)
+  decisions = []
+  for e in events:
+    d = routeFn(e)                                -- pure user code
+    if d != "ignore":
+      decisions.append((e.event_number, d.partitionKey))
+  BEGIN  -- single atomic tx
+    route_batch(stream, name, worker_id, decisions,
+                new_cursor = max(events).event_number)
   COMMIT
   -- heartbeat in parallel:
-  extend_subscription_claim(...)           -- on IS022: stop the worker
+  extend_subscription_claim(...)                  -- on IS022: stop
 on graceful shutdown:
   release_subscription(stream, name, worker_id)
 ```
 
-The `subscriptions` row lock acquired by `read_subscription_batch` is
-released when the read tx commits; `advance_subscription` re-acquires
-it briefly in the ack tx. The handler runs with no row lock held, so
-it cannot contend with another worker that has taken over the lease
-(though such a worker will observe a different `last_seen` and the
-old worker's eventual `advance_subscription` call will raise IS022).
+`route_batch` is the only place the routing-cursor advance and
+the work-item INSERTs commit together. This atomicity is
+load-bearing for the catch-up predicate ([INV-SUB-CATCHUP-001]):
+once `last_seen >= N` is observable, the work items for events
+up to N are observable too. The work-items PK absorbs duplicate
+INSERTs (`ON CONFLICT DO NOTHING`), so a crashed mid-batch
+routing worker is recoverable: the next worker re-reads from
+`last_seen` and the re-inserts are no-ops.
 
-The handler is application-domain; it may write to Postgres,
-Elasticsearch, Redis, an external API, or anywhere else. The SDK does
-not pass it a connection. Idempotency on redelivery is the handler's
-concern. An SDK that genuinely wants a co-transactional
-pattern — same Postgres database, projection write atomic with
-cursor advance — may still call `advance_subscription` inside
-its own transaction; the SQL contract supports it. v1 SDKs do
-not exercise that capability (see [ML-0004](maybe-later.md#ml-0004)).
+### Processing worker (SUB-A, [D-0016](decisions.md#d-0016))
 
-### Process manager worker (PM-020..024, [D-0011](decisions.md#d-0011), [D-0016](decisions.md#d-0016))
-
-Same shape as the subscription worker, but the SDK runs an
-additional persist-and-ack pair (snapshot + cursor advance) in
-the ack tx after the user's `handle` returns. The PM snapshot is
-SDK-owned bookkeeping (PM-024 absorption depends on its
-`source_version` advancing in lock-step with `last_seen` on
-every routed-event ack), so it stays inside the SDK's ack tx
-alongside `advance_subscription`. Ignored events advance only
-the cursor, leaving `source_version` unchanged. Dispatch happens in a separate
-session via `append_to_stream` per the lock-set disjointness above.
+N processing workers per subscription run concurrently. Each
+claims one item at a time, runs the handler, calls a
+kind-specific terminal step. No subscription lease.
 
 ```text
-claim_subscription($all, pm_name, worker_id, lease_secs)
 loop:
-  BEGIN; events = read_subscription_batch(...); COMMIT  -- short read tx
-  if events empty: sleep poll_interval; continue
-  for e in events:
-    state = read_snapshot(pm_source_uuid)  -- or empty
-    (state, commands) = pm_handle(state, e)              -- NO SDK transaction
-    for c in commands: dispatch(c)                       -- separate session
-    BEGIN  -- short snapshot+ack tx, SDK-internal
-      record_snapshot(pm_source_uuid, pm_type, e.event_number, state)
-      advance_subscription($all, pm_name, worker_id, e.event_number)
+  claim = claim_work_item(stream, name, worker_id, lease_secs)
+  if claim is null: sleep poll_interval; continue
+  event = read_all(claim.event_number, 1)
+  -- heartbeat in parallel:
+  extend_work_item_claim(...)                 -- on IS030: abort item
+  try:
+    handler(event)                            -- NO SDK transaction
+  catch:
+    error policy decides retry-in / stop
+    -- 'retry-in' loops to retry handler on the SAME claim;
+    -- 'stop' exits; lease expires; another worker takes over.
+    continue
+  on success:
+    BEGIN  -- short terminal tx
+      complete_work_item_projection(...)      -- projection: DELETE row
+        -- OR
+      complete_work_item_pm(...)              -- PM non-terminal:
+                                              --   UPDATE row to done
+                                              --   + UPSERT snapshot
+        -- OR
+      complete_pm_instance(...)               -- PM terminal:
+                                              --   DELETE snapshot
+                                              --   + DELETE all items
     COMMIT
 ```
 
-`dispatch(c)` is whatever the SDK exposes to call `append_to_stream`
-on the target aggregate. It opens its own connection (and thus its own
-transaction); the PM's snapshot+ack transaction does not nest inside
-it. This is the lock-set disjointness [D-0011](decisions.md#d-0011)
-relies on.
+The handler runs with no row lock held. If the worker crashes
+between handler-return and the terminal call, the per-item lease
+expires and another processing worker takes the item over; the
+first worker's eventual terminal call raises `IS030
+work_item_lease_lost`.
+
+The handler is application-domain; it may write to Postgres,
+Elasticsearch, Redis, an external API, or anywhere else. The SDK
+does not pass it a connection. Idempotency on redelivery is the
+handler's concern.
+
+### PM-state load + dispatch (PM-C + PM-F, [D-0011](decisions.md#d-0011), [D-0017](decisions.md#d-0017))
+
+A PM processing worker adds a state-load step before `handle`
+and a dispatch step between `handle` and the terminal call:
+
+```text
+claim = claim_work_item(...)
+event = read_all(claim.event_number, 1)
+
+-- State load (PM-C):
+snap = read_snapshot("{pm_name}-{partition_key}")   -- IS010 = miss
+if snap exists AND snap.metadata.snapshot_module_version == def.version:
+  state = snap.data
+else:
+  -- Rebuild via apply, from initialState():
+  state = initialState()
+  for e in list_pm_rebuild_events(stream, name, partition_key,
+                                  exclusive_upper = claim.event_number):
+    state = apply(state, e)
+
+staged_state = apply(state, event)
+result = handle(staged_state, event)                -- { commands?, complete? }
+
+-- Dispatch on the DISPATCH session (different connection from
+-- the persist session; lock-set disjointness per D-0011 / D-0012):
+for c in result.commands:
+  dispatch_client.append_to_stream(c.streamUuid, ..., events_from(c))
+     -- causation_id = event.event_id
+     -- correlation_id = event.correlation_id
+
+if result.complete == true:
+  complete_pm_instance(stream, name, partition_key,
+                       source_uuid = "{pm_name}-{partition_key}")
+else:
+  complete_work_item_pm(stream, name, worker_id, partition_key,
+                        event.event_number,
+                        snapshot = { ..., data: staged_state,
+                                     source_version: event.event_number,
+                                     metadata: { snapshot_module_version: def.version } })
+```
+
+`dispatch_client` is a separate `Client` instance bound to a
+different connection from the persist client. The dispatch path
+locks `streams` + the events tables; the terminal step locks
+`subscription_work_items` + `snapshots`. The two lock sets are
+disjoint, so a dispatched aggregate's `append_to_stream` cannot
+deadlock against the same worker's `complete_work_item_pm`.
 
 ### Strong-consistency-on-dispatch wait ([D-0010](decisions.md#d-0010))
 
 ```text
 result = append_to_stream(...)
-for sub_name in consistency_list:
-  poll until read_subscription_position(stream, sub_name).last_seen
-            >= result.last_event_number
+for sub in consistency_list:
+  poll until is_subscription_caught_up(sub.stream, sub.name,
+                                       target = result.last_event_number)
+            returns true
   or until consistency_timeout elapses
 ```
 
 `consistency_list` is the explicit list per [D-0010](decisions.md#d-0010)
-(no `:strong` shorthand); polling cadence is the SDK's responsibility.
+(no `:strong` shorthand); polling cadence is the SDK's
+responsibility. The predicate has two conjuncts under SUB-A
+(routing cursor at-or-past target AND no in-flight work items
+at-or-below target); both are evaluated server-side in one
+round-trip per poll.
 
 ## Implementation notes
 
@@ -304,6 +412,8 @@ will be cut alongside the first tagged release.
   D-0012, D-0016.
 - [`docs/non-goals.md`](non-goals.md) — positioning statements on
   hard-delete, JSONB-only payloads, the reserved `$all` name, etc.
-- [`docs/maybe-later.md`](maybe-later.md) — ML-0001 (`shard`
-  column), ML-0002 (`LISTEN`/`NOTIFY` wake-up), ML-0003
-  (server-side selectors), ML-0004 (`bindToConnection`).
+- [`docs/maybe-later.md`](maybe-later.md) — ML-0002
+  (`LISTEN`/`NOTIFY` wake-up), ML-0004 (`bindToConnection`),
+  ML-0010 (post-success retention for projection work-items),
+  ML-0011 (less-opinionated `PartitionBy`), ML-0012 (routing
+  worker flush-vs-drop).

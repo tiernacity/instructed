@@ -19,9 +19,9 @@
  * slice-9 facade and by slice-6 tests; it produces a `RoutingFn` that
  * never returns `"ignore"`. A projection that needs routing-side
  * filtering (the legacy `selector` parameter's role) uses a raw
- * `routeFn: RoutingFn` directly via the slice-9 facade -- see
- * `docs/todo/projections.md` PRJ-A under option (c) for the unified
- * routing surface.
+ * `routeFn: RoutingFn` directly via the layer-5 facade -- see
+ * `docs/architecture.md` "How a worker runs" for the routing /
+ * processing split.
  *
  * Not yet re-exported from `src/index.ts`. The layer-5 facade in
  * slice 9 will wire `registerProjection` here; tests import the

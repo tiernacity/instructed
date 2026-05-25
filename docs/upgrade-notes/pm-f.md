@@ -196,8 +196,8 @@ Routing now decides "which work-item row, if any?"; processing
 decides "what to do with this row, and is the instance done after?".
 The directive enum bundled the two; the SUB-A worker split forced the
 separation. See `docs/decisions.md` D-0011 / D-0012 for the
-lock-set-disjointness rationale and `docs/todo/process-manager.md`
-PM-F for the design rationale.
+lock-set-disjointness rationale and `docs/decisions.md` D-0018
+for the design rationale.
 
 ### `apply` is mandatory
 

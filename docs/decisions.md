@@ -10,27 +10,42 @@ it does, and what it implies for the schema, the SDK, or both.
 
 ---
 
-## D-0002 — One subscription = one cursor = one active worker
+## D-0002 — One subscription = one routing cursor + a work queue
 
-A subscription has exactly one cursor advanced by exactly one
-active worker. Multiple workers can race for the lease (giving
-failover); only one consumes events at a time.
+A subscription has exactly one *routing cursor* advanced by
+exactly one active **routing worker**, and a *work queue* of
+per-partition items consumed by **N processing workers in
+parallel**. The routing worker turns events into work-item rows;
+the processing workers claim items and run the handler. Per-
+partition ordering is preserved by the claim predicate; across
+partitions, processing is concurrent.
 
-**Why:** Realising concurrent partitioned consumption needs either
-a side table of per-shard offsets atomic with projection writes,
-or N independently-named subscriptions over disjoint shards. Both
-add real complexity that's not needed to demonstrate the core
-hypothesis. Throughput scaling via splitting into multiple named
-subscriptions is the v1 answer.
+**Why:** A single cursor advanced atomically with the consumer's
+work is the simplest model, but it serialises every consumer onto
+one worker -- a partitioned consumer needs N. Pushing the
+partitioning into the SDK ("name N sibling subscriptions
+yourself") leaks shard management into application code. The
+routing / processing split keeps the routing decision
+single-active (which keeps the routing cursor monotone and the
+catch-up predicate simple) while letting processing parallelise
+over whatever partition shape the application declares.
 
 **Implications:**
 
 - The `subscriptions` table identity is
-  `(stream_id, name, shard)` with `shard = 0` reserved at v1.
-  A future partitioned-consumer extension can grow `shard`
-  without breaking v1 callers (see ML-0001).
-- One worker's processing rate bounds the throughput of a
-  single projection.
+  `(stream_id, name, shard)` with `shard = 0` reserved at v1
+  for a future operator-facing shard dimension. The
+  per-subscription routing lease lives on this table.
+- A second table `subscription_work_items` carries the queue;
+  the per-item lease lives on its rows. Processing workers
+  claim items with `FOR UPDATE SKIP LOCKED` plus a
+  per-partition predicate; the routing worker never touches
+  these rows in the hot path.
+- Throughput of a single subscription is no longer bounded by
+  one worker's processing rate; it is bounded by the routing
+  worker's throughput (which is just "convert events to work
+  items" -- pure CPU, no handler work) plus the processing
+  parallelism the partition shape allows.
 
 ---
 
@@ -272,32 +287,34 @@ with the SDK's own OCC retry.
 
 ## D-0016 — Handlers are opaque to the SDK; idempotency is the application's concern
 
-The worker loop is:
+The processing-worker loop is:
 
 ```
-events = read_subscription_batch(...)   -- short tx, lock released
-for e in events:
-    await handler(e, ctx)                -- NO SDK transaction
-advance_subscription(..., last_position) -- short tx
+claim = claim_work_item(...)             -- short tx, FOR UPDATE SKIP LOCKED
+event = read_all(claim.event_number, 1)  -- MVCC read
+await handler(event, ctx)                -- NO SDK transaction
+complete_work_item_projection(...)       -- short tx (or _pm / _pm_instance)
 ```
 
 The handler receives the event and an opaque context (`workerId`,
-`position`, `signal`); it does **not** receive a Postgres
-connection, an ORM handle, or any other SDK-owned resource.
-Handler returns successfully → SDK advances the cursor. Handler
-throws → SDK does not advance; redelivery on next iteration.
+`partitionKey`, `eventNumber`, `attempt`, `signal`); it does
+**not** receive a Postgres connection, an ORM handle, or any
+other SDK-owned resource. Handler returns successfully → SDK
+runs the terminal-success step. Handler throws → SUB-B error
+policy decides whether to retry against the same claim or stop;
+in neither case does the terminal step fire.
 
 **Why:** A previous design ran the handler inside the SDK's
-transaction so projection writes and cursor advance committed
-together. That property only existed for projections that
-happened to target the same Postgres database the event store
-sat in. Real projections target Elasticsearch, ClickHouse,
-Redis, BigQuery, HTTP APIs, in-memory maps — none can share a
-Postgres transaction. The plumbing required to support the
-Postgres-targeting case (per-handler ORM-agnostic transaction
-wrappers, connections threaded through the handler signature)
-was paid by every user and reaped only by Postgres-targeted
-projections to the same DB.
+transaction so projection writes and the work-item terminal
+step committed together. That property only existed for
+projections that happened to target the same Postgres database
+the event store sat in. Real projections target Elasticsearch,
+ClickHouse, Redis, BigQuery, HTTP APIs, in-memory maps — none
+can share a Postgres transaction. The plumbing required to
+support the Postgres-targeting case (per-handler ORM-agnostic
+transaction wrappers, connections threaded through the handler
+signature) was paid by every user and reaped only by
+Postgres-targeted projections to the same DB.
 
 **Implications:**
 
@@ -305,15 +322,73 @@ projections to the same DB.
   typically via an idempotent UPSERT (Postgres), an `_id` keyed
   on `event_id` (Elasticsearch), `SETNX` (Redis), or whatever
   the target store offers.
-- Process managers run an SDK-internal persist-and-ack
-  transaction (snapshot upsert + cursor advance in one short
-  tx) *after* the handler returns, separate from the user code.
-  The PM dispatch path uses a separate connection from the
-  ack path to keep the lock sets disjoint.
+- Process managers run an SDK-internal terminal-success
+  transaction (snapshot UPSERT + work-item UPDATE-to-done in
+  one short tx, or snapshot DELETE + all-work-items DELETE in
+  one short tx for the terminal case) *after* the handler
+  returns and any dispatched commands have committed. The PM
+  dispatch path uses a separate connection from the
+  terminal-step path to keep the lock sets disjoint.
 - The SQL contract still supports a future opt-in
   co-transactional path for the narrow Postgres-projecting-into-
-  same-database case (`advance_subscription` is callable inside
-  any well-formed transaction); v1 SDKs do not exercise it.
+  same-database case (`complete_work_item_projection` and
+  `complete_work_item_pm` are callable inside any well-formed
+  transaction); v1 SDKs do not exercise it. See ML-0004.
+
+---
+
+## D-0018 — The PM routing surface is intentionally smaller than Commanded's
+
+A process manager's routing callback returns
+`{ partitionKey } | "ignore"` -- not a `start` / `continue` /
+`stop` / `start!` / `continue!` / `false` directive set. The
+lifecycle and strict-mode concerns those directives expressed
+("this event terminates the instance"; "raise if state is
+already/not yet initialised") move into the processing-layer
+callbacks: `handle` returns `{ complete?: boolean }` for the
+former; an application-level `apply` guard for the latter.
+
+**Why:** the inherited directive set bundled four orthogonal
+concerns at the routing layer (which instance, is this event
+for this PM type, strict-first-event assertion, lifecycle
+termination). Concerns 1 and 2 are intrinsic to routing.
+Concerns 3 and 4 are application logic about instance state
+dressed up as framework directives because an in-process
+`GenServer` runtime had convenient access to both at the
+routing layer.
+
+`instructed` doesn't have processes. The routing layer reads
+rows from `$all`, decides which work-item to write, and that's
+it -- no per-instance state, no PM-level callbacks holding
+references. The convenience that justified bundling disappears.
+Keeping the directive set would have meant either re-introducing
+an instance-state cache at the routing layer (which the design
+exists to avoid), or quietly degrading the strict-mode
+directives to advisory hints.
+
+**Implications:**
+
+- The PM routing callback is purely a function of the event:
+  `(event, metadata) -> { partitionKey } | "ignore"`. No state
+  parameter, no PM-level callbacks to consult.
+- Strict-first-event assertions move into `apply` / `handle`,
+  where state is naturally available: `if (state !==
+  initialState()) throw new Error("already started")`.
+- Instance termination is a return-value concern of `handle`:
+  `{ complete: true }` triggers the framework to DELETE the
+  snapshot and every remaining work-item for the partition in
+  one transaction. Future events to a completed partition route
+  as normal and run from `initialState()` again; permanent
+  termination is an application-level pattern (encode it in
+  `apply`'s state machine, or shape the routing function so it
+  stops matching once the terminal upstream events have passed).
+- A widening to `RoutingFn -> { partitionKey }[]` for
+  one-event-many-partitions (`PM-A` fan-out) is
+  backwards-compatible at the call site and is reserved for a
+  later design pass; v1 ships with the singular return.
+- See [`upgrade-notes/pm-f.md`](upgrade-notes/pm-f.md) for the
+  pre-release migration matrix mapping each former directive to
+  its new shape.
 
 ---
 

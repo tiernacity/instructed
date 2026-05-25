@@ -41,7 +41,9 @@
  * dispatched in the prior attempt that already committed at the
  * aggregate will be re-dispatched and may produce duplicate events
  * (no IS004 protection without deterministic event IDs). PM-E closes
- * this; see docs/todo/process-manager.md PM-E.
+ * this; see TODO.md item "PM-E (deterministic event IDs for
+ * PM-dispatched commands)" and `docs/invariants.md` "Honest gaps
+ * in v1" entry 2.
  *
  * Not yet re-exported from `src/index.ts`. The layer-5 facade in
  * slice 9 will wire `registerProcessManager` here; tests import the

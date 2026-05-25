@@ -131,27 +131,33 @@ row with `stream_id = 0` is the only `$all`.
 ## No co-transactional persist-and-ack
 
 The SDK does not run projection or process-manager handlers
-inside a transaction that also advances the subscription
-cursor. The handler runs outside any SDK transaction; the
-cursor advances in a separate short transaction after the
-handler returns.
+inside a transaction that also performs the terminal-success
+step (DELETE work item for projections; UPDATE work item +
+UPSERT snapshot for PMs). The handler runs outside any SDK
+transaction; the terminal step runs in a separate short
+transaction after the handler returns.
 
 Projection targets are application-domain — Elasticsearch,
 Redis, ClickHouse, HTTP APIs, in-memory maps. None can share a
 Postgres transaction with `instructed`. Idempotency on
 redelivery is the application's concern.
 
-The SQL contract still supports co-transactional advance —
-`advance_subscription` is callable inside any well-formed
+The SQL contract still supports a co-transactional terminal
+step — `complete_work_item_projection` and
+`complete_work_item_pm` are callable inside any well-formed
 transaction — so a narrow Postgres-projecting-into-same-database
-opt-in is achievable in a future SDK version.
-See [D-0016](decisions.md#d-0016).
+opt-in is achievable in a future SDK version. See
+[D-0016](decisions.md#d-0016) and
+[ML-0004](maybe-later.md#ml-0004).
 
 ## No SDK-level fan-out of one event to many PM instances
 
-A `RouteFn` returns at most one `processId` per event. The SDK
-does not parallelise an event across multiple PM instances of
-the same type.
+A PM `routeFn` returns at most one `{ partitionKey }` per event
+(or `"ignore"`). The SDK does not parallelise an event across
+multiple PM partitions of the same type. A future widening to
+`{ partitionKey }[]` is reserved as a design option (see
+[D-0018](decisions.md#d-0018)); v1 ships with the singular
+return.
 
 Applications that want fan-out (a `BatchApproved` event
 affecting every `Order` in the batch) model it with composition:

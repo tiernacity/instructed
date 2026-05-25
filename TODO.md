@@ -314,10 +314,10 @@ were written against the **current** single-cursor subscription
 model.
 
 During the same review walkthrough, the subscription model itself
-became a parked design question. The leading candidate (SUB-A
-Design 3 in `docs/todo/subscriptions.md`) replaces the
-`subscriptions` cursor + per-event ack model with a
-routing-cursor + work-queue model. Under that model, several of
+became a parked design question. The decision (SUB-A; see
+`docs/architecture.md` "How a worker runs" and
+`docs/decisions.md` D-0002) replaced the single-cursor + per-event
+ack model with a routing-cursor + work-queue model. Several of
 the §4 conformance cases either no longer apply (the cursor
 behaviours they test are internal routing-layer details, not
 application-facing contract) or change shape (per-partition
@@ -356,8 +356,9 @@ actively redesigning, the work is parked.
    `[mechanism-only]` on the routing-layer internals. The split
    is part of this work.
 
-**Depends on.** `docs/todo/subscriptions.md` SUB-A reaching a
-decision. Until then, do not modify `tests/conformance/`.
+**Depends on.** SUB-A has landed (SDK slices 1–12, ending in
+`docs/`-only documentation). The conformance harness rewrite is
+now un-blocked; modify `tests/conformance/` as part of this work.
 
 **Original gap list (against today's model).** Tests worth adding
 in the current shape; some will translate, some won't, per the
@@ -382,72 +383,48 @@ walk above.
 - Monotone cumulative-ack absorbs a lower-position advance
   silently. (`INV-SUB-P-034`.)
 
-**Depends on.** `docs/todo/subscriptions.md` SUB-A reaching a
-decision. Until then, do not modify `tests/conformance/`.
-
 **Output.** An updated `tests/conformance/` plus a clear statement
 of what the conformance harness verifies and why each case is in
-or out, reflecting the post-SUB-A subscription model.
+or out, reflecting the SUB-A subscription model.
 
 ---
 
 ## 12. Apply re-review outcomes
 
-**Why this exists.** The 2026-05-23 re-review of the invariant
-catalogue (closed as item #1, in the Done list below) produced
-a body of follow-up work split across four working files under
-`docs/todo/`. This item is the index — the place to come for
-"what's left from the re-review and where does each piece live?".
+**Status: SUB-A / PM-F / PM-C / PRJ-A landed. Re-review outcomes
+broken out into the open items below.**
 
-**Pre-release, small / contained:**
+The 2026-05-23 re-review of the invariant catalogue produced
+a body of follow-up work originally tracked across working
+files under `docs/todo/`. The four SUB-A-adjacent working
+files (`subscriptions.md`, `process-manager.md`,
+`projections.md`, `sub-a-implementation.md`) closed when SUB-A
+landed across SDK slices 1-12; their decided content migrated
+into `docs/architecture.md`, `docs/concepts.md`,
+`docs/decisions.md`, `docs/invariants.md`, and
+`docs/sql-contract.md`. Pre-release migration guidance for the
+breaking-change-at-the-SDK-surface bits lives in
+`docs/upgrade-notes/pm-f.md`.
 
-- `docs/todo/doc-patches.md` — three small wording patches to
-  `guarantees.md`, `concepts.md`, and `decisions.md`. ~30 minutes
-  each.
-- `docs/todo/consistency.md` — two coordinated SDK changes to the
-  consistency-wait path: an `exclude` mechanism for `dispatch`
-  (with PM self-deadlock auto-prevention and warning log), and a
-  cross-stream guard for `waitForProjection`. Focused
-  implementations, each one or two files plus tests.
+What's still open from the re-review:
 
-**Pre-release, design first:**
-
-- `docs/todo/subscriptions.md` — the subscription substrate
-  redesign (SUB-A: routing-vs-processing architecture / work
-  queue), with the handler error-policy surface (SUB-B) and
-  routing-side batching (SUB-C) folded in. The big architectural
-  question of this cycle; ML-0001 partitioned-consumers collapses
-  into it.
-- `docs/todo/process-manager.md` — PM-specific items that ride on
-  top of the subscription substrate (handle/apply split,
-  deterministic event IDs for PM-dispatched commands,
-  fan-out-as-modelling-pattern, simplified routing surface
-  collapsing the Commanded directive set). PM-A, PM-C, PM-E,
-  PM-F can proceed in parallel with SUB-A; PM-B is the slice
-  that depends on the subscription decision (and now consists
-  mostly of a constraint-mapping that's already written into
-  the SUB-A proposed design).
-- `docs/todo/projections.md` — projection-side items that ride
-  on the subscription substrate (registration surface for
-  partition modes, why projections don't take PM-C's
-  apply/handle split, read-model transactionality, rebuild as
-  an operator action). All items pre-release; depend on SUB-A
-  landing for the substrate, but the API-surface design can
-  proceed in parallel.
-
-**Post-release / depends on others:**
-
-- TODO #11 above — conformance criteria revisit, blocked on SUB-A.
-- The new `ML-0006..0009` entries in `docs/maybe-later.md` — the
-  general consistency-wait predicate, the Aggregate Multi-step
-  convenience, aggregate state/version introspection,
-  force-snapshot admin.
-- The new entry in `docs/non-goals.md` — SDK-level PM fan-out is
-  explicitly out.
-
-**Output.** Each working file closes when its items land in the
-live docs and SDK; this index item closes when all four working
-files are empty (or themselves closed).
+- `docs/todo/doc-patches.md` — three small wording patches
+  (DOC-A handler purity, DOC-B D-0004 one-liner, DOC-C D-0010
+  "Why" tighten). Independent of SUB-A; pick up when convenient.
+- `docs/todo/consistency.md` — CON-A (`exclude` mechanism for
+  `dispatch`) and CON-B (`waitForProjection` cross-stream
+  guard). CON-B's underlying-compare-after-SUB-A note is now
+  trivial: SUB-A's catch-up predicate already handles the
+  spurious-true case for cross-stream targets (no in-flight
+  work items for a target on an unrelated stream is vacuously
+  true; the SDK-side guard is still needed to reject the
+  misuse synchronously).
+- TODO #11 above — conformance criteria revisit. Now
+  un-blocked; SUB-A has settled.
+- The follow-on items still hanging off this index entry
+  (`ML-0006..0012` in `docs/maybe-later.md`, the SDK-level
+  PM-fan-out non-goal, PM-E for deterministic event IDs on
+  PM-dispatched commands).
 
 ---
 
@@ -524,16 +501,18 @@ in the SUB-A noise; fix in its own commit after SUB-A lands
   reference event-sourcing library.** Walked the catalogue
   end-to-end on 2026-05-23. Headline outcomes:
   - Two correctness-class findings: the `waitForProjection`
-    cross-stream silent wrong-answer bug (tracked in
-    `docs/todo/consistency.md` CON-B) and the PM
-    multi-command-on-redelivery duplicate-dispatch risk (tracked
-    in `docs/todo/process-manager.md` PM-E).
+    cross-stream silent wrong-answer bug (still tracked in
+    `docs/todo/consistency.md` CON-B; still open) and the PM
+    multi-command-on-redelivery duplicate-dispatch risk (PM-E;
+    open, no working file -- see `docs/invariants.md` "Honest
+    gaps in v1" entry 2).
   - A larger architectural finding: the single-cursor subscription
-    model is insufficient for the PM-instance and
-    concurrent-projection cases. Three candidate designs
-    identified; decision parked for a dedicated design pass
-    (`docs/todo/subscriptions.md` SUB-A). ML-0001 collapses into
-    it.
+    model was insufficient for the PM-instance and
+    concurrent-projection cases. Resolved in SUB-A across SDK
+    slices 1–12; see `docs/decisions.md` D-0002 and
+    `docs/architecture.md` "How a worker runs". The original
+    ML-0001 partitioned-consumers entry has been removed
+    (capability now provided by SUB-A's partition shape).
   - Several smaller items routed to `docs/maybe-later.md`
     (ML-0006..0009) and `docs/non-goals.md` (SDK-level PM
     fan-out).

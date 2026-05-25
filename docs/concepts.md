@@ -122,33 +122,65 @@ The SDK provides a "wait until this projection has caught up"
 helper when an application needs to read its own writes
 synchronously.
 
-## Subscriptions and cursors
+A projection declares how it wants its events partitioned:
 
-A **subscription** is the durable bookmark a projection (or a
-process manager — same primitive) uses to remember where it got
-to. Each subscription has:
+- **`{ kind: 'sequential' }`** (the default) — every event lands
+  on one partition; the handler runs strictly in `event_number`
+  order with no parallelism. The closest match to the
+  one-cursor-one-worker shape.
+- **`{ kind: 'per-event' }`** — each event becomes its own
+  partition; max parallelism.
+- **`{ kind: 'per-key', key: (e) => string }`** — the user
+  supplies a partition key; events sharing a key are delivered
+  in order, events on different keys run in parallel.
 
-- **An identity** — `(stream, name)`. The same `name` against
-  different streams is a different subscription.
-- **A cursor** (`last_seen`) — the position past which the
-  subscriber doesn't need events redelivered.
-- **A lease** — the identity of the worker currently holding
-  it, with an expiry.
+Projections that need routing-side filtering (the projection
+ignores some event types entirely) skip the `partitionBy` sugar
+and pass a `routeFn` directly: `(event) => { partitionKey } |
+"ignore"`.
 
-Subscriptions are **persistent**, **single-active-worker**, and
-**polled**:
+## Subscriptions and the work queue
 
-- *Persistent* — the cursor survives restarts; workers resume
-  where they left off.
-- *Single-active-worker* — at most one worker holds the lease
-  at a time. Multiple workers can race for the lease (giving
-  failover); only one consumes events.
-- *Polled* — workers ask "anything new?" on a tick. No push,
-  no `LISTEN`/`NOTIFY` in the contract.
+A **subscription** is the framework's bookkeeping for a
+projection or process manager. Each subscription is split
+internally into two cooperating halves:
 
-Delivery is **at-least-once**. A worker that processes an event
-and crashes before advancing the cursor will see the event again
-when a new worker claims the lease. Handlers must be idempotent.
+- A **routing cursor** (`last_seen`) advanced by a single
+  *routing worker* that reads new events past the cursor, runs
+  the user's `routeFn` on each, and atomically writes both the
+  new cursor and the per-partition **work items** for the
+  events that route to a partition.
+- A **work queue** (`subscription_work_items`) consumed by N
+  *processing workers* in parallel. A processing worker claims
+  one item at a time via `claim_work_item`, runs the user's
+  handler, and writes the terminal-success step. Within a
+  partition, items are processed serially in `event_number`
+  order; across partitions, processing is concurrent.
+
+The two halves are isolated. The routing-side lease lives on the
+`subscriptions` row; the processing-side lease lives on each
+work-item row. A processing worker does not take a subscription
+lease, and the routing worker does not claim work items. A slow
+or poison handler stalls only its own partition; other
+partitions keep draining.
+
+Subscriptions are **persistent** (cursors and queue survive
+restarts), **single-active on routing** (one routing worker per
+subscription at a time), **parallel on processing** (any number
+of processing workers per subscription), and **polled** (no
+`LISTEN`/`NOTIFY` in the contract).
+
+Delivery is **at-least-once**: a processing worker that crashes
+between handler-return and the terminal-success call will see
+the item redelivered when its lease expires. Handlers must be
+idempotent.
+
+When an application needs to wait for a subscription to catch
+up (read-your-own-writes), the SDK polls a server-side
+**catch-up predicate**: the routing cursor has reached the
+target AND no work item below the target is still in flight.
+Either condition alone is insufficient; the atomic write of the
+route step makes both observable together.
 
 ## Process managers
 
@@ -160,13 +192,34 @@ The canonical example: a money transfer. A `TransferRequested`
 event arrives; the PM dispatches a `Withdraw` to the source
 account; on `Withdrawn` it dispatches a `Deposit` to the
 destination. If the withdraw is refused, the PM observes the
-`WithdrawalRefused` event and stops — there's nothing to undo
-because the debit never happened.
+`WithdrawalRefused` event and completes the partition — there's
+nothing to undo because the debit never happened.
+
+A process manager has three callbacks:
+
+- **`routeFn(event) -> { partitionKey } | "ignore"`** — decides
+  which PM-instance partition an event belongs to (or skips it
+  entirely). Pure; no state parameter.
+- **`apply(state, event) -> state`** — pure state fold. Runs
+  during PM-state rebuild (after a missing snapshot or a
+  module-version mismatch) and on the triggering event before
+  `handle`.
+- **`handle(state, event) -> { commands?, complete? }`** — the
+  side-effectful step. Returns commands to dispatch and an
+  optional `complete: true` flag that DELETEs the PM
+  partition's snapshot + every remaining work item in one
+  transaction.
 
 Process manager state is persisted as a snapshot keyed by the
-PM's instance id. PMs are how multi-step workflows — sagas —
-get expressed: as event-driven state machines that dispatch
-commands.
+PM's partition. The split between `apply` (pure fold) and
+`handle` (side effects + lifecycle) means rebuild can replay
+state cheaply without re-dispatching commands. PMs express
+sagas as event-driven state machines.
+
+A single PM type can have any number of partitions running
+concurrently — each `partitionKey` value is an independent
+instance. A poison event on one partition does not block
+another.
 
 ## Snapshots
 
@@ -194,15 +247,18 @@ results. The SDK supports this by letting `dispatch` block
 until named projections have caught up to the appended events:
 
 ```ts
-await app.dispatch(deposit, { consistency: ["Balances"] });
+await app.dispatch("Account", aliceStream, deposit, {
+  consistency: ["Balances"],
+});
 // Balances has processed every event from the deposit.
 const row = await db.query("SELECT * FROM balances WHERE …");
 ```
 
 The list of subscriptions to wait for is **explicit** — there's
-no "wait for everything" shorthand. The wait is realised by
-polling, so the latency floor is the poll interval; the timeout
-is configurable.
+no "wait for everything" shorthand. The wait polls the
+subscription's catch-up predicate (routing cursor at-or-past the
+appended events AND no in-flight work items below them), so the
+latency floor is the poll interval; the timeout is configurable.
 
 ## Causation and correlation
 
@@ -244,20 +300,40 @@ The shape, in TypeScript:
 ```ts
 import { Instructed } from "instructed-sdk";
 
-const app = new Instructed({ pool });
+const app = new Instructed({ db: pool });
 
-app.registerAggregate(Account);             // { name, streamPrefix, initial, execute, apply, ... }
+app.registerAggregate(Account);             // { type, initialState, execute, apply }
 app.registerAggregate(Transfer);
-app.registerProjection(Balances);           // { name, subscribe, handler, ... }
-app.registerProcessManager(transferPM);     // { name, subscribe, route, handle, apply, ... }
 
-const worker = await app.startWorker();     // claims subscriptions, starts loops
+app.registerProjection("Balances", {
+  // Default partitioning is `{ kind: 'sequential' }`. Use a
+  // routeFn if you also want routing-side filtering.
+  handler: async (event) => { /* fold into read store */ },
+});
 
-await app.dispatch(openAccount("alice"));
-await app.dispatch(deposit("alice", 1000), { consistency: ["Balances"] });
-await app.dispatch(requestTransfer("alice", "bob", 300));
+app.registerProcessManager("TransferProcessManager", {
+  routeFn: (event) => {
+    const id = (event.data as { transferId?: string }).transferId;
+    return id ? { partitionKey: id } : "ignore";
+  },
+  initialState: () => ({ stage: "starting" }),
+  apply: (state, event) => /* pure state fold */ state,
+  handle: async (state, event) => {
+    // Return commands and/or { complete: true } to terminate.
+    return { commands: [/* ... */], complete: false };
+  },
+});
 
-await worker.close();                       // graceful shutdown; releases leases
+const worker = await app.startWorker();     // claims subs, spawns workers
+
+await app.dispatch("Account", aliceStream, { kind: "Open", owner: "alice" });
+await app.dispatch("Account", aliceStream,
+                   { kind: "Deposit", amount: 1000 },
+                   { consistency: ["Balances"] });
+await app.dispatch("Transfer", transferStream,
+                   { kind: "Request", from: "alice", to: "bob", amount: 300, transferId });
+
+await worker.close();                       // graceful shutdown
 ```
 
 See [`examples/bank-account/`](../examples/bank-account/) for a

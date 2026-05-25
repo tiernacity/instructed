@@ -34,7 +34,7 @@ catalogue of invariants the realisation must satisfy see
 
 ## Schema
 
-Five tables in the `instructed` schema:
+Six tables in the `instructed` schema:
 
 | Table | Purpose |
 |---|---|
@@ -42,11 +42,15 @@ Five tables in the `instructed` schema:
 | `events` | Caller-keyed event rows. Append-only — `UPDATE` and `DELETE` triggers raise. |
 | `stream_events` | The `(event, stream)` join. Carries per-stream version and original-stream identity. The unique constraint on `(stream_id, stream_version)` is the optimistic-locking mechanism. |
 | `snapshots` | At most one row per `source_uuid`. Backs aggregate snapshots and process-manager state. |
-| `subscriptions` | Persistent leased cursors. Identity is `(stream_id, name, shard)` with `shard = 0` reserved for the single-active-worker model. |
+| `subscriptions` | Persistent routing cursor + lease per `(stream_id, name, shard)`. The routing worker advances this row; processing workers do not touch it. |
+| `subscription_work_items` | The per-subscription work queue. One row per routed event per partition; carries the per-item lease (`claimed_by`, `lease_expires_at`) processing workers compete on. |
 
 All mutation goes through stored procedures; the tables are not
 written to directly. Triggers on `events` and `stream_events`
-enforce append-only by raising on direct `UPDATE` / `DELETE`.
+enforce append-only by raising on direct `UPDATE` / `DELETE`. The
+`subscription_work_items` table cascades from
+`subscriptions` on delete, so removing a subscription removes its
+queued work.
 
 ## How an append works
 
@@ -115,22 +119,30 @@ snapshot. A failed snapshot write does not fail the command.
 
 ## How a worker runs
 
-A projection or process manager worker runs the same loop:
+Under SUB-A a subscription is served by two cooperating worker
+kinds. Both are spun up automatically by
+`Instructed.startWorker()`; lower-level callers can compose
+them with `startRoutingWorker` + `startProjectionWorker` /
+`startPmWorker` directly.
+
+### Routing worker (single-active per subscription)
 
 ```
 claim_subscription(stream, name, worker_id, lease_seconds)
-    → 'claimed' or 'already_claimed'   -- if already_claimed, retry later
+    → 'claimed' or 'already_claimed'   -- if already_claimed, sleep + retry
 
 loop while not stopped:
-    in a short read tx:
-        events = read_subscription_batch(stream, name, worker_id, batch_size)
+    events = read_all(last_seen + 1, batch_size)        -- or read_stream
     if events empty:
         sleep poll_interval
         continue
+    decisions = []
     for e in events:
-        await handler(e, ctx)            -- NO SDK transaction
-    in a short ack tx:
-        advance_subscription(stream, name, worker_id, last_position)
+        d = routeFn(e)                                   -- pure; no I/O
+        if d != "ignore":
+            decisions.append((e.event_number, d.partitionKey))
+    route_batch(stream, name, worker_id, decisions, max(events).event_number)
+        -- ONE tx: cursor advance + work-item INSERTs
     in parallel, every heartbeat_interval:
         extend_subscription_claim(...)
 
@@ -138,52 +150,100 @@ on shutdown:
     release_subscription(stream, name, worker_id)
 ```
 
-The handler runs outside any SDK transaction. The cursor
-advance is a separate short transaction after the handler
-returns. If the handler throws, the cursor is not advanced;
-the events redeliver on the next iteration. If the worker
-crashes between handler-return and ack-commit, the same:
-redelivery. This is at-least-once delivery; handlers are
-idempotent.
+Key points:
 
-Process-manager workers run an extra step in the ack tx:
-for each *routed* event they upsert the PM's state snapshot,
-keyed by the instance id, in the same short transaction that
-advances the cursor. The snapshot's `source_version` is set to
-that event's `event_number`. For *ignored* events on a PM's
-subscription, the SDK does not issue a per-event
-`advance_subscription`: the next routed event's persist-and-ack
-tx advances the cursor past every preceding ignored event
-implicitly (because `advance_subscription` is monotone), and a
-single trailing `advance_subscription` per batch covers any tail
-of ignored events after the last routed event. So the two
-markers diverge by exactly the number of ignored events since
-the last routed event: `source_version <= last_seen` always.
-On restart the SDK reads from `last_seen + 1`; redelivered
-events with `event_number <= source_version` are already folded
-into state and the SDK skips them before calling `handle`
-(PM-024).
+- `routeFn` is pure user code: no I/O, no aggregate loads. A
+  thrown routeFn stalls the worker (and is surfaced via
+  `onError`) -- the alternative, silent skip, would violate
+  "no silent skip on any event".
+- `route_batch` commits the cursor advance and the work-item
+  INSERTs in one transaction. This atomicity is load-bearing
+  for the catch-up predicate: once `last_seen >= N` is
+  observable, the work items for events up to N are observable
+  too.
+- The work-item PK absorbs duplicate INSERTs (`ON CONFLICT DO
+  NOTHING`), so a crashed mid-batch routing worker is
+  recoverable: the next routing worker re-reads from
+  `last_seen` and the re-inserts are no-ops.
 
-PMs dispatch commands as part of handling an event. Dispatch
-opens its own connection — the persist-and-ack transaction and
-the dispatch transaction run on different sessions, so their
-lock sets stay disjoint. (The dispatch path locks `streams` and
-the events tables; the persist-and-ack path locks
-`subscriptions` and `snapshots`.)
+### Processing worker (parallel per subscription)
 
-One subtle consequence of the worker shape: a PM's subscription
-is shared across *all* of that PM's process instances. There is
-one cursor on `$all` (or on the chosen stream) regardless of
-how many `process_uuid`s the PM is juggling. If instance A's
-`handle` is a poison pill that keeps throwing, the
-handler-throws backoff (§11.5) retries that event forever and
-instance B can make no progress — even though it's a different
-process. This is by design (the cursor is what makes
-at-least-once delivery composable with snapshot upsert in one
-tx) and matches Commanded, but it surprises people. A poison
-event stalls the PM type, not just the failing instance.
+```
+loop while not stopped:
+    claim = claim_work_item(stream, name, worker_id, lease_seconds)
+        -- FOR UPDATE SKIP LOCKED + per-partition predicate
+    if claim is null:
+        sleep poll_interval
+        continue
+    event = read_all(claim.event_number, 1)
+    in parallel, every heartbeat_interval:
+        extend_work_item_claim(...)
+    await handler(event, ctx)            -- NO SDK transaction
+    on success:
+        complete_work_item_projection(...)   -- DELETE the row, or
+        complete_work_item_pm(...)           -- UPDATE-to-done + UPSERT snapshot, or
+        complete_pm_instance(...)            -- terminal: DELETE snapshot + all items
+    on handler throw:
+        SUB-B error policy decides retry-in / stop
+        -- 'retry-in' re-runs handler against the same claim;
+        -- 'stop' exits the worker; the lease expires and another
+        --   processing worker takes over.
+```
+
+Key points:
+
+- Multiple processing workers per subscription are normal and
+  intended. They distribute work via `FOR UPDATE SKIP LOCKED`
+  on the claim row; the per-partition predicate keeps
+  within-partition ordering serial.
+- The handler runs outside any SDK transaction. The terminal
+  step (DELETE for projections, UPDATE+UPSERT for PMs) runs as
+  its own short SDK-owned transaction after the handler
+  returns. If the handler throws, no terminal step fires; the
+  item stays `claimed` under the SUB-B retry-in loop and the
+  lease is held by the heartbeat.
+- If the worker crashes (or the SUB-B policy returns `stop`)
+  the lease expires and another processing worker takes the
+  same item over. The original worker's next call to
+  `extend_work_item_claim` / `complete_*` / `fail_work_item`
+  raises `IS030 work_item_lease_lost`.
+
+### PM-specific processing
+
+A PM processing worker adds a state-load step before `handle`
+and a dispatch step after:
+
+1. Load state: read the partition's snapshot if its
+   `snapshot_module_version` matches; otherwise rebuild by
+   folding every prior `done` work-item's event through
+   `apply` from `initialState()`.
+2. `apply(state, event)` -> staged_state.
+3. `handle(staged_state, event)` -> `{ commands?, complete? }`.
+4. Dispatch each command via `runCommand` on the **dispatch
+   client** (a different connection from the persist client;
+   lock sets stay disjoint -- the dispatch path locks `streams`
+   + the events tables, the persist-and-ack path locks
+   `subscriptions` + `snapshots` + `subscription_work_items`).
+5. Terminal step: `complete_work_item_pm` (non-terminal,
+   updates work item to `done` and upserts the snapshot in one
+   tx) or `complete_pm_instance` (terminal, DELETEs the
+   snapshot and every work item for the partition in one tx).
+
+Under SUB-A, a poison event stalls only its **own partition**:
+other partitions on the same PM type keep draining. (Under the
+pre-SUB-A single-cursor model, a poison event stalled the
+whole PM type.) This per-partition isolation is one of the
+largest behaviour wins of the substrate redesign.
 
 ## How leases work
+
+There are two lease scopes under SUB-A: the subscription-level
+(routing) lease and the per-work-item (processing) lease.
+
+### Subscription-level lease (routing worker)
+
+Lives on `subscriptions.claimed_by` /
+`subscriptions.claim_expires_at`.
 
 `claim_subscription(stream, name, worker_id, lease_seconds)`:
 
@@ -198,17 +258,45 @@ event stalls the PM type, not just the failing instance.
 - If a row exists with an expired claim, takes it over,
   returns `'claimed'`.
 
-`extend_subscription_claim` is the heartbeat: workers call it
-periodically (typically every `lease_seconds / 3`) to refresh
-the expiry. If a worker pauses long enough for its lease to
-expire and another worker takes over, the original worker's
-next call to `extend_subscription_claim` or
-`read_subscription_batch` or `advance_subscription` raises
+`extend_subscription_claim` is the heartbeat: routing workers
+call it periodically (typically every `lease_seconds / 3`) to
+refresh the expiry. If a routing worker pauses long enough for
+its lease to expire and another routing worker takes over, the
+original worker's next call to `extend_subscription_claim`,
+`route_batch`, or `release_subscription` raises
 `IS022 subscription_lease_lost` — its signal to stop.
 
 `release_subscription` is the graceful shutdown — it clears
-the lease so another worker can claim immediately rather than
-waiting for the expiry.
+the lease so another routing worker can claim immediately
+rather than waiting for the expiry.
+
+### Per-work-item lease (processing worker)
+
+Lives on `subscription_work_items.claimed_by` /
+`subscription_work_items.lease_expires_at`.
+
+`claim_work_item(stream, name, worker_id, lease_seconds)`:
+
+- Atomically selects the next eligible work item using `FOR
+  UPDATE SKIP LOCKED` plus a per-partition predicate
+  (`NOT EXISTS` for any earlier non-terminal item in the same
+  partition), and stamps it with the caller's `worker_id` +
+  lease expiry.
+- Returns null if no eligible item is available; the caller
+  sleeps `poll_interval` and tries again.
+- If the eligible item is currently `claimed` but its lease
+  has expired, takes it over (lease takeover branch).
+
+`extend_work_item_claim` is the heartbeat the processing
+worker runs alongside long handler executions. On lease loss
+it raises `IS030 work_item_lease_lost` and the worker exits
+the in-flight item; redelivery happens via lease expiry. The
+terminal-success calls (`complete_work_item_*`) and the
+operator-only `fail_work_item` also raise `IS030` on lease
+loss.
+
+Processing workers do NOT take a subscription-level lease.
+Multiple processing workers per subscription are normal.
 
 ## Strong consistency on dispatch
 
@@ -216,11 +304,28 @@ After a successful append, the SDK knows the assigned
 `(stream_version, event_number)` range for the new events. When
 the dispatcher requests
 `consistency: ["BalancesProjector", "OrderProjector"]`, the SDK
-polls `read_subscription_position(stream, name)` for each named
-subscription until every returned `last_seen` is at or past the
-appended events' position. If the configured timeout elapses,
-dispatch returns a `ConsistencyTimeoutError` — the events
-remain durably appended; only the wait failed.
+polls `is_subscription_caught_up(stream, name, target)` for each
+named subscription until every predicate returns true. If the
+configured timeout elapses, dispatch returns a
+`ConsistencyTimeoutError` — the events remain durably appended;
+only the wait failed.
+
+The SUB-A catch-up predicate has two conjuncts and both must
+hold:
+
+1. The routing cursor has reached the target
+   (`subscriptions.last_seen >= target`).
+2. No `subscription_work_items` row for the subscription with
+   `event_number <= target` is in a non-terminal state
+   (`pending`, `claimed`, or `failed`).
+
+Either alone is insufficient. Conjunct (1) is necessary because
+routing may lag the append; conjunct (2) is necessary because
+routing may have run ahead but processing not yet caught up to
+the target. The atomic write of `route_batch` ensures (1) is
+never observable without the relevant rows for (2) being
+observable, so there is no race where a caller sees "caught up"
+before work items are visible to claim.
 
 The list is explicit. There is no "wait for everything"
 shorthand because there is no in-store registry of which
@@ -232,10 +337,14 @@ subscriptions exist for which application.
 |---|---|
 | Two appenders, same stream, same expected version | Unique constraint on `stream_events (stream_id, stream_version)`. One wins, the other gets `IS001`. |
 | Two appenders, any streams, both targeting `'any_version'` | Row lock on `streams[target]` serialises same-stream; row lock on `streams[$all]` orders globally. |
-| Two workers, same subscription | `claim_subscription` row lock — only one holds the lease at a time. |
-| One worker, ack after another worker has taken over the lease | `advance_subscription` checks `claimed_by`; raises `IS022 subscription_lease_lost` if it doesn't match. |
+| Two routing workers, same subscription | `claim_subscription` row lock — only one holds the subscription lease at a time; the loser sees `already_claimed`. |
+| One routing worker, action after another worker has taken over the lease | `route_batch` / `extend_subscription_claim` / `release_subscription` check `claimed_by`; raise `IS022 subscription_lease_lost` if it doesn't match. |
+| Two processing workers, same subscription, same partition | Per-partition predicate in `claim_work_item` -- only the next-eligible item in a partition can be claimed; other workers skip to other partitions. Within a partition, processing is serial. |
+| Two processing workers, same subscription, different partitions | `FOR UPDATE SKIP LOCKED` on the work-items row — both workers proceed concurrently. |
+| One processing worker, terminal call after another worker has taken over its item | `complete_work_item_*` / `extend_work_item_claim` / `fail_work_item` check `claimed_by`; raise `IS030 work_item_lease_lost` if it doesn't match. |
 | Reader and appender on the same stream | MVCC. Reads run outside any locks taken by the appender. |
-| Dispatcher and worker, same Postgres | Lock sets disjoint: dispatch holds `streams` + events; worker ack holds `subscriptions` + `snapshots`. |
+| Dispatcher and processing worker, same Postgres | Lock sets disjoint: dispatch holds `streams` + events; worker terminal step holds `subscription_work_items` + `snapshots`. |
+| Routing worker mid-batch + processing worker on the same subscription | Lock sets disjoint: routing holds `subscriptions` + the work-items rows it's inserting; processing holds the work-items row it's claiming. |
 
 ## What's outside the store
 
@@ -243,16 +352,23 @@ subscriptions exist for which application.
   Snapshots make reload cheap for long streams.
 - **Subscription routing / handler invocation** — SDK concern.
   The store delivers a batch; the SDK invokes the handler.
-- **Selector evaluation** — SDK-side. The SDK reads a batch and
-  applies the selector before invoking the handler; the cursor
-  advances past skipped events.
+- **Routing decisions** — user code (`routeFn`) runs in the
+  routing worker. Pure: no I/O, no aggregate loads. Routing-side
+  filtering is expressed as `"ignore"`; partition shape is
+  expressed as the returned `partitionKey`. The SDK ships sugar
+  (`partitionBy: { kind: 'sequential' | 'per-event' | 'per-key' }`)
+  over the bare `routeFn` for projections.
 - **Snapshot policy** — application concern. `snapshot_every: N`
   is the SDK convention.
 - **Strong-consistency polling** — SDK concern. The store
-  exposes `read_subscription_position`; the SDK does the
-  polling and timeout.
+  exposes `is_subscription_caught_up`; the SDK does the polling
+  and timeout.
 - **Dispatch wait orchestration, retries, backoff** — SDK
   concern.
+- **Error policy on handler throw** — SDK concern via the SUB-B
+  `ErrorPolicy` hook (`retry-in` / `stop`). The default is
+  exponential backoff capped at 30s, retry forever. The store
+  contract does not specify retry behaviour.
 
 ## SDK structure
 
@@ -264,10 +380,16 @@ APIs on top.
 
 - Procedure wrappers with `SQLSTATE → typed-error` translation.
 - The aggregate load-execute-append loop with OCC retry.
-- A persistent-subscription worker loop with lease, heartbeat,
-  and cursor advance.
+- A **routing worker** loop (claim subscription + read events +
+  run `routeFn` + `route_batch`) with subscription-level lease
+  and heartbeat.
+- A **processing worker** loop (claim work item + run handler +
+  terminal step) with per-item lease and heartbeat. PM
+  processing additionally loads/rebuilds PM state and
+  dispatches commands on a separate session.
 - Snapshot read/write/delete primitives.
-- A subscription-position read for strong-consistency waits.
+- A catch-up-predicate poll (`is_subscription_caught_up`) for
+  strong-consistency waits.
 
 **Conveniences** (each SDK may shape these per language idiom):
 

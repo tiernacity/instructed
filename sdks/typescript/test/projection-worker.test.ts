@@ -1,8 +1,8 @@
 /**
  * SUB-A slice 6 — projection processing worker tests.
  *
- * Slice acceptance items (per docs/todo/sub-a-implementation.md after
- * commit A's rewrite of the slice-6 brief):
+ * Slice acceptance items (SUB-A slice 6; substrate documented in
+ * docs/architecture.md "How a worker runs" / "Concurrency model"):
  *   - each `PartitionBy` mode behaves as specified:
  *       sequential = serial; per-event = max parallelism;
  *       per-key   = parallel across keys, serial within.

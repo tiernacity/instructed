@@ -1,7 +1,8 @@
 /**
  * SUB-A slice 7 — process-manager processing worker tests.
  *
- * Slice acceptance items (per docs/todo/sub-a-implementation.md slice 7):
+ * Slice acceptance items (SUB-A slice 7; substrate documented in
+ * docs/architecture.md "PM-specific processing"):
  *   - snapshot load happy path
  *   - rebuild via `apply` on missing snapshot (IS010)
  *   - rebuild via `apply` on snapshot_module_version mismatch (state

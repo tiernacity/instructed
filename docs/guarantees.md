@@ -40,18 +40,26 @@ for the mechanisms see [`architecture.md`](architecture.md).
 ## What subscribers see
 
 - Every subscriber sees every event for which it is
-  responsible — every event on its subscribed stream (or every
-  event in `$all`), in strictly increasing order.
+  responsible — every event on its subscribed stream (or
+  every event in `$all`), modulo the subscriber's own routing
+  decision (events the subscriber routes to `"ignore"` are
+  skipped at the routing layer).
+- Within a partition, events are delivered to the handler in
+  strictly increasing `event_number` order. Across partitions,
+  delivery is concurrent: a subscriber that partitions by some
+  domain key (per-account, per-tenant, etc.) sees parallelism
+  across keys with serial order within each key.
 - Delivery is **at-least-once**. A subscriber that crashes
-  mid-handler will see the events that hadn't been
-  acknowledged when it restarts. Handlers must be written to
-  tolerate seeing the same event more than once.
-- A subscription is durable. Its cursor — the position it has
-  processed up to — survives process restarts.
-- At any moment, at most one worker is processing a given
-  subscription. Other workers can race for the lease and will
-  take over if the active worker stalls or disappears, but
-  they will not double up on event delivery.
+  mid-handler will see the work item redelivered when its
+  per-item lease expires. Handlers must be written to tolerate
+  seeing the same event more than once.
+- A subscription is durable. The routing cursor and the work
+  queue both survive process restarts.
+- At any moment, at most one routing worker is active per
+  subscription, and any number of processing workers may be
+  active. Routing workers compete for the subscription lease;
+  processing workers compete for individual work items.
+  Neither path double-delivers.
 
 ## What `dispatch` returns
 
@@ -120,9 +128,14 @@ for the mechanisms see [`architecture.md`](architecture.md).
     `event_id` that already exists.
 - The errors a subscriber can raise:
   - **`SubscriptionLeaseLostError`** (`IS022`) — another
-    worker took over the lease; the worker should stop.
-  - **`SubscriptionNotFoundError`** (`IS020`) — deleted out
-    from under the worker.
+    routing worker took over the subscription lease; the
+    routing worker should stop.
+  - **`WorkItemLeaseLostError`** (`IS030`) — another
+    processing worker took over the in-flight work item; the
+    processing worker should abort the item (redelivery via
+    the next claim).
+  - **`SubscriptionNotFoundError`** (`IS020`) — the
+    subscription was deleted out from under a worker.
 - The errors a snapshot operation can raise:
   - **`SnapshotNotFoundError`** (`IS010`) — read a snapshot
     that doesn't exist. The SDK typically catches and ignores
@@ -144,11 +157,12 @@ A small but important list:
   consistent — the gap between an append and a projection
   processing it is bounded by the projection's poll interval
   (typically tens to hundreds of milliseconds), not zero.
-- **A single subscription is consumed by a single active
-  worker.** Throughput scales by splitting into multiple named
-  subscriptions, not by adding workers to one. Partitioned
-  consumers across one subscription are deferred (see
-  [`maybe-later.md`](maybe-later.md) ML-0001).
+- **A single subscription has one active routing worker but
+  may have many active processing workers.** Routing
+  (event -> work-item) is single-active per subscription;
+  processing (work-item -> handler -> ack) parallelises across
+  partitions. Within a partition, processing is strictly
+  serial; across partitions, it is concurrent.
 - **Event payload schema evolution is the application's
   concern.** The store treats `data` and `metadata` as opaque
   JSONB. Upcasting old event shapes to new ones happens in
