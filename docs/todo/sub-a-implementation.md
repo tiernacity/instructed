@@ -7,10 +7,14 @@ this file when the work lands.
 
 ## Status snapshot (for a fresh session picking this up)
 
-**Done:** Slices 1–8.
+**Done:** Slices 1–10.
 
 Commit log (newest first):
-- `<this commit>` SUB-A slice 8: `waitForProjection`
+- `<this commit>` SUB-A slice 10: bank-account example migration
+  to the SUB-A registration shapes + PM-F upgrade note.
+- `d22b663` SUB-A slice 9: Instructed facade onto the SUB-A
+  worker modules.
+- (prior) SUB-A slice 8: `waitForProjection`
   reimplementation against the catch-up predicate.
 - `83b16c6` TODO #13: record streams_stream_uuid_key race
   (pre-existing, unrelated; noted while running slice-7 tests).
@@ -29,7 +33,7 @@ Commit log (newest first):
 - `1b08e1c` SUB-A slice 2: core work-queue procedures.
 - `fbd7b9c` SUB-A slice 1: subscription_work_items schema.
 
-**Next:** Slice 9 (`Instructed` facade updates).
+**Next:** Slice 11 (soak harness re-baseline).
 
 Slice 9 is the breaking-API-change slice for the SDK surface:
 it removes the legacy `registerProjection(name, handler)` and

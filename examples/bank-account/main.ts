@@ -1,37 +1,40 @@
 /**
- * Bank-account example — end-to-end driver.
+ * Bank-account example -- end-to-end driver.
  *
  * Sets up the Instructed facade, registers the two aggregates
  * (Account, Transfer), the Balances projection, and the
  * TransferProcessManager, then runs two scenarios:
  *
  *   1. Successful transfer: open alice (1000) and bob (0); transfer
- *      300 from alice → bob; final balances 700 / 300.
- *   2. Refused transfer: try to transfer 5000 from bob → alice; the
- *      Account aggregate emits WithdrawalRefused; the PM stops; no
- *      Deposit ever lands on alice; balances stay at 700 / 300.
+ *      300 from alice -> bob; final balances 700 / 300.
+ *   2. Refused transfer: try to transfer 5000 from bob -> alice; the
+ *      Account aggregate emits WithdrawalRefused; the PM completes
+ *      the partition; no Deposit ever lands on alice; balances stay
+ *      at 700 / 300.
  *
  * Run against the docker-compose Postgres (instructed_test database):
  *
  *   docker compose up -d
- *   cd sdks/typescript
  *   node --experimental-strip-types examples/bank-account/main.ts
- *
- * Or, after `npm run build`:
- *
- *   node dist/examples/bank-account/main.js
  */
 
 import { randomUUID } from "node:crypto";
-import { Instructed, type RunningWorker } from "../../sdks/typescript/src/index.ts";
+import {
+  Instructed,
+  type RunningWorker,
+} from "../../sdks/typescript/src/index.ts";
 import { Account } from "./account.ts";
 import { Transfer } from "./transfer.ts";
 import {
+  BALANCES_SUBSCRIPTION_NAME,
   balancesProjection,
   newBalancesView,
   type BalancesView,
 } from "./balances.ts";
-import { transferProcessManager } from "./transfer-pm.ts";
+import {
+  TRANSFER_PM_NAME,
+  transferProcessManager,
+} from "./transfer-pm.ts";
 
 const PG_URL =
   process.env.INSTRUCTED_DATABASE_URL ??
@@ -43,22 +46,27 @@ async function main(): Promise<void> {
 
   app.registerAggregate(Account);
   app.registerAggregate(Transfer);
-  app.registerProjection(balancesProjection(view), {
-    pollInterval: 50,
-    heartbeatInterval: 1_000,
-  });
-  app.registerProcessManager(transferProcessManager(), {
-    pollInterval: 50,
-    heartbeatInterval: 1_000,
-  });
+  // SUB-A registration: positional name + declarative input. The
+  // worker options object (third arg) carries the routing/processing
+  // knobs; the workers are spun up by `startWorker()` below.
+  app.registerProjection(
+    BALANCES_SUBSCRIPTION_NAME,
+    balancesProjection(view),
+    { pollInterval: 50, heartbeatInterval: 1_000 },
+  );
+  app.registerProcessManager(
+    TRANSFER_PM_NAME,
+    transferProcessManager(),
+    { pollInterval: 50, heartbeatInterval: 1_000 },
+  );
 
   const worker: RunningWorker = await app.startWorker();
   try {
     const alice = randomUUID();
     const bob = randomUUID();
 
-    // 1. Open and deposit. We wait for the Balances projection on
-    //    each dispatch via the consistency option.
+    // 1. Open and deposit. We wait for the Balances projection via
+    //    the consistency option on the funding dispatch.
     await app.dispatch("Account", `account-${alice}`, {
       kind: "Open",
       owner: "alice",
@@ -71,7 +79,10 @@ async function main(): Promise<void> {
       "Account",
       `account-${alice}`,
       { kind: "Deposit", amount: 1_000 },
-      { consistency: ["Balances"], consistencyTimeout: 10_000 },
+      {
+        consistency: [BALANCES_SUBSCRIPTION_NAME],
+        consistencyTimeout: 10_000,
+      },
     );
     log("opened + funded", view, alice, bob);
 
@@ -88,7 +99,7 @@ async function main(): Promise<void> {
     await waitForBalance(view, alice, 700);
     log("after successful transfer", view, alice, bob);
 
-    // 3. Refused transfer (bob → alice, 5000 — bob only has 300).
+    // 3. Refused transfer (bob -> alice, 5000 -- bob only has 300).
     const transferKo = randomUUID();
     await app.dispatch("Transfer", `transfer-${transferKo}`, {
       kind: "Request",
@@ -97,9 +108,9 @@ async function main(): Promise<void> {
       amount: 5_000,
       transferId: transferKo,
     });
-    // Wait for the refusal to land on bob's stream; that's the
-    // only observable side effect (no compensating command per
-    // D-0011). Balances stay unchanged.
+    // Wait for the refusal to land on bob's stream; that's the only
+    // observable side effect (no compensating command per D-0011).
+    // Balances stay unchanged.
     await waitForRefusal(app, `account-${bob}`);
     log("after refused transfer", view, alice, bob);
 
@@ -111,7 +122,7 @@ async function main(): Promise<void> {
         `unexpected final balances: alice=${aBal}, bob=${bBal} (expected 700 / 300)`,
       );
     }
-    console.log("OK — final balances:", { alice: aBal, bob: bBal });
+    console.log("OK -- final balances:", { alice: aBal, bob: bBal });
   } finally {
     await worker.close();
     await app.close();

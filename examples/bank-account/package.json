@@ -1,0 +1,6 @@
+{
+  "name": "bank-account-example",
+  "private": true,
+  "type": "module",
+  "description": "Bank-account example for the instructed TS SDK. Run with `node --experimental-strip-types main.ts` against the docker-compose Postgres."
+}
