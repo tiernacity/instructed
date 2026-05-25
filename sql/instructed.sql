@@ -722,10 +722,23 @@ begin
       if not found then
         if p_expected_version = 0 then
           -- INV-APPEND-014: V=0 against a missing stream creates it.
-          insert into instructed.streams (stream_uuid, stream_version)
-          values (p_stream_uuid, v_n)
-          returning stream_id, 0::bigint
-            into v_stream_id, v_base_sv;
+          -- Concurrent first-time appenders both pass the SELECT FOR
+          -- UPDATE above (no row exists yet, so no lock is acquired);
+          -- the loser's INSERT here trips streams_stream_uuid_key. We
+          -- translate that to IS001 because both callers asserted
+          -- "stream is at version 0" and the loser was wrong: the
+          -- actual version is now N. The SDK's runCommand OCC loop
+          -- handles IS001 idiomatically.
+          begin
+            insert into instructed.streams (stream_uuid, stream_version)
+            values (p_stream_uuid, v_n)
+            returning stream_id, 0::bigint
+              into v_stream_id, v_base_sv;
+          exception when unique_violation then
+            raise exception 'append_to_stream: stream % was created concurrently (expected version 0)',
+              p_stream_uuid
+              using errcode = 'IS001';
+          end;
         else
           raise exception 'append_to_stream: stream % does not exist (expected version %)',
             p_stream_uuid, p_expected_version

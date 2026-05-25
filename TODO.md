@@ -453,70 +453,26 @@ recorded below rather than renumbered, so existing in-tree references
 (e.g. `TODO #3a`, `TODO #10` in code comments and docs) keep their
 meaning. Gaps in the numbering are expected.
 
----
-
-## 13. `streams_stream_uuid_key` race in `append_to_stream` (urgent follow-up)
-
-**Why this exists.** Surfaced during SUB-A slice 7 (commit
-`04bcf5a`) as a pre-existing intermittent test failure in
-`sdks/typescript/test/concurrent.test.ts` ("N concurrent
-commands: projector's folded state matches the aggregate").
-Verified by running the test at the SUB-A baseline commit
-`a982b4d` (origin/main pre-SUB-A): fails 3/10 runs there with
-the identical error. The flake predates all SUB-A work.
-
-**The race.** When N concurrent callers issue `runCommand`
-against the *same brand-new stream*, `append_to_stream` first
-INSERTs a `streams` row and then INSERTs the event. Two
-concurrent first-time appenders both attempt the streams INSERT;
-the loser gets Postgres SQLSTATE `23505`
-(`streams_stream_uuid_key`) instead of the SDK-mapped
-`IS001` / `IS002` / `IS003`. The SDK's `runCommand` OCC retry
-loop only retries on `WrongExpectedVersion` (IS001); a raw
-`23505` propagates and the command fails.
-
-**Failure shape:**
-
-```
-error: duplicate key value violates unique constraint
-  "streams_stream_uuid_key"
-  at Client.appendToStream (src/client.ts)
-  at runCommand (src/aggregate.ts)
-```
-
-Failure rate is test-machine-load-dependent; typically 1–3 runs
-in 10 of `concurrent.test.ts` standalone, ~1 run in 5 of the
-full SDK suite.
-
-**Why this is urgent.** It corrupts the at-least-one-writer-wins
-contract of `runCommand` for fresh streams. Any application
-that fires concurrent first-time commands against the same
-stream (a common shape for new-aggregate creation under load)
-will see spurious dispatch failures.
-
-**Likely fix shape** (one focused commit; out of scope here):
-
-- In `instructed.append_to_stream`, catch SQLSTATE `23505` on
-  the `streams` INSERT and re-raise as `IS001
-  wrong_expected_version` (or `IS002 stream_exists` depending
-  on the caller's `expected_version_type`). The SDK's existing
-  retry loop then handles it idiomatically.
-- Alternative: SDK-side translation. Less ideal — every other
-  SDK port would have to reproduce the translation. SQL-side
-  fix keeps the closed-error-set contract intact.
-- Conformance test pinning the race deterministically (use
-  `pg_advisory_lock` to gate the two writers).
-
-**Out of scope for SUB-A.** None of the SUB-A slices touch
-`append_to_stream`, `runCommand`, the streams UNIQUE constraint,
-or the concurrent test. Recording here so it doesn't get lost
-in the SUB-A noise; fix in its own commit after SUB-A lands
-(or sooner if a real consumer trips on it).
-
----
-
 ## Done items (delete on confirmation)
 
+- **#13 `streams_stream_uuid_key` race in `append_to_stream`.**
+  Fixed by wrapping the `'exact'` V=0 missing-stream-create
+  INSERT in `sql/instructed.sql` with a `unique_violation`
+  handler that translates to `IS001`, parallel to the existing
+  `'no_stream'` → `IS002` translation and INV-APPEND-022's
+  `stream_events` translation. Audit of all four `streams`
+  INSERT sites confirmed the `'any'` (ON CONFLICT), `'no_stream'`
+  (already handled), and `$all` bootstrap paths were race-safe;
+  only the V=0 path was missing the handler. Deterministic
+  conformance test added in
+  `tests/conformance/test/append.test.ts` using two dedicated
+  `pg.Client` connections with explicit BEGIN to hold session
+  1's transaction open past session 2's SELECT FOR UPDATE —
+  verified to fail with `23505 !== IS001` without the fix and
+  pass with it. INV-APPEND-014 in `docs/invariants.md` updated
+  to call out the translation. Full conformance suite (164/164,
+  3 pre-existing D-0024 skips) and full TS SDK suite (129/129)
+  green.
 - **#1 Fresh re-review of the invariant catalogue against the
   reference event-sourcing library.** Walked the catalogue
   end-to-end on 2026-05-23. Headline outcomes:

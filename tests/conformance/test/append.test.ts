@@ -386,6 +386,75 @@ describe("append_to_stream — concurrency", () => {
     assert.equal(await streamVersionOf(s), 1n);
   });
 
+  // INV-APPEND-014 / INV-APPEND-020: deterministic pinning of the
+  // streams_stream_uuid_key race on the V=0 missing-stream-create
+  // branch (TODO #13). Two dedicated client connections with explicit
+  // BEGIN keep session 1's transaction open past session 2's SELECT
+  // FOR UPDATE, forcing both into the INSERT path. Without the SQL
+  // fix, session 2's INSERT raises raw SQLSTATE 23505
+  // (streams_stream_uuid_key); with the fix it is translated to IS001.
+  test("deterministic streams_stream_uuid_key race: loser gets IS001, not raw 23505", async () => {
+    const { Client } = await import("pg");
+    const conn = {
+      host: process.env.PGHOST ?? "127.0.0.1",
+      port: Number(process.env.PGPORT ?? 5432),
+      user: process.env.PGUSER ?? "postgres",
+      password: process.env.PGPASSWORD ?? "postgres",
+      database: process.env.PGDATABASE ?? "instructed_test",
+    };
+    const c1 = new Client(conn);
+    const c2 = new Client(conn);
+    await c1.connect();
+    await c2.connect();
+    try {
+      const s = randomUUID();
+      // c1: open transaction, run append_to_stream to completion, but
+      // do NOT commit yet. The inserted streams row is uncommitted; its
+      // unique-index entry blocks any concurrent INSERT for the same
+      // stream_uuid.
+      await c1.query("BEGIN");
+      const r1 = await append(s, "exact", 0n, [{ event_type: "A" }], c1);
+      assert.equal(r1.length, 1);
+
+      // c2: open transaction, kick off append_to_stream WITHOUT awaiting.
+      // Inside the procedure: SELECT FOR UPDATE finds nothing (c1
+      // uncommitted under read-committed isolation), falls into the
+      // V=0-creates-stream branch, attempts INSERT — which blocks on
+      // c1's pending unique-index entry.
+      await c2.query("BEGIN");
+      const p2 = append(s, "exact", 0n, [{ event_type: "B" }], c2);
+
+      // Give c2 a moment to reach the blocking INSERT.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // c1 commits: c2's INSERT now resolves to a unique_violation.
+      await c1.query("COMMIT");
+
+      // c2 must surface IS001, not 23505.
+      let loser: unknown;
+      try {
+        await p2;
+        assert.fail("c2 must reject; the stream already exists");
+      } catch (err) {
+        loser = err;
+      }
+      await c2.query("ROLLBACK");
+
+      const code = (loser as { code?: unknown }).code;
+      assert.equal(
+        code,
+        "IS001",
+        `loser must reject with IS001, got ${String(code)} (raw 23505 means the SQL fix is missing)`,
+      );
+
+      // Stream is at version 1, owned by c1.
+      assert.equal(await streamVersionOf(s), 1n);
+    } finally {
+      await c1.end();
+      await c2.end();
+    }
+  });
+
   // INV-APPEND-021: concurrent 'any' to different streams: all succeed,
   //   and the global event_number sequence stays gapless (D-0012).
   test("concurrent 'any' to different streams: all succeed, $all is gapless 1..N", async () => {

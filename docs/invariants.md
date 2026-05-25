@@ -87,7 +87,12 @@ source. Fields: `source_uuid`, `source_type`, `source_version`
   otherwise raises `IS001 wrong_expected_version`.
 - **INV-APPEND-014** — V = 0 with `'exact'` is the "fresh stream"
   case: succeeds against a non-existent stream (creating it) or
-  against a stream whose current version is 0.
+  against a stream whose current version is 0. Two concurrent
+  callers with V = 0 against the same non-existent stream MUST
+  resolve as one winner (the stream is created) and one IS001
+  loser; the implementation MUST translate the underlying
+  `streams_stream_uuid_key` unique-violation to `IS001`, parallel
+  to INV-APPEND-022's translation on the `stream_events` index.
 
 ### Concurrent appends
 
