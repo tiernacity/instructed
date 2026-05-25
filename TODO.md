@@ -251,28 +251,6 @@ import without relative paths.
 
 ## 9. Documentation — next pass
 
-**Outstanding follow-ups from the 2026-05-23 concurrent-tests work:**
-
-- PM-024 was reworded in `invariants.md`, `architecture.md`, and
-  `sql-contract.md` during the 3a work to fix the "doubles as
-  last_seen" misstatement. A short *worked example* in
-  `architecture.md` or `concepts.md` showing the two markers
-  (`last_seen`, `source_version`) diverging across a couple of
-  ignored events would help the reader internalise the new
-  wording. Currently the new wording is correct but abstract.
-- `architecture.md` now mentions that a PM's subscription is
-  shared across all its process instances and a poison event
-  stalls the whole PM type. This is a one-paragraph callout; if
-  it gets reader feedback as surprising, promote it to a sized
-  section with a recovery-pattern recipe ("how to skip a poison
-  event in practice").
-- ML-0005 (coalesce ignored-event acks) was added to
-  `maybe-later.md`. If the soak harness (3b) shows it matters,
-  promote it from ML-0005 to an implementation task.
-
----
-
-
 **Why this exists.** The 2026-05-23 tidy collapsed work-in-
 progress framing and got the doc set down to a workable size,
 but a serious next pass is warranted on writing quality, depth,
@@ -324,6 +302,24 @@ harness".
 **Depends on.** TODO #6 partially — once a second SDK exists,
 writing will need to stop using TypeScript as the default
 example language in every code snippet.
+
+**Smaller follow-ups carried over from the 2026-05-23
+concurrent-tests work** (do alongside the broader pass, or
+opportunistically):
+
+- PM-024 was reworded in `invariants.md`, `architecture.md`, and
+  `sql-contract.md` during the 3a work to fix the "doubles as
+  last_seen" misstatement. A short *worked example* in
+  `architecture.md` or `concepts.md` showing the two markers
+  (`last_seen`, `source_version`) diverging across a couple of
+  ignored events would help the reader internalise the new
+  wording. Currently the new wording is correct but abstract.
+- `architecture.md` now mentions that a PM's subscription is
+  shared across all its process instances and a poison event
+  stalls the whole PM type. This is a one-paragraph callout; if
+  it gets reader feedback as surprising, promote it to a sized
+  section with a recovery-pattern recipe ("how to skip a poison
+  event in practice").
 
 ---
 
