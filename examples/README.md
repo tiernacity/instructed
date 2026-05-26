@@ -1,11 +1,14 @@
 # Examples
 
-Worked examples that exercise `instructed` end-to-end against the
-docker-compose Postgres.
+Worked examples that exercise `instructed` end-to-end. Organised
+by SDK language (TODO #8); cross-language scenarios will live
+under `mixed/` once a second SDK lands.
 
 | Example | Language | What it shows |
 |---|---|---|
-| [`bank-account/`](bank-account/) | TypeScript | Two aggregates, one projection, one process manager. Transfers + refusal-as-compensation. |
+| [`typescript/bank-account/`](typescript/bank-account/) | TypeScript | Two aggregates, two projections, one process manager. Transfers with explicit success/failure outcome events. Each component runnable in its own process; isolated docker-compose. |
 
-Run any example with `docker compose up -d` from the repo root,
-then follow the example's own README.
+Each example ships its own `docker-compose.yaml` and `npm start`
+so it can be run without interfering with the repo-root test
+database. Follow the example's own README for the precise
+one-liner.

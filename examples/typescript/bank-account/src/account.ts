@@ -7,7 +7,7 @@
  * and refused so the TransferProcessManager can react via its routes.
  */
 
-import type { AggregateDefinition } from "../../sdks/typescript/src/index.ts";
+import type { AggregateDefinition } from "instructed-sdk";
 
 export interface AccountState {
   opened: boolean;

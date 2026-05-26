@@ -326,6 +326,135 @@ opportunistically):
 
 ---
 
+## 15. `claim_subscription` returns nullable diagnostic fields the SDK mistypes
+
+**Why this exists.** Surfaced during the 2026-05-26 bank-account
+multi-process work. Starting a second `pm:transfer` worker against
+a steady-running first one prints one noisy line in the first
+worker's log:
+
+    [PM error] expected Date, got object
+
+The PM keeps making progress; the next routing-worker poll
+succeeds and produces no further error. So this is
+benign-but-ugly, in the same class as TODO #14.
+
+**Diagnosis.**
+
+- `instructed.claim_subscription` (`sql/instructed.sql:1485-1505`)
+  legitimately returns `claim_expires_at IS NULL` (and
+  `claimed_by IS NULL`) in the `'already_claimed'` outcome under
+  one specific race: the `FOR UPDATE SKIP LOCKED` step returns
+  zero rows (some other tx holds the row lock right now), and
+  the diagnostic unlocked re-read sees the row in the released
+  `(NULL, NULL)` state -- which is exactly the steady-state
+  routing-worker between-batches state under D-0025's per-batch
+  claim/release. A second routing worker booting up trips this
+  window because that's the only moment two workers race on the
+  same subscription row in steady state. The SQL comment on the
+  branch is explicit: *"the cursor value reported back uses the
+  MVCC snapshot if we have one; otherwise NULL claimed_by /
+  claim_expires_at carry the 'unknown' signal forward."*
+
+- `Client.claimSubscription` (`sdks/typescript/src/client.ts:324`)
+  unconditionally calls `toDate(r.claim_expires_at)` regardless
+  of the `result` field. `toDate(null)` throws
+  `expected Date, got object` because `typeof null === 'object'`.
+  The thrown error surfaces via the registration's `onError`
+  hook (in the bank-account example, prefixed `[PM error]`).
+
+- No code path in the SDK consumes `claimExpiresAt` in the
+  `'already_claimed'` branch; the field is purely diagnostic.
+  The routing worker reacts to `'already_claimed'` by sleeping
+  and retrying, and by the next poll worker 2's claim has
+  committed so the pre-check returns clean fields.
+
+**Class of bug.** SDK type contract narrower than the SQL
+contract. Every language SDK port that mirrored the current
+TypeScript shape would re-implement the same off-by-one
+nullability. Material for TODO #2 -- the `Client.claimSubscription`
+wrapper is exactly the thin procedure-binding the *core* layer
+should get right once.
+
+**What to do.**
+
+- `Client.claimSubscription` return type: `claimExpiresAt:
+  Date | null` (conditional `toDate`) and `claimedBy:
+  string | null`.
+- Public `ClaimSubscriptionResult` interface change in
+  `sdks/typescript/src/client.ts` and re-exports through
+  `index.ts`.
+- Audit other procedure wrappers in `client.ts` for the same
+  shape -- in particular `extend_subscription_claim` and the
+  work-item analogues -- and confirm no other call sites are
+  silently null-mistyped.
+- Conformance test covering the contention-race branch (assert
+  the SQL function returns NULL fields when the
+  FOR UPDATE SKIP LOCKED step finds zero rows). The branch is
+  currently described only in the SQL function's inline comments;
+  promote it to the contract.
+- One-sentence note in `docs/sql-contract.md` next to
+  `claim_subscription` calling out the nullable diagnostic
+  fields in the `'already_claimed'` outcome.
+
+**Output.** SDK type fix + tests + small contract-doc clarification.
+No SQL change; the SQL is correct as written.
+
+---
+
+## 14. `claim_work_item` IS020 noise on first-startup race
+
+**Why this exists.** Surfaced during the 2026-05-26 bank-account
+example work. On a fresh DB, `Instructed.startWorker()` launches
+the routing worker and the processing worker concurrently. The
+processing worker's first `claim_work_item` typically runs before
+the routing worker has created the subscription row, so the SQL
+function raises `IS020` (`subscription X on $all (shard 0) not
+found`). The SDK's processing worker catches `SubscriptionNotFound`
+and treats it as "queue empty -- sleep and retry"; by the next
+poll the subscription exists and life continues. No application
+impact, but every fresh-DB startup logs a Postgres `ERROR` line
+that looks alarming.
+
+**Decision needed.** Pick one of:
+
+1. **SQL contract change (preferred).** In `claim_work_item`,
+   collapse "subscription does not exist" into "no candidate row
+   available": return an empty result instead of raising IS020.
+   The processing-worker semantics for both cases are identical.
+   Side benefits: SDK loses a special-case catch; one fewer
+   SQLSTATE for every language port to translate; Postgres log
+   stays clean.
+
+   This is a real contract change. IS020 stays alive for call
+   sites where it's diagnostic (e.g. `release_claim`,
+   `delete_subscription`); only `claim_work_item` softens. Needs
+   an invariant update (the relevant `INV-SUB-W-*` entries), a
+   `docs/decisions.md` entry, conformance-test updates, and a
+   pass over the SDK's `processing-worker.ts` and `errors.ts` to
+   drop the now-unreachable `SubscriptionNotFound` branch in the
+   claim loop (but keep the class for the other call sites).
+
+2. **SDK sequencing.** `startWorker()` `await`s the routing
+   worker's first `claim_subscription` before launching the
+   processing worker. Removes the race in the common case but
+   doesn't help stand-alone processing workers running against a
+   fresh DB. Doesn't address the contract-debt of "raise for a
+   condition that is semantically not-an-error from the only
+   caller that hits it."
+
+3. **Doc-only.** Add a README note that the line is expected
+   and benign on first startup. Cheapest, ugliest, doesn't
+   improve the contract for SDK porters.
+
+My lean is (1). Discuss before changing SQL.
+
+**Output.** Either the SQL + invariants + decision-record change
+plus SDK simplification, or a clear note in `docs/sql-contract.md`
+about why we left it as-is.
+
+---
+
 ## 12. Apply re-review outcomes
 
 **Status: SUB-A / PM-F / PM-C / PRJ-A landed. Re-review outcomes

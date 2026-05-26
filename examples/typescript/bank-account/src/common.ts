@@ -1,0 +1,53 @@
+/**
+ * Shared helpers for the bank-account example scripts.
+ *
+ * Default connection points at the isolated docker-compose Postgres
+ * shipped under `examples/typescript/bank-account/docker-compose.yaml`
+ * (port 5433, database `bank_account`). Override with
+ * `INSTRUCTED_DATABASE_URL` to point at any conformant store.
+ */
+
+export const PG_URL =
+  process.env.INSTRUCTED_DATABASE_URL ??
+  "postgresql://postgres:postgres@127.0.0.1:5433/bank_account";
+
+export function installSignalHandlers(onStop: () => Promise<void> | void): void {
+  let stopping = false;
+  const stop = async (sig: NodeJS.Signals) => {
+    if (stopping) return;
+    stopping = true;
+    process.stderr.write(`\n[${sig}] shutting down…\n`);
+    try {
+      await onStop();
+    } catch (err) {
+      process.stderr.write(`shutdown error: ${(err as Error).message}\n`);
+    }
+    process.exit(0);
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+}
+
+export function requireArg(argv: string[], index: number, name: string): string {
+  const v = argv[index];
+  if (!v) {
+    process.stderr.write(`missing argument: <${name}>\n`);
+    process.exit(2);
+  }
+  return v;
+}
+
+/**
+ * Stream-key helpers. Stream identifiers are arbitrary strings on
+ * the SDK side, so the example uses human names directly --
+ * `account-alice`, `transfer-<random-id>`. Production apps that
+ * want global uniqueness across systems typically use UUIDs;
+ * either works.
+ */
+export function accountStream(name: string): string {
+  return `account-${name}`;
+}
+
+export function transferStream(transferId: string): string {
+  return `transfer-${transferId}`;
+}

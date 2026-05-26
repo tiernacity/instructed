@@ -1,0 +1,28 @@
+{
+  "name": "bank-account-example",
+  "private": true,
+  "type": "module",
+  "description": "Bank-account example for the instructed TS SDK. Demonstrates aggregates, projections, and a process manager, each runnable in its own foreground process.",
+  "scripts": {
+    "start": "node --conditions=development scripts/start.ts",
+    "projection:balances": "node --conditions=development scripts/projection-balances.ts",
+    "projection:transfers": "node --conditions=development scripts/projection-transfers.ts",
+    "pm:transfer": "node --conditions=development scripts/pm-transfer.ts",
+    "open-account": "node --conditions=development scripts/open-account.ts",
+    "deposit": "node --conditions=development scripts/deposit.ts",
+    "transfer": "node --conditions=development scripts/transfer.ts",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "instructed-sdk": "file:../../../sdks/typescript",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

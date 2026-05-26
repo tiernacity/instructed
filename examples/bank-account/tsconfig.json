@@ -1,8 +1,0 @@
-{
-  "extends": "../../sdks/typescript/tsconfig.json",
-  "compilerOptions": {
-    "typeRoots": ["../../sdks/typescript/node_modules/@types"]
-  },
-  "include": ["*.ts"],
-  "exclude": []
-}
