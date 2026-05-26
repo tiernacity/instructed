@@ -195,9 +195,11 @@ app.registerProcessManager(
 Routing now decides "which work-item row, if any?"; processing
 decides "what to do with this row, and is the instance done after?".
 The directive enum bundled the two; the SUB-A worker split forced the
-separation. See `docs/decisions.md` D-0011 / D-0012 for the
-lock-set-disjointness rationale and `docs/decisions.md` D-0018
-for the design rationale.
+separation. See `docs/decisions.md` D-0018 for the design rationale.
+Lock-set disjointness across dispatch / routing / processing-terminal
+sets is a property of the SQL contract’s per-procedure lock orders
+(see [D-0026](../decisions.md#d-0026)), not of pool or client
+separation.
 
 ### `apply` is mandatory
 
@@ -266,10 +268,10 @@ const proc = startProjectionWorker(client, {
   handler: async (event) => { /* ... */ },
 });
 
-// PM: same pattern; the processing side takes both the persist client
-// and a separate dispatch client (D-0011 / D-0012).
+// PM: same pattern; the processing side takes the same client as
+// the projection (per D-0026; the two-pool model was retired).
 const pmRouter = startRoutingWorker(client, { name, stream, routeFn });
-const pmProc   = startPmWorker(client, dispatchClient, {
+const pmProc   = startPmWorker(client, {
   name, stream, initialState, apply, handle,
 });
 ```
@@ -318,9 +320,10 @@ Worker-level types you may want for advanced use are still exported:
   the same wall-clock moment is reached.
 - Causation / correlation propagation through PM-dispatched commands
   is unchanged (D-0017).
-- The dispatch-pool isolation rules (D-0011 / D-0012) are unchanged:
-  the PM worker still requires `dispatchDb` distinct from `db` when
-  both are supplied as raw `Pool`/`Queryable` instances.
+- Causation / correlation defaulting on PM dispatch is unchanged
+  (D-0017): commands dispatched from a PM handler carry
+  `causation_id = triggering_event.event_id` and
+  `correlation_id = triggering_event.correlation_id`.
 
 ---
 

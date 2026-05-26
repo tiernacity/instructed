@@ -252,11 +252,14 @@ and a dispatch step after:
    `apply` from `initialState()`.
 2. `apply(state, event)` -> staged_state.
 3. `handle(staged_state, event)` -> `{ commands?, complete? }`.
-4. Dispatch each command via `runCommand` on the **dispatch
-   client** (a different connection from the persist client;
-   lock sets stay disjoint -- the dispatch path locks `streams`
-   + the events tables, the persist-and-ack path locks
-   `subscriptions` + `snapshots` + `subscription_work_items`).
+4. Dispatch each command via `runCommand` on the same client.
+   Lock sets stay disjoint by virtue of the SQL contract's
+   per-procedure lock-acquisition orders — the dispatch path
+   locks `streams` + the events tables; the persist-and-ack path
+   locks `subscriptions` + `snapshots` + `subscription_work_items`.
+   See [D-0026](decisions.md#d-0026): pool / client separation
+   was retired (it never actually enforced disjointness; the
+   contract does).
 5. Terminal step: `complete_work_item_pm` (non-terminal,
    updates work item to `done` and upserts the snapshot in one
    tx) or `complete_pm_instance` (terminal, DELETEs the
@@ -429,7 +432,7 @@ targets are exempt; they validly observe every append.
 | Two processing workers, same subscription, different partitions | `FOR UPDATE SKIP LOCKED` on the work-items row — both workers proceed concurrently. |
 | One processing worker, terminal call after another worker has taken over its item | `complete_work_item_*` / `extend_work_item_claim` / `fail_work_item` check `claimed_by`; raise `IS030 work_item_lease_lost` if it doesn't match. |
 | Reader and appender on the same stream | MVCC. Reads run outside any locks taken by the appender. |
-| Dispatcher and processing worker, same Postgres | Lock sets disjoint: dispatch holds `streams` + events; worker terminal step holds `subscription_work_items` + `snapshots`. |
+| Dispatcher and processing worker, same Postgres | Lock sets disjoint: dispatch holds `streams` + events; worker terminal step holds `subscription_work_items` + `snapshots`. The disjointness is a property of the SQL contract per [D-0026](decisions.md#d-0026); it does not require pool or client separation. |
 | Routing worker mid-batch + processing worker on the same subscription | Lock sets disjoint: routing holds `subscriptions` + the work-items rows it's inserting; processing holds the work-items row it's claiming. |
 
 ## What's outside the store

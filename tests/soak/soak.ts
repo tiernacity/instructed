@@ -261,14 +261,12 @@ async function main(): Promise<number> {
     cli.dispatchers + cli.triggerAppenders + cli.projectors + cli.pms * 2 + 4,
   );
   const pool = await makePool(cfg, poolSize);
-  const dispatchPool = await makePool(cfg, Math.max(4, cli.pms * 2));
 
   try {
     console.log("[soak] resetting schema");
     await resetSchema(pool);
 
     const client = new Client(pool);
-    const dispatchClient = new Client(dispatchPool);
 
     // Pre-allocate streams.
     const accounts = Array.from({ length: cli.accounts }, () => randomUUID());
@@ -334,7 +332,6 @@ async function main(): Promise<number> {
       slots.push(
         pmSlot({
           client,
-          dispatchClient,
           routingDef: pmRoutingDef,
           pmDef,
           slotLabel: `pm-${i}`,
@@ -542,7 +539,6 @@ async function main(): Promise<number> {
     return 1;
   } finally {
     await pool.end();
-    await dispatchPool.end();
   }
 }
 

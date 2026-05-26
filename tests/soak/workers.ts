@@ -251,7 +251,6 @@ export function projectorSlot(opts: ProjectorSlotOptions): SlotInternal {
 
 export interface PmSlotOptions {
   client: Client;
-  dispatchClient: Client;
   /** Routing-worker side of the PM. */
   routingDef: RoutingDefinition;
   /** Processing-worker side of the PM (apply + handle). */
@@ -278,7 +277,6 @@ export function pmSlot(opts: PmSlotOptions): SlotInternal {
       });
       const proc = startPmWorker(
         client,
-        opts.dispatchClient,
         opts.pmDef,
         {
           workerId: `${workerId}-p`,

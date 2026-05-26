@@ -104,10 +104,13 @@ cases:
 - The facade's registration options shape must be free to grow
   a `coTransactional?: boolean` flag without breaking v1
   callers.
-- The PM dispatch path uses a separate connection per
-  [D-0011](decisions.md#d-0011) / [D-0012](decisions.md#d-0012)
-  lock-set disjointness; ML-0004 will not cover PMs in a first
-  cut. Aggregates and projections only.
+- ML-0004 will not cover PMs in a first cut — the PM-dispatched
+  command sequence (load + execute + append + complete-work-item +
+  snapshot upsert) crosses two short transactions that the
+  caller-supplied connection can’t straightforwardly wrap (per
+  [D-0026](decisions.md#d-0026), there is no separate dispatch
+  pool to bind against; the PM uses one client). Aggregates and
+  projections only in the first cut.
 
 ---
 

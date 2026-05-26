@@ -9,8 +9,6 @@
  *   - registerProjection: partitionBy / routeFn mutual exclusivity
  *   - startWorker fans out routing+processing workers for a
  *     projection and a PM under one handle; close() stops them all
- *   - lazy dispatch-pool materialisation (no second pool until a PM
- *     is registered)
  *   - dispatch( ... , { consistency: [...] }) waits for the
  *     projection to catch up
  */
@@ -145,15 +143,7 @@ describe("Instructed -- registerProjection validation", () => {
 
 describe("Instructed -- startWorker fan-out", () => {
   test("runs a registered projection and PM under one handle; close stops both", async () => {
-    const dispatchPool = new pg.Pool({
-      host: process.env.PGHOST ?? "127.0.0.1",
-      port: Number(process.env.PGPORT ?? 5432),
-      user: process.env.PGUSER ?? "postgres",
-      password: process.env.PGPASSWORD ?? "postgres",
-      database: process.env.PGDATABASE ?? "instructed_test",
-      max: 4,
-    });
-    const app = new Instructed({ db: pool, dispatchDb: dispatchPool });
+    const app = new Instructed({ db: pool });
 
     const Counter = counter();
     app.registerAggregate(Counter);
@@ -229,7 +219,6 @@ describe("Instructed -- startWorker fan-out", () => {
     } finally {
       await handle.close();
       await app.close();
-      await dispatchPool.end();
     }
   });
 
@@ -237,56 +226,6 @@ describe("Instructed -- startWorker fan-out", () => {
     const app = new Instructed({ db: pool });
     try {
       await assert.rejects(() => app.startWorker(), /no projections or process managers/);
-    } finally {
-      await app.close();
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-
-describe("Instructed -- lazy dispatch pool", () => {
-  test("does not materialise dispatch pool until a PM is registered", async () => {
-    const app = new Instructed({ db: pool });
-    app.registerAggregate(counter());
-    // Touch persist client through dispatch; the dispatch pool stays null.
-    await app.dispatch<CounterCommand>("Counter", randomUUID(), { kind: "add", n: 1 });
-
-    // No PM registered yet; `dispatchClient` would have to materialise
-    // a sibling pool -- but since `db` is a Pool/Queryable with no
-    // connection string, the only safe behaviour is to throw.
-    let caught: unknown;
-    try {
-      app.dispatchClient();
-    } catch (e) {
-      caught = e;
-    }
-    assert.ok(caught instanceof Error, `expected an Error, got ${caught}`);
-    assert.ok(
-      (caught as Error).message.includes("must also be supplied"),
-      `unexpected message: ${(caught as Error).message}`,
-    );
-
-    await app.close();
-  });
-
-  test("materialises dispatch pool on first registerProcessManager when given a connection string", async () => {
-    const connString = `postgresql://${process.env.PGUSER ?? "postgres"}:${process.env.PGPASSWORD ?? "postgres"}@${process.env.PGHOST ?? "127.0.0.1"}:${Number(process.env.PGPORT ?? 5432)}/${process.env.PGDATABASE ?? "instructed_test"}`;
-    const app = new Instructed({ db: connString });
-    try {
-      app.registerProcessManager<{}>(
-        `pm-${randomUUID().slice(0, 8)}`,
-        {
-          routeFn: () => "ignore",
-          initialState: () => ({}),
-          apply: (s) => s,
-          async handle() {
-            return {};
-          },
-        },
-      );
-      // Dispatch client exists and is distinct from the persist client.
-      assert.notEqual(app.dispatchClient(), app.client());
     } finally {
       await app.close();
     }

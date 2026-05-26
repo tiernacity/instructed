@@ -18,10 +18,13 @@
  *        only `apply` runs during rebuild; `handle` does not.
  *   3. Runs `apply(state, claimedEvent)` -> staged_state.
  *   4. Runs `handle(staged_state, claimedEvent)` -> `{ commands?, complete? }`.
- *   5. Dispatches each command via `runCommand` on `dispatchClient`
- *      (a separate session per D-0011 / D-0012; lock-set disjointness).
+ *   5. Dispatches each command via `runCommand` on the same `client`.
  *      Causation = triggering event's `event_id`; correlation = the
- *      triggering event's `correlation_id` (D-0017).
+ *      triggering event's `correlation_id` (D-0017). The two-pool
+ *      model that existed prior to D-0026 was retired: lock-set
+ *      disjointness is a property of the SQL contract's per-procedure
+ *      lock-acquisition orders (see `sql/instructed.sql`), not of
+ *      client identity.
  *   6. On dispatch success, the slice-5 `complete` callback fires:
  *      - If `handle` returned `{ complete: true }` ->
  *        `complete_pm_instance` (DELETE snapshot + all work-items in
@@ -51,7 +54,7 @@
  */
 
 import type { Client } from "./client.ts";
-import { InstructedError, SnapshotNotFound } from "./errors.ts";
+import { SnapshotNotFound } from "./errors.ts";
 import {
   runCommand,
   type AggregateDefinition,
@@ -146,24 +149,17 @@ interface StagedWork<S> {
  * routing-worker side (one `startRoutingWorker` per subscription);
  * the slice-9 facade glues the two together at registration time.
  *
- * `client` and `dispatchClient` MUST be different `Client` instances
- * (D-0011 / D-0012): the persist-and-ack session (`client`) and the
- * command-dispatch session (`dispatchClient`) must have disjoint lock
- * sets so a dispatched aggregate's `appendToStream` cannot deadlock
- * against the same worker's `complete_work_item_pm`.
+ * Per [D-0026](../../../docs/decisions.md#d-0026) the PM dispatch
+ * path uses the same `client` as the persist-and-ack path: the SQL
+ * contract's per-procedure lock-acquisition orders and the pairwise
+ * disjoint lock sets are what prevent deadlock, not client / pool
+ * separation.
  */
 export function startPmWorker<S, E = unknown>(
   client: Client,
-  dispatchClient: Client,
   def: PmDefinition<S, E>,
   opts: PmWorkerOptions = {},
 ): RunningWorker {
-  if (client === dispatchClient) {
-    throw new InstructedError(
-      "startPmWorker: persist client and dispatch client must be different Client instances (D-0011 / D-0012)",
-    );
-  }
-
   const stream = def.stream ?? "$all";
 
   // Per-item staged state shared between the slice-5 `handle` and
@@ -250,7 +246,7 @@ export function startPmWorker<S, E = unknown>(
       // at the aggregate; no IS004 protection without deterministic
       // event IDs.
       for (const c of commands) {
-        await runCommand(dispatchClient, c.aggregate, c.streamUuid, c.command, {
+        await runCommand(client, c.aggregate, c.streamUuid, c.command, {
           causationId: event.event_id,
           correlationId: event.correlation_id ?? undefined,
         });

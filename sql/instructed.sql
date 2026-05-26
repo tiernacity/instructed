@@ -479,14 +479,19 @@ create trigger stream_events_no_delete
 --   is_subscription_caught_up   holds  { } (MVCC read)
 --   list_pm_rebuild_events      holds  { } (MVCC read; cold path)
 --
--- The persist-and-ack transaction the PM worker opens (record_snapshot then
--- advance_subscription in one tx, per D-0008/PM-023) holds
---   { snapshots, subscriptions }
--- which is disjoint from the dispatch transaction
---   { streams, events, stream_events }.
--- A different SDK binary or language (the absurd-bridge task, per D-0011
--- Phase 7 input #4) calling append_to_stream from a fresh session never
--- competes for those locks because it only touches the dispatch set.
+-- Under SUB-A, the PM-side terminal step is `complete_work_item_pm`
+-- (a single atomic procedure that combines the work-item completion
+-- and the snapshot UPSERT). Its lock set { subscription_work_items,
+-- snapshots } is disjoint from the dispatch set { streams, events,
+-- stream_events } that the PM's dispatched commands take via
+-- append_to_stream. Disjointness is therefore enforced by the SQL
+-- contract's per-procedure lock-acquisition orders, not by SDK-level
+-- pool or client separation (per D-0026 the SDK uses one pool / one
+-- Client; the legacy two-pool model that existed prior is retired).
+-- A different SDK binary or language (the absurd-bridge task, per
+-- D-0011 Phase 7 input #4) calling append_to_stream from a fresh
+-- session never competes for the terminal-step locks because it only
+-- touches the dispatch set.
 --
 -- Forward-compat: every procedure that takes caller-tunable knobs accepts
 -- them via a `p_options jsonb default '{}'::jsonb` parameter so ML-0013 and

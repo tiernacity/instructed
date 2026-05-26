@@ -186,7 +186,11 @@ set (`subscription_work_items`, `snapshots`) are pairwise
 disjoint. A handler-side terminal step never blocks a dispatcher
 in another session calling `append_to_stream`, and a routing
 worker writing a batch never blocks a processing worker claiming
-a previously-routed item.
+a previously-routed item. The disjointness is a property of the
+per-procedure lock-acquisition orders documented above; it does
+not require pool or client separation in the SDK (per
+[D-0026](decisions.md#d-0026), the SDK uses one pool / one
+`Client` for the entire application).
 
 ## Recommended call patterns
 
@@ -331,10 +335,10 @@ else:
 staged_state = apply(state, event)
 result = handle(staged_state, event)                -- { commands?, complete? }
 
--- Dispatch on the DISPATCH session (different connection from
--- the persist session; lock-set disjointness per D-0011 / D-0012):
+-- Dispatch on the same client (per D-0026; lock-set disjointness
+-- is a property of the SQL contract, not of client identity):
 for c in result.commands:
-  dispatch_client.append_to_stream(c.streamUuid, ..., events_from(c))
+  client.append_to_stream(c.streamUuid, ..., events_from(c))
      -- causation_id = event.event_id
      -- correlation_id = event.correlation_id
 
@@ -349,12 +353,14 @@ else:
                                      metadata: { snapshot_module_version: def.version } })
 ```
 
-`dispatch_client` is a separate `Client` instance bound to a
-different connection from the persist client. The dispatch path
-locks `streams` + the events tables; the terminal step locks
+Under [D-0026](decisions.md#d-0026) the same `Client` is used
+for both dispatch and persist-and-ack. The dispatch path locks
+`streams` + the events tables; the terminal step locks
 `subscription_work_items` + `snapshots`. The two lock sets are
-disjoint, so a dispatched aggregate's `append_to_stream` cannot
-deadlock against the same worker's `complete_work_item_pm`.
+disjoint by construction, so a dispatched aggregate's
+`append_to_stream` cannot deadlock against the same worker's
+`complete_work_item_pm` — each is its own short transaction with
+a documented lock-acquisition order, and the sets share no rows.
 
 ### Strong-consistency-on-dispatch wait ([D-0010](decisions.md#d-0010))
 

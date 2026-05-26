@@ -42,15 +42,10 @@ const ALL = "$all";
 
 let pool: pg.Pool;
 let client: Client;
-let dispatchClient: Client;
 
 before(async () => {
   pool = await getPool();
   client = new Client(pool);
-  // Two distinct Client instances so D-0011 is honoured. They wrap the
-  // same pool, which is fine: D-0011 is about lock-set disjointness
-  // (different pg sessions per call), not pool identity.
-  dispatchClient = new Client(pool);
 });
 
 after(async () => {
@@ -214,19 +209,6 @@ function startRouter(name: string, stream: string, pk: string): RunningWorker {
 }
 
 // ============================================================================
-// D-0011: same client thrown
-// ============================================================================
-
-describe("startPmWorker — D-0011 (lock-set disjointness)", () => {
-  test("throws when persist client === dispatch client", () => {
-    assert.throws(
-      () => startPmWorker(client, client, pmDef("pm-d11")),
-      /persist client and dispatch client must be different/i,
-    );
-  });
-});
-
-// ============================================================================
 // Happy path: snapshot present, non-terminal complete
 // ============================================================================
 
@@ -239,11 +221,7 @@ describe("startPmWorker — non-terminal complete", () => {
     ]);
 
     const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(
-      client,
-      dispatchClient,
-      pmDef(name, { stream }),
-    );
+    const worker = startPmWorker(client, pmDef(name, { stream }));
 
     try {
       await waitFor(async () => {
@@ -306,7 +284,7 @@ describe("startPmWorker — multi-command dispatch", () => {
     };
 
     const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, dispatchClient, def);
+    const worker = startPmWorker(client, def);
 
     try {
       await waitFor(async () => (seen.length >= 3 ? true : null));
@@ -353,7 +331,7 @@ describe("startPmWorker — complete: true (PM-F terminal)", () => {
     };
 
     const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, dispatchClient, def);
+    const worker = startPmWorker(client, def);
 
     try {
       // Two-stage wait so we don't spuriously satisfy `length === 0`
@@ -400,7 +378,7 @@ describe("startPmWorker — rebuild on missing snapshot", () => {
     ]);
 
     const r1 = startRouter(name, stream, "p1");
-    const w1 = startPmWorker(client, dispatchClient, pmDef(name, { stream }));
+    const w1 = startPmWorker(client, pmDef(name, { stream }));
     try {
       await waitFor(async () => {
         const rows = await listWorkItems(name);
@@ -437,7 +415,7 @@ describe("startPmWorker — rebuild on missing snapshot", () => {
       }),
     };
     const r2 = startRouter(name, stream, "p1");
-    const w2 = startPmWorker(client, dispatchClient, def2);
+    const w2 = startPmWorker(client, def2);
     try {
       await waitFor(async () => {
         const rows = await listWorkItems(name);
@@ -478,7 +456,7 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
       snapshotModuleVersion: "v1",
     };
     const r1 = startRouter(name, stream, "p1");
-    const w1 = startPmWorker(client, dispatchClient, defV1);
+    const w1 = startPmWorker(client, defV1);
     try {
       await waitFor(async () => {
         const rows = await listWorkItems(name);
@@ -527,7 +505,7 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
       },
     };
     const r2 = startRouter(name, stream, "p1");
-    const w2 = startPmWorker(client, dispatchClient, defV2);
+    const w2 = startPmWorker(client, defV2);
     try {
       await waitFor(async () => {
         const rows = await listWorkItems(name);
@@ -598,7 +576,7 @@ describe("startPmWorker — dispatch failure leaves work-item claimed", () => {
     };
 
     const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, dispatchClient, def);
+    const worker = startPmWorker(client, def);
 
     try {
       await waitFor(async () => (attempts >= 3 ? true : null));
@@ -623,11 +601,10 @@ describe("startPmWorker — empty handle result", () => {
     const name = `pm-empty-${randomUUID().slice(0, 8)}`;
     const { stream } = await appendN("e", [{ type: "T", data: { tag: "z" } }]);
     const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(
-      client,
-      dispatchClient,
-      { ...pmDef(name, { stream }), handle: () => ({}) },
-    );
+    const worker = startPmWorker(client, {
+      ...pmDef(name, { stream }),
+      handle: () => ({}),
+    });
     try {
       await waitFor(async () => {
         const rows = await listWorkItems(name);

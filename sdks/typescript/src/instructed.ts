@@ -30,14 +30,14 @@
  *       not deprecated).
  *
  * Pool management:
- *   - the persist client wraps the user's `db` (env-var or default
- *     when omitted); ownership tracked so `close()` ends owned pools.
- *   - the dispatch client wraps `dispatchDb` (or a sibling pool with
- *     the same connection string); materialised lazily on the first
- *     `registerProcessManager` or PM-driven dispatch. v1 considers
- *     `dispatch` itself NOT a PM-driven dispatch -- it uses the
- *     persist pool. The PM worker is the only path that needs the
- *     dispatch pool today.
+ *   - the client wraps the user's `db` (env-var or default when
+ *     omitted); ownership tracked so `close()` ends owned pools.
+ *   - per [D-0026](../../../docs/decisions.md#d-0026) there is one
+ *     pool / one `Client` for the entire SDK. PM dispatch shares the
+ *     same client as the persist-and-ack path; the two-pool model
+ *     (`dispatchDb`, `dispatchClient()`) was retired — lock-set
+ *     disjointness is a property of the SQL contract's per-procedure
+ *     lock-acquisition orders, not of pool / client identity.
  */
 
 import * as pg from "pg";
@@ -98,8 +98,6 @@ export interface InstructedDefaults {
 export interface InstructedOptions {
   /** `pg.Pool`, a connection string, or any Queryable. */
   db?: pg.Pool | Queryable | string;
-  /** Separate pool for PM dispatch; defaults to a sibling Pool. */
-  dispatchDb?: pg.Pool | Queryable | string;
   defaults?: InstructedDefaults;
 }
 
@@ -185,16 +183,8 @@ interface RegisteredProcessManager {
 export class Instructed {
   private readonly persistPool: pg.Pool | Queryable;
   private readonly persistOwned: boolean;
-  /** Lazily materialised on the first PM registration. */
-  private dispatchPool: pg.Pool | Queryable | null;
-  private dispatchOwned: boolean;
-  /** The user-supplied dispatchDb (kept until materialisation). */
-  private readonly dispatchSource: pg.Pool | Queryable | string | undefined;
-  /** The connection string used for the persist pool, if any. */
-  private readonly persistConnString: string | undefined;
 
   private readonly persistClient_: Client;
-  private dispatchClient_: Client | null = null;
 
   private readonly defaults: Required<InstructedDefaults>;
 
@@ -211,7 +201,7 @@ export class Instructed {
   constructor(opts: InstructedOptions | string = {}) {
     const o: InstructedOptions = typeof opts === "string" ? { db: opts } : opts;
 
-    // Persist pool.
+    // Pool. Single pool for the whole SDK under D-0026.
     let dbArg: pg.Pool | Queryable | string | undefined = o.db;
     if (dbArg === undefined) {
       dbArg = process.env.INSTRUCTED_DATABASE_URL || undefined;
@@ -219,21 +209,14 @@ export class Instructed {
     if (dbArg === undefined) {
       this.persistPool = new pg.Pool();
       this.persistOwned = true;
-      this.persistConnString = undefined;
     } else if (typeof dbArg === "string") {
       this.persistPool = new pg.Pool({ connectionString: dbArg });
       this.persistOwned = true;
-      this.persistConnString = dbArg;
     } else {
       this.persistPool = dbArg;
       this.persistOwned = false;
-      this.persistConnString = undefined;
     }
     this.persistClient_ = new Client(this.persistPool as Queryable);
-
-    this.dispatchSource = o.dispatchDb;
-    this.dispatchPool = null;
-    this.dispatchOwned = false;
 
     this.defaults = {
       leaseSeconds: o.defaults?.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS,
@@ -285,8 +268,6 @@ export class Instructed {
       input,
       opts,
     });
-    // Materialise the dispatch pool eagerly when a PM is registered.
-    this.ensureDispatchClient();
   }
 
   // ---- dispatch ----
@@ -390,7 +371,6 @@ export class Instructed {
       };
       const processing = startPmWorker(
         this.persistClient_,
-        this.ensureDispatchClient(),
         pmDef,
         processingOpts,
       );
@@ -417,10 +397,6 @@ export class Instructed {
     return this.persistClient_;
   }
 
-  dispatchClient(): Client {
-    return this.ensureDispatchClient();
-  }
-
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -434,9 +410,6 @@ export class Instructed {
     }
     if (this.persistOwned && isPool(this.persistPool)) {
       await this.persistPool.end();
-    }
-    if (this.dispatchOwned && this.dispatchPool && isPool(this.dispatchPool)) {
-      await this.dispatchPool.end();
     }
   }
 
@@ -485,35 +458,6 @@ export class Instructed {
     return out;
   }
 
-  private ensureDispatchClient(): Client {
-    if (this.dispatchClient_) return this.dispatchClient_;
-
-    let src: pg.Pool | Queryable | string | undefined = this.dispatchSource;
-    if (src === undefined) {
-      if (this.persistConnString !== undefined) {
-        this.dispatchPool = new pg.Pool({
-          connectionString: this.persistConnString,
-        });
-        this.dispatchOwned = true;
-      } else if (this.persistOwned) {
-        this.dispatchPool = new pg.Pool();
-        this.dispatchOwned = true;
-      } else {
-        throw new Error(
-          "Instructed: cannot materialise a dispatch pool -- when `db` is a Pool/Queryable, `dispatchDb` must also be supplied (D-0011 / D-0012)",
-        );
-      }
-    } else if (typeof src === "string") {
-      this.dispatchPool = new pg.Pool({ connectionString: src });
-      this.dispatchOwned = true;
-    } else {
-      this.dispatchPool = src;
-      this.dispatchOwned = false;
-    }
-
-    this.dispatchClient_ = new Client(this.dispatchPool as Queryable);
-    return this.dispatchClient_;
-  }
 }
 
 function normaliseConsistency(

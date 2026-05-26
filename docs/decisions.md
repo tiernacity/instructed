@@ -554,3 +554,95 @@ duration; if you can't bound that, shrink `batch_size`.
   decision enables is single-active-per-instant routing with
   per-batch rotation across processes — a different axis from
   ML-0013's concurrent live workers on disjoint shards.
+
+---
+
+## D-0026 — PM dispatch shares the single client; no separate dispatch pool
+
+The SDK exposes one `Client` (and one underlying `pg.Pool` /
+`Queryable`) for the entire application. PM workers dispatch
+commands via `runCommand` against the same client used for every
+other SDK call. There is no `dispatchDb` option, no separate
+dispatch pool, and no second `Client` parameter on
+`startPmWorker`. This supersedes the two-pool model that existed
+from slice 7 through D-0025.
+
+**Why the old two-pool model was wrong.** The original framing
+claimed two pools were required "for lock-set disjointness so a
+dispatched aggregate's `appendToStream` cannot deadlock against
+the same worker's `complete_work_item_pm`". Re-walking the
+argument:
+
+- Postgres locks are scoped to **transactions**, not to clients
+  or pools. A `Client` is a `pg.Pool` wrapper; two `Client`
+  instances around the same pool are indistinguishable at the
+  lock-acquisition layer.
+- Every SDK procedure call is its own transaction. `runCommand`
+  in particular does **not** hold a transaction across the
+  user's `execute` (`aggregate.ts:144-145`). A PM worker's calls
+  — `claim_work_item`, the handler, `runCommand` →
+  `appendToStream`, `complete_work_item_pm` — are four sequential
+  transactions on (potentially) four different pooled
+  connections. There is never a moment where one worker holds
+  locks from two of these sets at once.
+- Deadlock requires two transactions wanting two locks in
+  opposite orders. The SQL contract documents lock-acquisition
+  order per procedure (see `sql/instructed.sql:447`) and the
+  three sets — dispatch (`streams`, `events`, `stream_events`),
+  routing (`subscriptions`, `subscription_work_items`),
+  processing-terminal (`subscription_work_items`, `snapshots`)
+  — are pairwise disjoint by construction. No cycle is possible
+  whether the SDK uses one pool or two.
+- The `client === dispatchClient` runtime guard the SDK enforced
+  was identity comparison on `Client` wrappers and did not
+  actually enforce session isolation. The slice-7 commit
+  message conceded this: "Two different Client wrappers around
+  the same pool is allowed."
+- The historical PM-dispatch deadlock concern (commit `eb4e66b`,
+  Feb 2026, pre-SUB-A, Gleam codebase) was at a different layer:
+  a strong-consistency handler dispatching a command whose own
+  consistency-wait list transitively included the handler, so
+  the handler waited for itself to ack. The fix was PID
+  auto-exclusion at the orchestration layer, not pool
+  separation. In the current TS SDK the PM hot path goes through
+  `runCommand` directly (no consistency wait), so the scenario
+  is structurally absent regardless of pool count.
+
+**Why one pool is the right default under D-0025.** The two
+strategies users now have for handling load and contention are:
+
+1. Spin up more processes. Per D-0025, additional processes
+   share routing work batch-by-batch; per the work-item claim
+   model with `FOR UPDATE SKIP LOCKED`, additional processes
+   share processing work item-by-item. Aggregate dispatch and PM
+   dispatch are stateless from the SDK's perspective and need no
+   coordination at all. Adding processes evenly scales every
+   workload type.
+2. Run processes specialised by workload (an API-facing
+   dispatcher tier, a projection-processing tier, a PM tier) and
+   scale each independently. Per-process selection of which
+   workers to start is already a feature of
+   `Instructed.startWorker`'s registration model.
+
+Neither strategy requires multiple pools inside one process.
+Connection-budget isolation between PM dispatch and the rest of
+the SDK is a niche operational concern better solved by process
+separation when it actually arises.
+
+**Implications:**
+
+- `InstructedOptions.dispatchDb` is removed. Callers that were
+  passing it can simply drop the option; the persist `db` is now
+  used for everything.
+- The `Instructed.dispatchClient()` accessor is removed.
+- `startPmWorker(client, dispatchClient, def, opts)` becomes
+  `startPmWorker(client, def, opts)`. The runtime check
+  enforcing `client !== dispatchClient` is deleted.
+- No SQL contract change: lock-set disjointness, per-procedure
+  lock-acquisition orders, and the procedure error sets are all
+  unchanged. The disjointness statement in `sql-contract.md`
+  stays — it is a true property of the SQL contract — but the
+  consequence "so you need two pools" was always a non-sequitur
+  and is removed from the docs.
+- All 168 conformance tests pass unmodified. The change is
+  entirely in the SDK and its documentation.
