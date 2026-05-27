@@ -10,8 +10,11 @@ Status (2026-05-27):
   - step 1 (annotated export map): landed in §2 below.
   - step 2 (cheap layer-1 cleanups): TODO #15 landed. TODO #14
     parked (needs a SQL-contract decision; left in TODO.md).
-  - steps 3-5 (package shape, re-export grouping, pluggable
-    extension points): open.
+  - step 3 (package shape decision): landed as
+    [D-0027](../decisions.md#d-0027) -- single `instructed-sdk`
+    package with an `instructed-sdk/core` sub-path for L1+L2.
+  - step 4 (re-export grouping + sub-path wiring): open.
+  - step 5 (pluggable extension points): open.
 
 ---
 
@@ -379,13 +382,15 @@ Already in TODO that touches this layer:
 
 ## 5. Open questions for the next decision round
 
-  - **Physical package shape.** Single `instructed-sdk` package
+  - **Physical package shape.** ~~Single `instructed-sdk` package
     with documented sub-paths, or two packages
-    (`@instructed/core` + `@instructed/runtime`)? Either works for
-    porters. Decision goes in `docs/decisions.md`.
-  - **Re-export grouping in `src/index.ts`.** Regardless of the
-    package decision, the re-exports should make the L1/L2/L3
-    split legible. Probably:
+    (`@instructed/core` + `@instructed/runtime`)?~~ **Decided:**
+    [D-0027](../decisions.md#d-0027) -- single package, with an
+    `instructed-sdk/core` sub-path exposing L1+L2 (the porting
+    checklist surface). The bare `instructed-sdk` entry adds the
+    L3 facade and helpers on top.
+  - **Re-export grouping in `src/index.ts`.** The re-exports
+    should make the L1/L2/L3 split legible. Probably:
     ```ts
     // L1 — procedure bindings
     export { Client, ... } from "./client.ts";

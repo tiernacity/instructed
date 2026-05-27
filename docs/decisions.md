@@ -646,3 +646,91 @@ separation when it actually arises.
   and is removed from the docs.
 - All 168 conformance tests pass unmodified. The change is
   entirely in the SDK and its documentation.
+
+---
+
+## D-0027 — TS SDK ships as one package with a `core` sub-path; not split into two packages
+
+The TypeScript SDK is published as a single npm package,
+`instructed-sdk`, with two `exports` entry points:
+
+  - `instructed-sdk` — the full surface: L1 (procedure bindings)
+    + L2 (core behaviours) + L3 (idiomatic facade). The
+    conventional entry point; what application code imports.
+  - `instructed-sdk/core` — L1 + L2 only. The surface every
+    SDK port must reproduce per the porting checklist. For
+    consumers who want to build their own L3 facade.
+
+A two-package split (`@instructed/core` + `@instructed/runtime`
+or similar) was considered and rejected for v1.
+
+**Why one package.**
+
+- The layer model that needs to be conveyed to porters (TODO #2,
+  TODO #6) is conveyed by the porting checklist doc and by the
+  re-export grouping inside `src/index.ts`. The package-manager
+  layer is not the right enforcement mechanism for a contract
+  whose audience is "people writing the SDK in another
+  language" — they read the checklist, not our `package.json`.
+- The natural use-shape for application code is one import
+  (`import { Instructed } from "instructed-sdk"`), and the
+  bank-account example confirms this is the ergonomic default.
+  Two packages would force every application to declare both
+  in `package.json` for no application-visible benefit.
+- Version-skew between a hypothetical `@instructed/core` and
+  `@instructed/runtime` is a real cost users would have to pay
+  attention to (pinning, peer-dep matching, npm resolution
+  surprises). Inside one package the layers move in lockstep,
+  one changelog, one release.
+- The L2/L3 split is "same node process, same DB, same audience"
+  — closer to the `zod` / `drizzle-orm` / `kysely` shape (one
+  package, multiple sub-paths) than the `@trpc/server` +
+  `@trpc/client` shape (two packages because two ecosystems).
+- Pre-1.0, the multi-package overhead (two publishes, two
+  changelogs, two version cuts, peer-dep declarations between
+  them) outweighs the legibility benefit.
+
+**Why the `core` sub-path is still worth having.**
+
+- A consumer who wants to write their own L3 facade (custom
+  routing surface, alternative `dispatch` shape, different
+  consistency mechanism) can import from `instructed-sdk/core`
+  and be guaranteed the import doesn't pull `Instructed`,
+  `waitForProjection`, or the partition-by sugar — none of
+  which they want.
+- The sub-path is the package-level analogue of the porting
+  checklist: "this is what every SDK reproduces". A TS author
+  reading the SDK source can follow the sub-path entry into
+  the L1+L2 surface and see exactly the inventory the
+  checklist names.
+- The L1-only sub-path proposed in an earlier draft is
+  dropped. L1-only (`Client` + error classes + types) without
+  L2 (the aggregate loop, the routing worker, the processing
+  worker) is not a viable build target — anyone holding just
+  L1 ends up re-implementing L2 from scratch, which is the
+  bug class TODO #2 is designed to prevent. The sub-path that
+  is useful is the L1+L2 one.
+
+**Reversibility.** Splitting into two packages later is
+mechanical: the sub-path becomes the second package's name; the
+re-export grouping stays. Going from two packages back to one is
+also fine. The cost of getting this wrong at v1 is low.
+
+**Implications.**
+
+- `sdks/typescript/package.json` `exports` gains a second entry
+  for `./core` pointing at `dist/core/index.{js,d.ts}` (and the
+  CJS variant). Source lives at `sdks/typescript/src/core.ts`,
+  re-exporting from the L1 and L2 modules.
+- `sdks/typescript/src/index.ts` is reorganised to re-export in
+  three labelled groups (L1, L2, L3) so the layering is legible
+  even at the bare entry point. The bare entry re-exports
+  everything `core` does, plus the L3 facade and helpers.
+- Build configuration (`tsconfig.build.json` / `tsconfig.cjs.json`)
+  emits `dist/core.{js,d.ts}` alongside `dist/index.{js,d.ts}`.
+- No application-code breakage: every existing import from the
+  bare `instructed-sdk` continues to resolve.
+- The porting checklist (a future doc; TODO #2 deliverable)
+  names `instructed-sdk/core` explicitly as the inventory of
+  what a new-language SDK reproduces. Each language SDK chooses
+  its own package shape; the TS SDK's choice does not propagate.
