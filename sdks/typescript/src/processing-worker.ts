@@ -15,9 +15,11 @@
  * module is purely the worker's side of the loop and the SUB-B
  * error-policy plumbing.
  *
- * Error policy (SUB-B core surface):
+ * Error policy (the retry/error-policy extension point, SUB-B):
+ *
  *   - The handler is invoked inside a retry loop driven by an
- *     `ErrorPolicy` hook. The hook returns
+ *     `ErrorPolicy<PolicyState>` hook. The hook returns a record
+ *     `{ decision, state }` where `decision` is
  *       { kind: 'retry-in', delayMs }   -- sleep, then re-run the
  *                                          handler against the same
  *                                          claimed item.
@@ -25,14 +27,24 @@
  *                                          item claimed; the lease
  *                                          will expire and another
  *                                          worker may take it over.
- *   - Default policy: exponential backoff with base 100ms doubling
- *     each attempt, capped at 30s, retry forever. This is today's
- *     observable behaviour (per SUB-B "What lands" item 2) so existing
- *     consumers see no behaviour change.
- *   - Convenience wrappers (`retryUpTo`, `quarantineAfter`, ...) are
- *     out of scope here; they ship later and may map to
- *     `fail_work_item`. The slice-5 default never transitions a
- *     work item to `'failed'`.
+ *     and `state` is opaque to the SDK: it carries forward to the
+ *     next invocation on the *same* work item. The state slot lets a
+ *     policy implement token-bucket budgets, adaptive backoff, or
+ *     any other strategy that can't be expressed as a pure function
+ *     of `(err, attempt)`. Per-work-item lifecycle: the slot starts
+ *     at `undefined` and is discarded on success.
+ *   - Default policy (`DEFAULT_ERROR_POLICY`): exponential backoff
+ *     with base 100ms doubling each attempt, capped at 30s, retry
+ *     forever. Today's observable behaviour preserved across the
+ *     step-5 slice 3 contract change.
+ *   - Standard-library helpers (`exponentialBackoff`,
+ *     `linearBackoff`, `retryUpTo`) ship in `error-policies.ts` (L3).
+ *     Composition is plain function wrapping:
+ *     `retryUpTo(10, exponentialBackoff({ baseMs: 100, capMs: 30_000 }))`.
+ *   - `quarantineAfter` (the helper that transitions a work item to
+ *     `'failed'`) is parked pending TODO #7 co-design with
+ *     `instructedctl`'s operator surface. The slice-5 default never
+ *     produces `'failed'` rows.
  *
  * Not yet exported from src/index.ts; the layer-5 facade wires this
  * into `Instructed.registerProjection` / `registerProcessManager` in
@@ -91,19 +103,70 @@ export interface ErrorPolicyContext {
   attempt: number;
 }
 
-export type ErrorPolicy = (
+/**
+ * What an `ErrorPolicy` returns: the decision the worker acts on,
+ * plus an opaque state slot the SDK threads forward to the next
+ * invocation against the same work item.
+ */
+export interface ErrorPolicyResult<PolicyState = undefined> {
+  decision: ErrorPolicyDecision;
+  /**
+   * Opaque-to-the-SDK state for the next invocation. Returned as-is
+   * to the policy on the next failed attempt against the same work
+   * item. Stateless policies (pure functions of `err` and
+   * `ctx.attempt`) ignore this slot and return `undefined`.
+   *
+   * The slot's lifecycle is one work item: the SDK starts each work
+   * item's attempt loop with `state = undefined` and discards the
+   * slot on success. Per-worker-process state (token buckets, etc.)
+   * is forward-compatible but not present today: a worker-scoped
+   * policy closes over its long-lived state in a closure and
+   * ignores the slot.
+   */
+  state: PolicyState;
+}
+
+/**
+ * Retry/error-policy contract. Invoked once per failed handler
+ * attempt on a single work item; returns the worker's next move
+ * plus opaque state for the following invocation.
+ *
+ * `PolicyState` is the policy author's choice: `undefined` for
+ * pure attempt-based policies (the shipped `exponentialBackoff`,
+ * `linearBackoff`, `retryUpTo` helpers all do this), or any shape
+ * the policy needs to thread forward.
+ *
+ * Lifecycle. `state` starts at `undefined` for each work item;
+ * the SDK passes back whatever the previous invocation returned;
+ * on handler success the state is discarded.
+ *
+ * Standard library lives in `error-policies.ts` (L3). The
+ * `DEFAULT_ERROR_POLICY` constant below is the SDK's observable
+ * default when no `errorPolicy` is supplied.
+ */
+export type ErrorPolicy<PolicyState = undefined> = (
   err: unknown,
   ctx: ErrorPolicyContext,
-) => ErrorPolicyDecision | Promise<ErrorPolicyDecision>;
+  state: PolicyState | undefined,
+) => ErrorPolicyResult<PolicyState> | Promise<ErrorPolicyResult<PolicyState>>;
 
-export interface ProcessingWorkerDefinition<E = unknown> {
+export interface ProcessingWorkerDefinition<
+  E = unknown,
+  PolicyState = undefined,
+> {
   /** Subscription name (must match the routing worker for the same sub). */
   name: string;
   /** Source stream; default `$all`. */
   stream?: string;
   handle: ProcessingHandler<E>;
   complete: ProcessingCompleter<E>;
-  errorPolicy?: ErrorPolicy;
+  /**
+   * Retry/error policy. Type-parameterised by `PolicyState` for
+   * callers writing stateful policies; defaults to
+   * `ErrorPolicy<undefined>` (the stateless case) so existing
+   * code keeps typing.
+   */
+  errorPolicy?: ErrorPolicy<PolicyState>;
 }
 
 export interface ProcessingWorkerOptions {
@@ -123,16 +186,25 @@ export const DEFAULT_PROCESSING_POLL_INTERVAL_MS = 200;
 
 /**
  * SUB-B default error policy: exponential backoff with base 100ms,
- * doubling each attempt, capped at 30s, retry forever. Today's
- * observable behaviour (per SUB-B "What lands" item 2).
+ * doubling each attempt, capped at 30s, retry forever. The SDK's
+ * observable default when no `errorPolicy` is supplied; preserved
+ * verbatim across the step-5 slice 3 contract change.
+ *
+ * Equivalent to
+ * `exponentialBackoff({ baseMs: 100, capMs: 30_000 })` from
+ * `error-policies.ts`; defined inline here (not imported) so the
+ * L2 default has no dependency on the L3 standard-library file.
  */
-export const DEFAULT_ERROR_POLICY: ErrorPolicy = (_err, ctx) => {
+export const DEFAULT_ERROR_POLICY: ErrorPolicy = (_err, ctx, _state) => {
   const base = 100;
   const cap = 30_000;
   // attempt is 1-indexed; first retry waits base; clamp the exponent
   // so we never compute a huge intermediate even if attempt is large.
   const exp = Math.min(ctx.attempt - 1, 20);
-  return { kind: "retry-in", delayMs: Math.min(cap, base * 2 ** exp) };
+  return {
+    decision: { kind: "retry-in", delayMs: Math.min(cap, base * 2 ** exp) },
+    state: undefined,
+  };
 };
 
 // ============================================================================
@@ -142,9 +214,9 @@ export const DEFAULT_ERROR_POLICY: ErrorPolicy = (_err, ctx) => {
 /** Single retry delay on a transient non-IS030 heartbeat error. */
 const HEARTBEAT_RETRY_DELAY_MS = 100;
 
-export function startProcessingWorker<E = unknown>(
+export function startProcessingWorker<E = unknown, PolicyState = undefined>(
   client: Client,
-  def: ProcessingWorkerDefinition<E>,
+  def: ProcessingWorkerDefinition<E, PolicyState>,
   opts: ProcessingWorkerOptions = {},
 ): RunningWorker {
   const stream = def.stream ?? "$all";
@@ -153,7 +225,12 @@ export function startProcessingWorker<E = unknown>(
   const heartbeatInterval =
     opts.heartbeatInterval ?? Math.max(1_000, (leaseSeconds * 1000) / 3);
   const pollInterval = opts.pollInterval ?? DEFAULT_PROCESSING_POLL_INTERVAL_MS;
-  const errorPolicy = def.errorPolicy ?? DEFAULT_ERROR_POLICY;
+  // The SDK is opaque to PolicyState (it just hands the value back);
+  // erase the generic internally so the default policy (which uses
+  // `undefined`) and a user-supplied generic policy share one slot.
+  const errorPolicy: ErrorPolicy<unknown> =
+    (def.errorPolicy as ErrorPolicy<unknown> | undefined) ??
+    (DEFAULT_ERROR_POLICY as ErrorPolicy<unknown>);
   const onError = opts.onError ?? noopOnError;
 
   const ac = new AbortController();
@@ -253,6 +330,10 @@ export function startProcessingWorker<E = unknown>(
     eventNumber: bigint,
   ): Promise<boolean> {
     let attempt = 1;
+    // Per-work-item policy state slot. Starts as `undefined`;
+    // threaded forward across attempts; discarded on success (this
+    // function returns and the next work item gets a fresh slot).
+    let policyState: unknown = undefined;
     while (!closing && !aborted) {
       const ctx: ProcessingHandlerContext = {
         workerId,
@@ -269,14 +350,18 @@ export function startProcessingWorker<E = unknown>(
         // every failed attempt, not just the final outcome. Matches
         // the existing projection worker behaviour.
         safeOnError(asError(err, `handler threw on event ${eventNumber}`));
-        let decision: ErrorPolicyDecision;
+        let result: ErrorPolicyResult<unknown>;
         try {
-          decision = await errorPolicy(err, {
-            workerId,
-            partitionKey,
-            eventNumber,
-            attempt,
-          });
+          result = await errorPolicy(
+            err,
+            {
+              workerId,
+              partitionKey,
+              eventNumber,
+              attempt,
+            },
+            policyState,
+          );
         } catch (policyErr) {
           // A throwing error policy is itself a `stop` signal: we have
           // no defensible way to decide. Surface and exit.
@@ -286,6 +371,8 @@ export function startProcessingWorker<E = unknown>(
           markAborted(asError(policyErr, "errorPolicy threw"));
           return false;
         }
+        policyState = result.state;
+        const decision = result.decision;
         if (decision.kind === "stop") {
           // SUB-B `stop`: worker exits; item stays `claimed`; the
           // lease will expire and another worker may pick it up. We

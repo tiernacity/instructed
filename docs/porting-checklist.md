@@ -5,11 +5,12 @@ The TypeScript SDK in `sdks/typescript/` is the reference; this
 doc is the reading list that turns it into a porter's spec.
 
 Status: **incomplete**. Step 5 of the SDK rework
-(`docs/todo/sdk-rework.md` §7) writes this doc one slice at a
-time. As of 2026-05-27 the routing extension point (slice 1) and
-aggregate snapshot policy (slice 2) are documented; the retry /
-error policy (slice 3) section will land with that slice. The
-rest of the doc is structural and stable.
+(`docs/todo/sdk-rework.md` §7) wrote this doc one slice at a
+time. As of 2026-05-27 all three extension points (routing,
+aggregate snapshot policy, retry / error policy) are
+documented. The L1 procedure inventory and the per-port L2
+behaviour notes (§2, §3) are still skeletons; a follow-on pass
+fills them in.
 
 Reference SQL contract: `docs/sql-contract.md` plus `sql/instructed.sql`.
 Reference SDK: `sdks/typescript/src/`. Reference invariants:
@@ -237,14 +238,115 @@ events-since-last-snapshot counter.
 
 ### 4.3 Retry / error policy
 
-*To be documented with slice 3 of the SDK rework (see
-`docs/todo/sdk-rework.md` §7.4).*
+**Contract.** Decide what to do after a handler attempt fails:
+retry after a delay, or stop the worker. The contract is
+stateful by design — each call receives the previous call's
+state and returns the next state — so policies that need to
+thread information forward (token-bucket budgets, adaptive
+backoff) don't have to fight the SDK.
 
-Sketch: `ErrorPolicy<PolicyState>(err, ctx, state) ->
-{ decision, state }`. The SDK threads `state` per work item;
-first call gets `undefined`. Standard library:
-`exponentialBackoff`, `linearBackoff`, `retryUpTo`, and a
-composition helper.
+In TypeScript:
+
+```ts
+type ErrorPolicyDecision =
+  | { kind: "retry-in"; delayMs: number }
+  | { kind: "stop" };
+
+interface ErrorPolicyContext {
+  workerId: string;
+  partitionKey: string;
+  eventNumber: bigint;
+  /** 1-indexed: the attempt that just failed. */
+  attempt: number;
+}
+
+interface ErrorPolicyResult<PolicyState = undefined> {
+  decision: ErrorPolicyDecision;
+  /** Opaque to the SDK; threaded to the next invocation. */
+  state: PolicyState;
+}
+
+type ErrorPolicy<PolicyState = undefined> = (
+  err: unknown,
+  ctx: ErrorPolicyContext,
+  state: PolicyState | undefined,
+) =>
+  | ErrorPolicyResult<PolicyState>
+  | Promise<ErrorPolicyResult<PolicyState>>;
+```
+
+In any language: a function from `(error, context, prevState)`
+to `(decision, nextState)`, where `decision` is either
+"retry-in N ms" or "stop the worker" and `nextState` is opaque
+to the SDK. The TypeScript generic `PolicyState` disappears in
+Go / Python / Elixir; the equivalents are interfaces, protocols,
+or process state. The shape a porter MUST reproduce is the
+*lifecycle*: state starts undefined for each work item; the SDK
+threads it forward across attempts; on success the slot is
+discarded.
+
+**Contract obligations on the SDK.**
+
+  - State scope is **per work item**. First failed attempt on a
+    work item gets `state = undefined`; subsequent attempts on
+    the same item see the previous call's returned state; a new
+    work item starts fresh.
+  - On `{ kind: 'stop' }`, the SDK exits the worker. The work
+    item stays `claimed`; the lease expires and another worker
+    may pick it up. The SDK does **not** transition the row to
+    `'failed'`. Per `docs/invariants.md` INV-SUB-W-013, the
+    `'failed'` state is operator-only.
+  - A throwing policy is itself a `stop` signal. The SDK surfaces
+    via `onError` and exits.
+  - Per-worker-process state (token buckets, circuit breakers) is
+    forward-compatible: a policy closes over its long-lived state
+    in a closure and ignores the per-item state slot. Persistent
+    state across worker restarts is out of scope.
+
+**Default behaviour.** When no policy is supplied, the SDK uses
+exponential backoff with base 100ms doubling each attempt,
+capped at 30s, retry forever. This is **idiomatic, not
+required** — a port may ship a different default — but the
+default MUST be documented and MUST be expressible via the
+contract above (i.e. not hard-coded inside the worker loop
+where users can't replace it).
+
+**Standard library (TS).** In `error-policies.ts`:
+
+  - `exponentialBackoff({ baseMs, capMs, jitter? })` —
+    `delay = min(capMs, baseMs * 2^(attempt - 1))`; optional
+    full-jitter mode samples in `[0, delay)`.
+  - `linearBackoff({ stepMs, capMs })` —
+    `delay = min(capMs, stepMs * attempt)`.
+  - `retryUpTo(n, inner)` — emits `stop` when `attempt > n`;
+    otherwise delegates to `inner` (state passes through).
+
+All three are stateless (`PolicyState = undefined`); composition
+is plain function wrapping. Stateful policies are user-written.
+
+**Standard library obligations on a port.** **Idiomatic, not
+required.** Ship equivalents if your users need them; ship more
+if they ask; document the raw contract and require users to
+bring their own. The composition mode (function wrapping) is a
+TS idiom; a Go port might use a `Policy` interface with a
+composing struct, an Elixir port a behaviour with
+`use Policy.Compose`, etc.
+
+**Parked for TODO #7 co-design.** `quarantineAfter(n, inner)`
+— the helper that transitions a stuck work item to the
+`'failed'` SQL state — is **not shipped**. `'failed'` rows are
+operator-only (INV-SUB-W-013); shipping a producer in isolation
+without `instructedctl`'s `skip_work_item_with_audit` operator
+command would leave operators with no recovery path. Land both
+together under TODO #7.
+
+**Cross-language note.** The TS contract returns a tuple-shaped
+record `{ decision, state }`. A Go port might return
+`(Decision, State, error)` (with error being the
+throwing-policy signal made explicit); an Elixir port might
+return `{:retry_in, delay_ms, state} | {:stop, state}` directly.
+All are conformant provided the per-item state lifecycle and
+the `stop`-doesn't-fail-the-row semantics survive.
 
 ---
 

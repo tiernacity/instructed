@@ -18,14 +18,14 @@ Status (2026-05-27):
     plus L3. Asymmetries 2 (errors annotation), 4 (`mapPgError`
     hidden), and the `PartitionBy`-sugar-as-L3 split all
     addressed; see `§3 resolution status` below.
-  - step 5 (pluggable extension points): plan landed in §7
-    below. Framed around the contract + standard-library +
-    escape-hatch pattern the SDK already implements three
-    times. Slice 1 (routing) and slice 2 (aggregate snapshot
-    policy) landed 2026-05-27; slice 3 (retry / error policy)
-    open. PM L2/L3 split (asymmetry #1) and `quarantineAfter`
-    (TODO #7 co-design) parked with reasons; SNAP-002 /
-    snapshot module versioning stays under TODO #5, not here.
+  - step 5 (pluggable extension points): **complete**
+    (2026-05-27). All three slices landed. PM L2/L3 split
+    (asymmetry #1) and `quarantineAfter` (TODO #7 co-design)
+    parked with reasons; SNAP-002 / snapshot module versioning
+    stays under TODO #5, not here. TODO #2 (SDK restructuring)
+    is discharged; the porting checklist (`docs/porting-checklist.md`)
+    is in place; TODO #6 (additional language SDKs) can now
+    start against a stable `core.ts`.
 
 ---
 
@@ -727,17 +727,44 @@ Step 5 closes when:
     reference removed; D-0019 cross-referenced from both
     `aggregate.ts` and `aggregate-snapshots.ts`. Porting
     checklist §4.2 filled in. All 132 tests pass.
-  - Slice 3 has landed: `ErrorPolicy` carries a `PolicyState`
+  - ~~Slice 3 has landed: `ErrorPolicy` carries a `PolicyState`
     generic; the SDK threads the slot per work item;
     `exponentialBackoff`, `linearBackoff`, `retryUpTo`, and a
-    composition helper ship; default behaviour unchanged.
-  - The three contracts (snapshot policy, routing, error
+    composition helper ship; default behaviour unchanged.~~
+    **Done (2026-05-27).** `ErrorPolicy<PolicyState = undefined>`
+    with return shape `{ decision, state }` lands in
+    `processing-worker.ts`. The SDK threads `policyState`
+    per work item (`undefined` initial; reset on success). New
+    L3 file `error-policies.ts` ships `exponentialBackoff`,
+    `linearBackoff`, and `retryUpTo`; composition is plain
+    function wrapping (no extra helper). `DEFAULT_ERROR_POLICY`
+    semantics preserved verbatim (still exponential-100-30000,
+    retry forever). `ProcessingWorkerDefinition`,
+    `ProjectionDefinition`, `PmDefinition`, and
+    `startProcessingWorker` / `startProjectionWorker` /
+    `startPmWorker` all gained an optional `PolicyState` type
+    parameter (defaults to `undefined`; backward-compatible for
+    every existing caller). Facade-level registration types use
+    `ErrorPolicy<any>` for state-slot type erasure with a note;
+    direct `startProcessingWorker` callers can opt into strong
+    typing. New `test/error-policies.test.ts` covers the
+    helpers (10 unit tests) plus an integration test pinning
+    down the per-work-item state lifecycle. All 142 tests pass.
+  - ~~The three contracts (snapshot policy, routing, error
     policy) are named on the porting checklist as the
     extension-point family, with "shape may differ per
-    language; contract stays" called out.
-  - Parked items in §7.5 have been re-confirmed as parked.
+    language; contract stays" called out.~~ **Done
+    (2026-05-27).** `docs/porting-checklist.md` §4 names the
+    three contracts as an explicit family and calls out the
+    required-core / idiomatic-not-required split throughout.
+  - ~~Parked items in §7.5 have been re-confirmed as parked.~~
+    **Re-confirmed (2026-05-27).** No new TODO has surfaced
+    pulling them forward; PM L2/L3 split + dispatch error
+    visibility (asymmetry #1) and `quarantineAfter` are the
+    two principal parked items, both with documented reasons.
 
-Once step 5 exits, TODO #2 (SDK restructuring) is discharged
-and the porting-checklist doc proposed in §5 can be written
-against a stable `core.ts`; that doc is the precondition for
-TODO #6 (additional language SDKs).
+**Step 5 exit (2026-05-27).** TODO #2 (SDK restructuring) is
+discharged. `docs/porting-checklist.md` is in place against a
+stable `core.ts` / `index.ts` split. TODO #6 (additional
+language SDKs) can now begin against a documented contract
+surface.

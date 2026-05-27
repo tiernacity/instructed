@@ -113,6 +113,12 @@ export {
 } from "./routing-worker.ts";
 
 // Processing worker (kind-agnostic poll loop + SUB-B error policy).
+//
+// The retry/error-policy extension point: `ErrorPolicy<PolicyState>`
+// is the contract, `DEFAULT_ERROR_POLICY` is the SDK's observable
+// default (exponential backoff, retry forever). Standard-library
+// helpers (`exponentialBackoff`, `linearBackoff`, `retryUpTo`) are
+// L3 and live in the bare `instructed-sdk` entry, not here.
 export {
   startProcessingWorker,
   DEFAULT_PROCESSING_LEASE_SECONDS,
@@ -126,6 +132,7 @@ export {
   type ErrorPolicy,
   type ErrorPolicyDecision,
   type ErrorPolicyContext,
+  type ErrorPolicyResult,
 } from "./processing-worker.ts";
 
 // Projection processing-worker adapter. The `PartitionBy` sugar

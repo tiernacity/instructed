@@ -144,8 +144,15 @@ export interface RegisterProjectionInput<E = unknown> {
   startFrom?: StartFrom;
   /** User-supplied projection handler. Opaque to the SDK (D-0016). */
   handler: ProjectionHandler<E>;
-  /** SUB-B error-policy hook. Default: exponential backoff, retry forever. */
-  errorPolicy?: ErrorPolicy;
+  /**
+   * Retry/error-policy hook. Default: exponential backoff, retry
+   * forever. The facade stores policies as `ErrorPolicy<any>` so
+   * users may register stateful policies (with a `PolicyState`
+   * other than `undefined`); type-safety on the state slot is
+   * forfeit at this layer. Callers wanting strong typing of
+   * `PolicyState` use `startProjectionWorker` directly.
+   */
+  errorPolicy?: ErrorPolicy<any>;
 }
 
 /**
@@ -155,9 +162,14 @@ export interface RegisterProjectionInput<E = unknown> {
  * PM-F routing primitive (`'ignore' | { partitionKey }`); `apply` is
  * the PM-C pure state fold; `handle` produces commands and/or signals
  * partition completion (`complete: true`).
+ *
+ * The `any` for `PmDefinition`'s `PolicyState` generic forfeits
+ * state-slot type-safety at the facade so users may register
+ * stateful policies; see `RegisterProjectionInput.errorPolicy`
+ * note.
  */
 export interface RegisterProcessManagerInput<S, E = unknown>
-  extends Omit<PmDefinition<S, E>, "name"> {
+  extends Omit<PmDefinition<S, E, any>, "name"> {
   /** PM-F routing decision per event. */
   routeFn: RoutingFn<E>;
   /** Honoured only on the first claim that creates the subscription. */

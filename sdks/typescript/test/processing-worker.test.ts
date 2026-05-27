@@ -430,19 +430,28 @@ describe("processing worker — default error policy back-off", () => {
   });
 
   test("default policy returns exponential, capped retry-in", async () => {
+    // Step-5 slice 3: ErrorPolicy now takes (err, ctx, state) and
+    // returns { decision, state }. The default ignores the state
+    // slot (returns undefined); decisions are still pure of attempt.
     const ctx = { workerId: "w", partitionKey: "p", eventNumber: 1n };
-    const d1 = await DEFAULT_ERROR_POLICY(new Error("e"), {
-      ...ctx,
-      attempt: 1,
-    });
-    const d2 = await DEFAULT_ERROR_POLICY(new Error("e"), {
-      ...ctx,
-      attempt: 2,
-    });
-    const d10 = await DEFAULT_ERROR_POLICY(new Error("e"), {
-      ...ctx,
-      attempt: 10,
-    });
+    const r1 = await DEFAULT_ERROR_POLICY(
+      new Error("e"),
+      { ...ctx, attempt: 1 },
+      undefined,
+    );
+    const r2 = await DEFAULT_ERROR_POLICY(
+      new Error("e"),
+      { ...ctx, attempt: 2 },
+      undefined,
+    );
+    const r10 = await DEFAULT_ERROR_POLICY(
+      new Error("e"),
+      { ...ctx, attempt: 10 },
+      undefined,
+    );
+    const d1 = r1.decision;
+    const d2 = r2.decision;
+    const d10 = r10.decision;
     assert.equal(d1.kind, "retry-in");
     assert.equal(d2.kind, "retry-in");
     assert.equal(d10.kind, "retry-in");
@@ -452,6 +461,10 @@ describe("processing worker — default error policy back-off", () => {
       assert.equal(d2.delayMs, 200);
       assert.ok(d10.delayMs <= 30_000);
     }
+    // State is always undefined for the default policy.
+    assert.equal(r1.state, undefined);
+    assert.equal(r2.state, undefined);
+    assert.equal(r10.state, undefined);
   });
 
   test("'stop' decision exits the worker without moving the item to failed", async () => {
@@ -460,7 +473,10 @@ describe("processing worker — default error policy back-off", () => {
     const [e1] = await append("st", 1);
     await route(name, [{ pk: "p1", en: e1 }]);
 
-    const stopPolicy: ErrorPolicy = () => ({ kind: "stop" });
+    const stopPolicy: ErrorPolicy = () => ({
+      decision: { kind: "stop" },
+      state: undefined,
+    });
     const w = startProcessingWorker(client, {
       name,
       handle: async () => {

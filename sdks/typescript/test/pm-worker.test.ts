@@ -572,7 +572,10 @@ describe("startPmWorker — dispatch failure leaves work-item claimed", () => {
         ],
       }),
       // Fast retries so we observe multiple attempts.
-      errorPolicy: () => ({ kind: "retry-in", delayMs: 30 }),
+      errorPolicy: () => ({
+        decision: { kind: "retry-in", delayMs: 30 },
+        state: undefined,
+      }),
     };
 
     const router = startRouter(name, stream, "p1");

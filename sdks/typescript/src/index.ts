@@ -56,6 +56,20 @@ export {
 // orchestration without the facade also use this entry.
 export { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
 
+// Retry/error-policy standard library (L3). The contract
+// (`ErrorPolicy<PolicyState>`) and the observable default
+// (`DEFAULT_ERROR_POLICY`) live in `processing-worker.ts` (L2);
+// these are the composable helpers users reach for when writing
+// non-default policies. See `error-policies.ts` module comment
+// for composition examples.
+export {
+  exponentialBackoff,
+  linearBackoff,
+  retryUpTo,
+  type ExponentialBackoffOptions,
+  type LinearBackoffOptions,
+} from "./error-policies.ts";
+
 // Consistency-on-dispatch wait (polls the L1 `is_subscription_caught_up`
 // predicate). ML-0002 may eventually rework the mechanism into
 // LISTEN/NOTIFY; the L3 shape is intended to stay stable across that

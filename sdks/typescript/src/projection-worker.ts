@@ -50,15 +50,20 @@ export type ProjectionHandler<E = unknown> = (
   ctx: ProjectionHandlerContext,
 ) => Promise<void>;
 
-export interface ProjectionDefinition<E = unknown> {
+export interface ProjectionDefinition<E = unknown, PolicyState = undefined> {
   /** Subscription name (must match the routing worker for the same sub). */
   name: string;
   /** Source stream; default `$all`. */
   stream?: string;
   /** User-supplied projection handler. Opaque to the SDK (D-0016). */
   handler: ProjectionHandler<E>;
-  /** SUB-B error-policy hook. Defaults to exponential backoff, retry forever. */
-  errorPolicy?: ErrorPolicy;
+  /**
+   * Retry/error-policy hook. Defaults to `DEFAULT_ERROR_POLICY`
+   * (exponential backoff, retry forever). Type-parameterised by
+   * `PolicyState` for callers writing stateful policies; defaults
+   * to `ErrorPolicy<undefined>`.
+   */
+  errorPolicy?: ErrorPolicy<PolicyState>;
 }
 
 export type ProjectionWorkerOptions = ProcessingWorkerOptions;
@@ -72,13 +77,13 @@ export type ProjectionWorkerOptions = ProcessingWorkerOptions;
  * `startRoutingWorker` per subscription); the slice-9 facade glues
  * the two together at registration time.
  */
-export function startProjectionWorker<E = unknown>(
+export function startProjectionWorker<E = unknown, PolicyState = undefined>(
   client: Client,
-  def: ProjectionDefinition<E>,
+  def: ProjectionDefinition<E, PolicyState>,
   opts: ProjectionWorkerOptions = {},
 ): RunningWorker {
   const stream = def.stream ?? "$all";
-  return startProcessingWorker<E>(
+  return startProcessingWorker<E, PolicyState>(
     client,
     {
       name: def.name,

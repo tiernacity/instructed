@@ -503,7 +503,10 @@ describe("projection worker — PRJ-E immediate-delete", () => {
         throw new Error("handler-fails-once");
       },
       // Tight retry-in so we observe multiple attempts quickly.
-      errorPolicy: () => ({ kind: "retry-in", delayMs: 30 }),
+      errorPolicy: () => ({
+        decision: { kind: "retry-in", delayMs: 30 },
+        state: undefined,
+      }),
     };
     const wired = startPair(
       stream,

@@ -112,7 +112,7 @@ export interface PmHandlerContext extends ProcessingHandlerContext {
  *     snapshot's `metadata.snapshot_module_version` key on write;
  *     compared on read.
  */
-export interface PmDefinition<S, E = unknown> {
+export interface PmDefinition<S, E = unknown, PolicyState = undefined> {
   name: string;
   /** Default `$all`. */
   stream?: string;
@@ -125,8 +125,13 @@ export interface PmDefinition<S, E = unknown> {
   ): Promise<PmHandleResult> | PmHandleResult;
   /** SDK-managed snapshot version tag; mismatch triggers rebuild. */
   snapshotModuleVersion?: string;
-  /** SUB-B error-policy hook. Defaults to exponential backoff, retry forever. */
-  errorPolicy?: ErrorPolicy;
+  /**
+   * Retry/error-policy hook. Defaults to `DEFAULT_ERROR_POLICY`
+   * (exponential backoff, retry forever). Type-parameterised by
+   * `PolicyState` for callers writing stateful policies; defaults
+   * to `ErrorPolicy<undefined>`.
+   */
+  errorPolicy?: ErrorPolicy<PolicyState>;
 }
 
 export type PmWorkerOptions = ProcessingWorkerOptions;
@@ -155,9 +160,9 @@ interface StagedWork<S> {
  * disjoint lock sets are what prevent deadlock, not client / pool
  * separation.
  */
-export function startPmWorker<S, E = unknown>(
+export function startPmWorker<S, E = unknown, PolicyState = undefined>(
   client: Client,
-  def: PmDefinition<S, E>,
+  def: PmDefinition<S, E, PolicyState>,
   opts: PmWorkerOptions = {},
 ): RunningWorker {
   const stream = def.stream ?? "$all";
@@ -306,5 +311,5 @@ export function startPmWorker<S, E = unknown>(
     },
   };
 
-  return startProcessingWorker<E>(client, adapted, opts);
+  return startProcessingWorker<E, PolicyState>(client, adapted, opts);
 }
