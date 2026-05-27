@@ -13,8 +13,8 @@
 import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import { PG_URL, installSignalHandlers } from "../src/common.ts";
-import { BALANCES_SUBSCRIPTION_NAME, balancesProjection, readBalances }
-  from "../src/balances.ts";
+import { balancesProjection } from "../src/projections/balances/projection.ts";
+import { readBalances } from "../src/projections/balances/queries.ts";
 
 const PRINT_INTERVAL_MS = 2_000;
 
@@ -53,7 +53,9 @@ async function main(): Promise<void> {
         .join("\n");
       process.stdout.write(`[Balances]\n${lines}\n`);
     } catch (err) {
-      process.stderr.write(`[Balances] read failed: ${(err as Error).message}\n`);
+      process.stderr.write(
+        `[Balances] read failed: ${(err as Error).message}\n`,
+      );
     }
   }, PRINT_INTERVAL_MS);
 

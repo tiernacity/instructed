@@ -6,7 +6,9 @@
 
 import { Instructed } from "instructed-sdk";
 import { PG_URL, requireArg } from "../src/common.ts";
-import { Account } from "../src/account.ts";
+import { Account } from "../src/aggregates/account.ts";
+import { DepositToAccount } from "../src/commands/account/index.ts";
+import { appCommandRouter } from "../src/command-router.ts";
 
 async function main(): Promise<void> {
   const name = requireArg(process.argv, 2, "name");
@@ -17,9 +19,11 @@ async function main(): Promise<void> {
 
   const app = new Instructed({ db: PG_URL });
   app.registerAggregate(Account);
+  app.registerCommandRouter(appCommandRouter);
   try {
-    await app.dispatch("Account", name, {
-      kind: "Deposit",
+    await app.dispatch({
+      type: DepositToAccount,
+      accountId: name,
       amount,
     });
     process.stdout.write(`deposited ${amount} to "${name}"\n`);

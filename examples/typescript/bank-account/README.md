@@ -7,26 +7,82 @@ and the periodic state-printing that mimics a real read-store.
 
 ## Layout
 
+One file per type / function / module. Sub-directories per
+aggregate keep the events and commands of each domain object
+together and self-documenting; the file basename matches the
+declared type name (`AccountDepositedTo` lives in
+`account-deposited-to.ts`).
+
 ```
 src/
-  account.ts       Account aggregate (Open / Deposit / Withdraw)
-  transfer.ts      Transfer aggregate (Request / MarkCompleted / MarkFailed)
-  balances.ts      Balances projection -> bank_account.balances
-  transfers.ts     Transfers projection -> bank_account.transfers
-  transfer-pm.ts   TransferProcessManager (the saga)
-  common.ts        Shared DB URL, stream-key helpers, signal handling
+  aggregates/
+    account.ts                          Account aggregate
+    transfer.ts                         Transfer aggregate
+  commands/
+    account/
+      open-account.ts                   OpenAccount
+      deposit-to-account.ts             DepositToAccount
+      withdraw-from-account.ts          WithdrawFromAccount
+      index.ts                          barrel + AccountCommand union
+    transfer/
+      request-transfer.ts               RequestTransfer
+      mark-transfer-completed.ts        MarkTransferCompleted
+      mark-transfer-failed.ts           MarkTransferFailed
+      index.ts                          barrel + TransferCommand union
+  events/
+    account/
+      account-opened.ts                 AccountOpened
+      account-deposited-to.ts           AccountDepositedTo
+      account-withdrawn-from.ts         AccountWithdrawnFrom
+      account-withdrawal-refused.ts     AccountWithdrawalRefused
+      index.ts                          barrel + AccountEvent union
+    transfer/
+      transfer-requested.ts             TransferRequested
+      transfer-completed.ts             TransferCompleted
+      transfer-failed.ts                TransferFailed
+      index.ts                          barrel + TransferEvent union
+  process-managers/
+    transfer-pm.ts                      TransferProcessManager (the saga)
+  projections/
+    balances/
+      projection.ts                     definition (routing + handler)
+      queries.ts                        SQL helpers + readBalances
+    transfers/
+      projection.ts
+      queries.ts
+  command-router.ts                     maps Command -> (aggregate, id)
+  common.ts                             DB URL, signal handling, requireArg
 sql/
-  read-store.sql            bank_account.{balances,transfers} schema
+  read-store.sql                        bank_account.{balances,transfers}
 scripts/
   start.ts                  docker compose up + apply both schemas
   projection-balances.ts    workers + periodic SELECT printout
   projection-transfers.ts   workers + periodic SELECT printout
   pm-transfer.ts            saga worker; commands + traced handle
-  open-account.ts           short-lived: dispatch Open
-  deposit.ts                short-lived: dispatch Deposit
-  transfer.ts               short-lived: dispatch Request
-docker-compose.yaml          isolated PG on port 5433
+  open-account.ts           short-lived: dispatch OpenAccount
+  deposit.ts                short-lived: dispatch DepositToAccount
+  transfer.ts               short-lived: dispatch RequestTransfer
+docker-compose.yaml                     isolated PG on port 5433
 ```
+
+### Naming conventions
+
+- **Commands**: imperative verb + noun. `OpenAccount`,
+  `DepositToAccount`, `WithdrawFromAccount`, `RequestTransfer`,
+  `MarkTransferCompleted`, `MarkTransferFailed`.
+- **Events**: aggregate-noun + past-tense verb. `AccountOpened`,
+  `AccountDepositedTo`, `AccountWithdrawnFrom`,
+  `AccountWithdrawalRefused`, `TransferRequested`,
+  `TransferCompleted`, `TransferFailed`.
+- **Type / value share a name**: each event / command file
+  exports a `const X = "X" as const` (string discriminator) and
+  a `type X` (the TypeScript shape). The same identifier stands
+  in for the literal in value position and the union member in
+  type position.
+- **Stream names are storage detail.** Aggregates default to
+  `<Type>-<id>` via the SDK's `prefixType(def.type)`; nothing
+  in `src/` or `scripts/` constructs a stream name by hand.
+  Applications identify aggregates by `(type, id)`.
 
 **Storage layout.** The example uses two schemas in the same
 database:
@@ -97,17 +153,24 @@ dispatches its terminating mark-command.
   to coordinate.
 - **Real success/failure on the Transfer aggregate.**
   `TransferRequested` carries the request; the PM dispatches
-  `MarkCompleted` once the destination `Deposited` lands, or
-  `MarkFailed { reason }` once a `WithdrawalRefused` lands.
-  Every transfer stream has a terminal outcome event.
+  `MarkTransferCompleted` once the destination `AccountDepositedTo`
+  lands, or `MarkTransferFailed { reason }` once an
+  `AccountWithdrawalRefused` lands. Every transfer stream has a
+  terminal outcome event.
 - **Compensation via refusal (D-0011).** The PM never sends
-  a compensating Account command — the `Withdraw` was atomically
-  refused, so the debit never happened. The PM still records the
-  outcome on the Transfer aggregate, so the _transfer_ has a
-  failure event even though no Account event was reversed.
-- **Idempotent mark-commands.** `MarkCompleted` / `MarkFailed`
-  return `[]` (no events) if the transfer is already in the
-  target stage, so PM redelivery is harmless.
+  a compensating Account command — the `WithdrawFromAccount` was
+  atomically refused, so the debit never happened. The PM still
+  records the outcome on the Transfer aggregate, so the _transfer_
+  has a failure event even though no Account event was reversed.
+- **Idempotent mark-commands.** `MarkTransferCompleted` /
+  `MarkTransferFailed` return `[]` (no events) if the transfer is
+  already in the target stage, so PM redelivery is harmless.
+- **Lean commands and a single command router.** PMs and CLI
+  scripts emit bare `Command` objects (`{ type: "DepositToAccount",
+  accountId, amount, ... }`); the application's command router
+  (`src/command-router.ts`) is the one place that knows which
+  aggregate owns which command, and how to extract the
+  aggregate id from the command payload.
 - **Two independent projections.** Balances and Transfers each
   get their own routing + processing worker pair; the SDK
   delivers each event to each subscription independently.

@@ -1,33 +1,37 @@
 /**
- * Account aggregate — the canonical bank-account example.
+ * `Account` aggregate — the canonical bank-account example.
  *
- * Pure domain folds. The SDK tracks version; the user code reads no
- * connection / transaction handle. `WithdrawalRefused` is an emitted
- * event, not a thrown error: it records that a withdrawal was tried
- * and refused so the TransferProcessManager can react via its routes.
+ * Pure domain folds. The SDK tracks version; user code reads no
+ * connection / transaction handle. `AccountWithdrawalRefused` is
+ * an emitted event, not a thrown error: it records that a
+ * withdrawal was tried and refused so the TransferProcessManager
+ * can react via its routes (D-0011).
+ *
+ * Stream naming defaults to `Account-<id>` via the SDK's
+ * `prefixType(def.type)` helper. Apps identify aggregates by
+ * `(type, id)`; stream names are storage-layer detail.
  */
 
 import type { AggregateDefinition } from "instructed-sdk";
+import {
+  type AccountCommand,
+  OpenAccount,
+  DepositToAccount,
+  WithdrawFromAccount,
+} from "../commands/account/index.ts";
+import {
+  type AccountEvent,
+  AccountOpened,
+  AccountDepositedTo,
+  AccountWithdrawnFrom,
+  AccountWithdrawalRefused,
+} from "../events/account/index.ts";
 
 export interface AccountState {
   opened: boolean;
   owner: string | null;
   balance: number;
 }
-
-export type AccountEvent =
-  | { type: "AccountOpened"; data: { owner: string } }
-  | { type: "Deposited"; data: { amount: number; transferId?: string } }
-  | { type: "Withdrawn"; data: { amount: number; transferId?: string; to?: string } }
-  | {
-      type: "WithdrawalRefused";
-      data: { reason: string; amount: number; transferId?: string };
-    };
-
-export type AccountCommand =
-  | { kind: "Open"; owner: string }
-  | { kind: "Deposit"; amount: number; transferId?: string }
-  | { kind: "Withdraw"; amount: number; transferId?: string; to?: string };
 
 export const Account: AggregateDefinition<
   AccountState,
@@ -39,40 +43,40 @@ export const Account: AggregateDefinition<
 
   apply(state, event) {
     switch (event.type) {
-      case "AccountOpened":
+      case AccountOpened:
         return { ...state, opened: true, owner: event.data.owner };
-      case "Deposited":
+      case AccountDepositedTo:
         return { ...state, balance: state.balance + event.data.amount };
-      case "Withdrawn":
+      case AccountWithdrawnFrom:
         return { ...state, balance: state.balance - event.data.amount };
-      case "WithdrawalRefused":
+      case AccountWithdrawalRefused:
         return state;
     }
   },
 
   execute(state, command) {
-    switch (command.kind) {
-      case "Open":
+    switch (command.type) {
+      case OpenAccount:
         if (state.opened) throw new Error("account already open");
         return {
-          type: "AccountOpened",
+          type: AccountOpened,
           data: { owner: command.owner },
         };
-      case "Deposit":
+      case DepositToAccount:
         if (!state.opened) throw new Error("account not open");
         return {
-          type: "Deposited",
+          type: AccountDepositedTo,
           data: { amount: command.amount, transferId: command.transferId },
         };
-      case "Withdraw":
+      case WithdrawFromAccount:
         if (!state.opened) throw new Error("account not open");
         if (state.balance < command.amount) {
-          // Compensation per D-0011: refusal is a domain event, not
-          // an exception; the TransferProcessManager observes it via
-          // its routes and stops the process without ever needing
-          // a compensating command.
+          // D-0011: refusal is a domain event, not an exception.
+          // The TransferProcessManager observes it via its routes
+          // and stops the process without ever needing a
+          // compensating command.
           return {
-            type: "WithdrawalRefused",
+            type: AccountWithdrawalRefused,
             data: {
               reason: "insufficient funds",
               amount: command.amount,
@@ -81,7 +85,7 @@ export const Account: AggregateDefinition<
           };
         }
         return {
-          type: "Withdrawn",
+          type: AccountWithdrawnFrom,
           data: {
             amount: command.amount,
             transferId: command.transferId,

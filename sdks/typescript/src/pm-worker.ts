@@ -93,7 +93,7 @@ import type { RunningWorker } from "./internal/running-worker.ts";
  * of `aggregate` and `streamUuid`.
  */
 export type DispatchedCommand =
-  | Command
+  | (Command & { [key: string]: unknown })
   | DispatchedCommandExplicit;
 
 export interface DispatchedCommandExplicit {

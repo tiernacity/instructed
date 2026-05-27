@@ -12,11 +12,8 @@
 import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import { PG_URL, installSignalHandlers } from "../src/common.ts";
-import {
-  TRANSFERS_SUBSCRIPTION_NAME,
-  transfersProjection,
-  readTransfers,
-} from "../src/transfers.ts";
+import { transfersProjection } from "../src/projections/transfers/projection.ts";
+import { readTransfers } from "../src/projections/transfers/queries.ts";
 
 const PRINT_INTERVAL_MS = 2_000;
 
