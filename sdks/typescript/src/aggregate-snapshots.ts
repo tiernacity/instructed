@@ -1,0 +1,130 @@
+/**
+ * L3 aggregate orchestration: `runCommand` plus best-effort snapshot
+ * writes.
+ *
+ * Per `docs/todo/sdk-rework.md` §7.3, snapshot policy invocation is
+ * an L3 concern. The L2 primitive `runCommandAndApply` (in
+ * `aggregate.ts`) does load + execute + append + OCC retry and
+ * returns the post-append state; this file's
+ * `runCommandWithSnapshots` wraps that primitive and, on success,
+ * invokes `def.snapshotPolicy.shouldSnapshot` and writes the
+ * snapshot best-effort via a separate `recordSnapshot` call.
+ *
+ * # Events vs. snapshots
+ *
+ * Events and snapshots are different kinds of thing and warrant
+ * different error responses:
+ *
+ *   - **Events are a correctness concern.** Event sourcing
+ *     *requires* that emitted events persist; failure here must
+ *     fail the command and surface to the caller. That's the L2
+ *     primitive's job.
+ *   - **Snapshots are a performance concern.** They exist so that
+ *     loading an aggregate doesn't re-fold from origin every
+ *     time. A missing or stale snapshot makes the next load
+ *     slower; it does *not* break correctness. Failure here is a
+ *     warning, not an error.
+ *
+ * Atomic persistence (single SQL call that takes both events and
+ * an optional snapshot) would *couple* these failure modes,
+ * forcing a snapshot-write failure to either fail the command
+ * (wrong: snapshots aren't correctness-critical) or be silently
+ * swallowed inside one tx (wrong: hides observable signal).
+ * Keeping the two as separate L1 calls preserves the distinction.
+ * See D-0019.
+ *
+ * # The contract this layer orchestrates
+ *
+ * Snapshot policy is one of the SDK's three named extension points
+ * (see `docs/porting-checklist.md` §4.2). The contract lives on
+ * `AggregateDefinition.snapshotPolicy` in `aggregate.ts`; the
+ * standard library currently ships `everyN(n)` only. This file is
+ * the orchestrator: it decides when to call the policy, what state
+ * to pass it, and what to do with the result.
+ *
+ * # Layer note
+ *
+ * Lives in its own file (separate from `aggregate.ts`) so the file
+ * boundary matches the layer boundary: `aggregate.ts` is pure L2
+ * (load + execute + append + OCC retry, unopinionated about
+ * snapshots); this module is pure L3 (policy invocation + the
+ * "snapshot is best-effort" semantics).
+ */
+
+import type { Client } from "./client.ts";
+import {
+  runCommandAndApply,
+  type AggregateDefinition,
+  type DomainEvent,
+  type RunCommandOptions,
+} from "./aggregate.ts";
+import type { AppendedEvent } from "./types.ts";
+
+/**
+ * Run a command against an aggregate stream with snapshot
+ * orchestration. Same load + execute + append + OCC-retry
+ * semantics as {@link runCommand}, plus: if `def.snapshotPolicy`
+ * is set and `shouldSnapshot(state, version, eventsSinceLast)`
+ * returns `true` on the post-append state, write a snapshot via
+ * `recordSnapshot`.
+ *
+ * Snapshot writes are best-effort per D-0019: failures
+ * `console.warn` and do not fail the command. The next load will
+ * fall back to the previous snapshot (or full re-fold from
+ * origin) and the next successful command may snapshot again.
+ *
+ * For a no-op command (handler returned no events), no snapshot
+ * is considered: there is no new state to capture.
+ *
+ * Returns the appended events. A future revision may return the
+ * richer {@link RanCommand} record; until a concrete caller needs
+ * it, this matches `runCommand`'s shape so the migration from
+ * `runCommand`-with-snapshot-policy is mechanical.
+ */
+export async function runCommandWithSnapshots<
+  S,
+  C,
+  E extends DomainEvent = DomainEvent,
+>(
+  client: Client,
+  def: AggregateDefinition<S, C, E>,
+  streamUuid: string,
+  command: C,
+  opts: RunCommandOptions = {},
+): Promise<AppendedEvent[]> {
+  const result = await runCommandAndApply(client, def, streamUuid, command, opts);
+
+  // No events appended (handler no-op): nothing to snapshot.
+  if (result.appended.length === 0) return result.appended;
+
+  // No policy declared: skip orchestration entirely.
+  if (!def.snapshotPolicy) return result.appended;
+
+  if (
+    def.snapshotPolicy.shouldSnapshot(
+      result.state,
+      result.version,
+      result.eventsSinceSnapshot,
+    )
+  ) {
+    try {
+      await client.recordSnapshot({
+        sourceUuid: streamUuid,
+        sourceType: def.type,
+        sourceVersion: result.version,
+        data: result.state,
+      });
+    } catch (snapErr) {
+      // Best-effort per D-0019. The load path works without the
+      // snapshot — it'll re-fold from the previous snapshot (or
+      // origin). `console.warn` until a logger surface is added.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[instructed] snapshot write failed for ${streamUuid}:`,
+        snapErr,
+      );
+    }
+  }
+
+  return result.appended;
+}

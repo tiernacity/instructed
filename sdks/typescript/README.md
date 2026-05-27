@@ -39,13 +39,34 @@ The three layers (per `SDK-REWORK-NOTES.md` and
 | Layer | Modules | Key exports | Purpose |
 |---|---|---|---|
 | **L1 — procedure bindings** | `client.ts`, `errors.ts` (SQLSTATE-bound classes), `types.ts` | `Client`, `InstructedError` + subclasses, wire shapes | One method per `instructed.*` stored procedure; SQLSTATE → typed-error translation. Every SDK port reproduces this surface verbatim. |
-| **L2 — core behaviours** | `aggregate.ts`, `routing-worker.ts`, `processing-worker.ts`, `projection-worker.ts` (adapter), `pm-worker.ts` | `runCommand`, `startRoutingWorker`, `startProcessingWorker`, `startProjectionWorker`, `startPmWorker`, `ErrorPolicy`, `RetryBudgetExhausted` | Aggregate load-execute-append loop with OCC retry (D-0005); D-0025 per-batch routing worker; per-item lease + heartbeat processing worker; kind-specific projection / PM adapters. Every SDK port reproduces the *behaviours*; the shape can be language-idiomatic. |
-| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `PartitionBy` sugar in `projection-worker.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `ConsistencyTimeout`, `UnknownAggregateType` | By-name aggregate dispatch, projection / PM registration, single `startWorker()` / `close()`, consistency-on-dispatch wait, partition-by sugar. **May differ per language port.** |
+| **L2 — core behaviours** | `aggregate.ts`, `routing-worker.ts`, `processing-worker.ts`, `projection-worker.ts` (adapter), `pm-worker.ts` | `runCommand`, `runCommandAndApply`, `startRoutingWorker`, `startProcessingWorker`, `startProjectionWorker`, `startPmWorker`, `ErrorPolicy`, `RetryBudgetExhausted` | Aggregate load-execute-append loop with OCC retry (D-0005); D-0025 per-batch routing worker; per-item lease + heartbeat processing worker; kind-specific projection / PM adapters. Every SDK port reproduces the *behaviours*; the shape can be language-idiomatic. |
+| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `partition-by.ts`, `aggregate-snapshots.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `runCommandWithSnapshots`, `ConsistencyTimeout`, `UnknownAggregateType` | By-name aggregate dispatch, projection / PM registration, single `startWorker()` / `close()`, consistency-on-dispatch wait, `PartitionBy` sugar over the routing extension point, snapshot-policy orchestration over the L2 aggregate primitive. **May differ per language port.** |
 
 L1 + L2 = the `instructed-sdk/core` sub-path. L1 + L2 + L3 = the
 bare `instructed-sdk` entry. See `src/core.ts` and `src/index.ts`
 for the authoritative export inventory; the annotated map lives in
 [`docs/todo/sdk-rework.md`](../../docs/todo/sdk-rework.md).
+
+### Extension points
+
+The SDK offers three named extension points, each following the
+**contract + standard library + escape hatch** pattern. Application
+code either uses the shipped standard library or drops in its own
+function obeying the contract.
+
+| Extension point | Contract | Standard library | Source |
+|---|---|---|---|
+| Routing | `RoutingFn` → `RoutingDecision` | `PartitionBy` + `routingFnForPartitionBy` (modes: `sequential`, `per-event`, `per-key`) | `routing-worker.ts` + `partition-by.ts` |
+| Aggregate snapshot policy | `SnapshotPolicy<S>.shouldSnapshot(state, version, eventsSinceLast)` | `everyN(n)` | `aggregate.ts` |
+| Retry / error handling | `ErrorPolicy(err, ctx) → ErrorPolicyDecision` | `DEFAULT_ERROR_POLICY` (exponential backoff, retry forever) | `processing-worker.ts` |
+
+The **contract** at each point is required-core: every SDK port
+reproduces the shape, though language idiom may rename or restructure
+(generics become interfaces, etc.). The **standard library** at each
+point is idiomatic-not-required: a port may ship its own equivalents,
+different equivalents, or none at all. See
+[`docs/porting-checklist.md`](../../docs/porting-checklist.md) for the
+per-port reading list.
 
 ## Typical usage
 
@@ -134,9 +155,11 @@ sdks/typescript/
 │   ├── errors.ts              -- L1 + L2 + L3 error classes (annotated)
 │   ├── types.ts               -- L1 wire shapes
 │   ├── aggregate.ts           -- L2 OCC loop
-│   ├── routing-worker.ts      -- L2 D-0025 routing
-│   ├── processing-worker.ts   -- L2 per-item lease + heartbeat
-│   ├── projection-worker.ts   -- L2 adapter + L3 PartitionBy sugar
+│   ├── aggregate-snapshots.ts -- L3 runCommandWithSnapshots (snapshot policy orchestration)
+│   ├── routing-worker.ts      -- L2 D-0025 routing (extension point: routing)
+│   ├── partition-by.ts        -- L3 PartitionBy sugar (routing std library)
+│   ├── processing-worker.ts   -- L2 per-item lease + heartbeat (extension point: retry / error policy)
+│   ├── projection-worker.ts   -- L2 projection adapter over processing-worker
 │   ├── pm-worker.ts           -- L2 snapshot+ack + L3 dispatch helper
 │   ├── consistency.ts         -- L3 waitForProjection
 │   ├── instructed.ts          -- L3 facade

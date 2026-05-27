@@ -1,6 +1,35 @@
 /**
  * SUB-A routing worker.
  *
+ * # The routing extension point
+ *
+ * Routing is one of the SDK's three named extension points (see
+ * `docs/todo/sdk-rework.md` §7.1). It follows the family pattern
+ * **contract + standard library + escape hatch**:
+ *
+ *   - **Contract.** `RoutingFn<E>` (this file). Given a
+ *     `RecordedEvent<E>`, return a `RoutingDecision` — either
+ *     `{ partitionKey: string }` (route to that partition) or
+ *     `"ignore"` (skip; nothing is written to the work queue for
+ *     this event). MUST be pure, deterministic, no I/O, and fast
+ *     enough that `batchSize × routeFn` completes inside
+ *     `leaseSeconds`.
+ *   - **Standard library.** `PartitionBy` + `routingFnForPartitionBy`
+ *     in `partition-by.ts`. Three shipped strategies (`sequential`,
+ *     `per-event`, `per-key`) cover the common cases; none of them
+ *     can produce `"ignore"` (intentional simplification).
+ *   - **Escape hatch.** Pass any `RoutingFn` to
+ *     `startRoutingWorker` directly. Required if you need
+ *     `"ignore"`-style routing-time filtering, or a strategy
+ *     that doesn't fit the `PartitionBy` cases.
+ *
+ * Routing is **required core** (L2) — every SDK port reproduces it.
+ * The `PartitionBy` sugar is **idiomatic, not required**: a port
+ * may ship its own equivalent in whatever shape fits the language,
+ * or omit it entirely and document the raw `RoutingFn` shape.
+ *
+ * # Worker semantics
+ *
  * Per-batch claim/release routing worker. At any single instant there is
  * at most one routing worker holding the subscription's lease
  * (INV-SUB-P-010); the *identity* of the active worker rotates per batch
@@ -59,9 +88,23 @@ export type { RunningWorker };
 import { defaultWorkerId } from "./internal/worker-id.ts";
 import { sleep } from "./internal/sleep.ts";
 
-/** PM-F routing-decision surface as seen by user code. */
+/**
+ * Routing-extension-point output. Either route the event to the
+ * named partition, or skip it. PM-F surface as seen by user code.
+ */
 export type RoutingDecision = { partitionKey: string } | "ignore";
 
+/**
+ * Routing-extension-point contract. Given an event from the source
+ * stream, decide where it goes. MUST be pure, deterministic, no
+ * I/O, and bounded in duration (see the lease-budget note in the
+ * module header). A thrown `RoutingFn` stalls the worker via
+ * `onError`; the alternative — silent skip — would violate the
+ * "no silent skip" contract.
+ *
+ * See `partition-by.ts` for the shipped standard-library
+ * implementations (`PartitionBy` / `routingFnForPartitionBy`).
+ */
 export type RoutingFn<E = unknown> = (
   event: RecordedEvent<E>,
 ) => RoutingDecision | Promise<RoutingDecision>;

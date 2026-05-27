@@ -5,7 +5,7 @@
  * process can do; `startWorker()` fans out one **routing worker** +
  * one **processing worker** per registered projection / process
  * manager. `dispatch(aggregateType, ...)` resolves the aggregate
- * through the registry and delegates to `runCommand`. `dispatch`
+ * through the registry and delegates to `runCommandWithSnapshots`. `dispatch`
  * also accepts a `consistency` list and a `consistencyTimeout`
  * which, after the append commits, waits via {@link waitForProjection}
  * for the named subscriptions to catch up (D-0010: no `:strong`
@@ -43,12 +43,12 @@
 import * as pg from "pg";
 import { Client } from "./client.ts";
 import {
-  runCommand,
   DEFAULT_RETRY_BUDGET,
   type AggregateDefinition,
   type DomainEvent,
   type RunCommandOptions,
 } from "./aggregate.ts";
+import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
 import {
   startRoutingWorker,
   DEFAULT_ROUTING_BATCH_SIZE,
@@ -289,7 +289,7 @@ export class Instructed {
     if (opts.expectedVersion !== undefined) {
       runOpts.expectedVersion = opts.expectedVersion;
     }
-    const appended = await runCommand(
+    const appended = await runCommandWithSnapshots(
       this.persistClient_,
       def,
       streamUuid,

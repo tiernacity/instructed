@@ -4,7 +4,7 @@
  * session-bound {@link Client}.
  *
  * The PM worker uses this to make the snapshot write + cursor advance
- * atomic (sdk-design.md §3 layer 3) — the *only* place the SDK opens
+ * atomic — the *only* place the SDK opens
  * a multi-procedure transaction. The handler itself is opaque
  * (D-0016) and runs outside any SDK transaction.
  *

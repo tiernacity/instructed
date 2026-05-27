@@ -1,6 +1,31 @@
 /**
- * L3 sugar: `PartitionBy` modes translated to routing-layer
- * `RoutingFn`s.
+ * Routing-extension-point standard library: `PartitionBy` modes
+ * translated to routing-layer `RoutingFn`s.
+ *
+ * Per `docs/todo/sdk-rework.md` §7.1, the routing extension point
+ * follows the contract + standard library + escape hatch pattern.
+ * The contract lives in `routing-worker.ts` (`RoutingFn`,
+ * `RoutingDecision`). This file is the **standard library** — the
+ * shipped fixed strategies for the common cases. A consumer who
+ * needs something outside the cases below uses the escape hatch
+ * (pass a raw `RoutingFn` to `startRoutingWorker`).
+ *
+ * The three modes cover the spectrum of parallelism:
+ *
+ *   - `sequential` — single partition; fully serial processing.
+ *   - `per-event` — each event its own partition; fully parallel.
+ *   - `per-key` — user-supplied key extraction; bounded parallelism
+ *     and the general case.
+ *
+ * Audit (step-5 slice 1, 2026-05-27): the three modes were
+ * reviewed against potential additions — `per-event-type`,
+ * `hash-modulo-N`, routing-time filter — and none meet the bar to
+ * ship. `per-event-type` is `per-key` with
+ * `event => event.event_type`; `hash-modulo-N` is `per-key` with
+ * `event => String(hash(key(event)) % n)`; routing-time filtering
+ * requires `"ignore"`, which `PartitionBy` deliberately can't
+ * produce (escape hatch instead). The standard library stays at
+ * three modes.
  *
  * Lives in its own file (separate from `projection-worker.ts`) so
  * the file boundary matches the layer boundary: every export here

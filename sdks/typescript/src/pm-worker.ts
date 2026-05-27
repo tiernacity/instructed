@@ -18,7 +18,9 @@
  *        only `apply` runs during rebuild; `handle` does not.
  *   3. Runs `apply(state, claimedEvent)` -> staged_state.
  *   4. Runs `handle(staged_state, claimedEvent)` -> `{ commands?, complete? }`.
- *   5. Dispatches each command via `runCommand` on the same `client`.
+ *   5. Dispatches each command via `runCommandWithSnapshots` on the
+ *      same `client` (so dispatched aggregates' snapshot policies
+ *      fire just as they do via `Instructed.dispatch`).
  *      Causation = triggering event's `event_id`; correlation = the
  *      triggering event's `correlation_id` (D-0017). The two-pool
  *      model that existed prior to D-0026 was retired: lock-set
@@ -55,10 +57,8 @@
 
 import type { Client } from "./client.ts";
 import { SnapshotNotFound } from "./errors.ts";
-import {
-  runCommand,
-  type AggregateDefinition,
-} from "./aggregate.ts";
+import { type AggregateDefinition } from "./aggregate.ts";
+import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
@@ -246,7 +246,7 @@ export function startPmWorker<S, E = unknown>(
       // at the aggregate; no IS004 protection without deterministic
       // event IDs.
       for (const c of commands) {
-        await runCommand(client, c.aggregate, c.streamUuid, c.command, {
+        await runCommandWithSnapshots(client, c.aggregate, c.streamUuid, c.command, {
           causationId: event.event_id,
           correlationId: event.correlation_id ?? undefined,
         });

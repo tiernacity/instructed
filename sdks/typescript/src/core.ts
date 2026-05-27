@@ -74,11 +74,24 @@ export * from "./types.ts";
 // ----------------------------------------------------------------------------
 
 // Aggregate load/execute/append loop with OCC retry.
+//
+// `runCommand` is the simple form (returns just appended events);
+// `runCommandAndApply` returns the same plus the post-append
+// staged state for callers that want to do follow-up work without
+// re-loading. Neither invokes snapshot policy — see
+// `runCommandWithSnapshots` (L3, in `instructed-sdk` bare entry).
+//
+// `SnapshotPolicy<S>` and `everyN` are the contract + standard
+// library halves of the snapshot-policy extension point; they
+// live here because the contract is what porters reproduce, but
+// the *invocation* is L3 (see `aggregate-snapshots.ts`).
 export {
   runCommand,
+  runCommandAndApply,
   everyN,
   DEFAULT_RETRY_BUDGET,
   type AggregateDefinition,
+  type RanCommand,
   type RunCommandOptions,
   type SnapshotPolicy,
   type DomainEvent,

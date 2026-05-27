@@ -1,12 +1,38 @@
 /**
- * Layer 1: aggregate runner.
+ * L2 aggregate runner.
  *
- * See docs/sdk-design.md §3 layer 1 and §11.3 / §11.8.
+ * `runCommand` realises the load → execute → append loop with OCC
+ * retry (D-0005 / AGG-001..010). No aggregate cache, no advisory
+ * lock, no concurrency control beyond OCC retry; the SDK encodes
+ * the call sequence and nothing more.
  *
- * runCommand realises the load → execute → append loop with OCC retry
- * (D-0005 / mapping.md AGG-010). There is no aggregate cache, no
- * advisory lock, and no concurrency control beyond OCC retry — the
- * SDK encodes the call sequence and nothing more.
+ * # Layering note (step-5 slice 2, 2026-05-27)
+ *
+ * Snapshot **policy invocation** is no longer part of `runCommand`.
+ * Per `docs/todo/sdk-rework.md` §7.3, the layering is:
+ *
+ *   - **L2 (this file).** `runCommand` does load + execute + append
+ *     + OCC retry. `runCommandAndApply` is the same loop returning
+ *     the post-append state for callers that want to do follow-up
+ *     work (snapshot, projection, etc.) without re-loading.
+ *     Neither function inspects or invokes `def.snapshotPolicy`.
+ *   - **L3 (`aggregate-snapshots.ts`).** `runCommandWithSnapshots`
+ *     wraps `runCommandAndApply` and, on success, invokes
+ *     `def.snapshotPolicy.shouldSnapshot` and writes the snapshot
+ *     best-effort via a separate `recordSnapshot` call (D-0019).
+ *
+ * The `snapshotPolicy?:` field stays on `AggregateDefinition` as a
+ * **declaration** by the user; whether it fires depends on which
+ * orchestrator the caller uses. `Instructed.dispatch` and the
+ * PM-worker command dispatch both use the L3 wrapper, so users of
+ * the facade see the same observable behaviour as before this
+ * refactor.
+ *
+ * Events vs. snapshots: events are a *correctness* concern (must
+ * persist; failure surfaces); snapshots are a *performance*
+ * concern (best-effort; failure logs and continues). The two-call
+ * shape preserves this distinction at the SQL boundary; bundling
+ * them into one atomic write would conflate the two failure modes.
  */
 
 import type { Client } from "./client.ts";
@@ -38,15 +64,26 @@ export interface DomainEvent {
 }
 
 /**
- * Snapshot policy (§6). `eventsSinceLast` counts events folded into
- * the current state since the last persisted snapshot (or since
- * `initialState()` for a never-snapshotted stream).
+ * Aggregate snapshot policy — the contract half of the
+ * snapshot-policy extension point (see `docs/todo/sdk-rework.md`
+ * §7.1 / §7.3 and `docs/porting-checklist.md` §4.2).
+ *
+ * `eventsSinceLast` counts events folded into the current state
+ * since the last persisted snapshot (or since `initialState()`
+ * for a never-snapshotted stream). The policy is consulted by the
+ * L3 `runCommandWithSnapshots` wrapper, not by the L2 `runCommand`
+ * primitive.
  */
 export interface SnapshotPolicy<S> {
   shouldSnapshot(state: S, version: bigint, eventsSinceLast: number): boolean;
 }
 
-/** Convenience: snapshot every N events. */
+/**
+ * Standard-library policy: snapshot once `eventsSinceLast` reaches
+ * `n`. The only shipped policy as of step-5 slice 2; further
+ * helpers (time-elapsed, state-size-threshold) will be added if a
+ * concrete use case demands them.
+ */
 export function everyN<S>(n: number): SnapshotPolicy<S> {
   if (!Number.isFinite(n) || n <= 0) {
     throw new RangeError(`everyN: n must be a positive integer, got ${n}`);
@@ -80,6 +117,12 @@ export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> 
   /** Pure: fold one event into state. The SDK tracks version. */
   apply(state: S, event: E): S;
 
+  /**
+   * Optional snapshot policy. Declared here; invoked by the L3
+   * `runCommandWithSnapshots` wrapper on success. The L2
+   * `runCommand` / `runCommandAndApply` primitives ignore this
+   * field (they are unopinionated about snapshot orchestration).
+   */
   snapshotPolicy?: SnapshotPolicy<S>;
 }
 
@@ -131,26 +174,58 @@ const LOAD_PAGE_SIZE = 500;
 export const DEFAULT_RETRY_BUDGET = 5;
 
 /**
- * Run a command against an aggregate stream.
+ * Result of `runCommandAndApply`. Includes the post-append state
+ * folded through `apply`, the new stream version, and the snapshot
+ * baseline counter — enough information for an L3 wrapper to make
+ * snapshot / projection decisions without re-loading.
  *
- *   1. Read snapshot (swallow {@link SnapshotNotFound}).
- *   2. Page through `readStream` from `version + 1`, folding `apply`.
- *   3. `execute(state, command)`; normalise to array. Empty → no-op.
- *   4. `appendToStream(streamUuid, expected.exact(version), events)`.
- *   5. On {@link WrongExpectedVersion} with default expectedVersion,
- *      reload and retry up to `retryBudget`.
- *   6. Best-effort snapshot if `snapshotPolicy.shouldSnapshot` says so.
- *
- * No aggregate cache, no advisory lock, no transaction held across
- * the user's `execute` (it's pure code).
+ * For a no-op (handler returned no events), `appended` is empty,
+ * `state` and `version` reflect the loaded baseline, and
+ * `eventsSinceSnapshot` is the loaded counter unchanged.
  */
-export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
+export interface RanCommand<S> {
+  appended: AppendedEvent[];
+  /** State after folding `appended` through `apply`. */
+  state: S;
+  /** Stream version after append (loaded version if `appended` is empty). */
+  version: bigint;
+  /** Loaded `eventsSinceSnapshot` + `appended.length`. */
+  eventsSinceSnapshot: number;
+}
+
+/**
+ * Internal result of the load + execute + append + OCC loop —
+ * before any post-append fold. Used by both `runCommand` (which
+ * drops everything but `appended`) and `runCommandAndApply` (which
+ * folds `filled` through `apply` to produce the staged state).
+ *
+ * Keeping the fold out of this helper preserves the invariant that
+ * the L2 `runCommand` invokes `def.apply` **only on loaded events**
+ * — it does not call `apply` against the just-appended events.
+ * Callers wanting the post-append state opt in by calling
+ * `runCommandAndApply`, which folds.
+ */
+interface ExecutedCommand<S, E extends DomainEvent> {
+  appended: AppendedEvent[];
+  /** Loaded baseline state (pre-append). Identical to the state passed to `execute`. */
+  loadedState: S;
+  /** Loaded baseline version. */
+  loadedVersion: bigint;
+  /** Loaded `eventsSinceSnapshot` counter. */
+  loadedEventsSinceSnapshot: number;
+  /** The events written, with causation / correlation defaults applied. */
+  filled: NewEvent[];
+  /** True iff `execute` returned no events. `appended` is then `[]`. */
+  noOp: boolean;
+}
+
+async function executeCommand<S, C, E extends DomainEvent>(
   client: Client,
   def: AggregateDefinition<S, C, E>,
   streamUuid: string,
   command: C,
-  opts: RunCommandOptions = {},
-): Promise<AppendedEvent[]> {
+  opts: RunCommandOptions,
+): Promise<ExecutedCommand<S, E>> {
   const retryBudget = opts.retryBudget ?? DEFAULT_RETRY_BUDGET;
   if (!Number.isInteger(retryBudget) || retryBudget < 0) {
     throw new RangeError(
@@ -176,7 +251,14 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
 
       if (events.length === 0) {
         // Commanded no-op semantics: nothing to append.
-        return [];
+        return {
+          appended: [],
+          loadedState: loaded.state,
+          loadedVersion: loaded.version,
+          loadedEventsSinceSnapshot: loaded.eventsSinceSnapshot,
+          filled: [],
+          noOp: true,
+        };
       }
 
       // §11.8 defaulting: fill any unset causation_id with commandId,
@@ -195,51 +277,14 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
         filled,
       );
 
-      // Snapshot policy is best-effort and runs as a follow-up call
-      // (§3 layer 1, §6). Failure here MUST NOT fail the command.
-      if (def.snapshotPolicy) {
-        // Fold the just-appended events through apply so the snapshot
-        // captures post-append state. `apply` is pure; we used `filled`
-        // for append, but apply only needs the {type,data,metadata}.
-        let newState = loaded.state;
-        for (const e of filled) {
-          newState = def.apply(newState, {
-            type: e.event_type,
-            data: e.data,
-            metadata: e.metadata,
-          } as E);
-        }
-        const newVersion = appended[appended.length - 1].stream_version;
-        const eventsSinceSnapshot = loaded.eventsSinceSnapshot + appended.length;
-        if (
-          def.snapshotPolicy.shouldSnapshot(
-            newState,
-            newVersion,
-            eventsSinceSnapshot,
-          )
-        ) {
-          try {
-            await client.recordSnapshot({
-              sourceUuid: streamUuid,
-              sourceType: def.type,
-              sourceVersion: newVersion,
-              data: newState,
-            });
-          } catch (snapErr) {
-            // Best-effort: log and continue. The load path works
-            // without a snapshot — it'll just re-fold the stream.
-            // D-0019: snapshot-write failures are non-fatal and use
-            // console.warn until a logger surface is added.
-            // eslint-disable-next-line no-console
-            console.warn(
-              `[instructed] snapshot write failed for ${streamUuid}:`,
-              snapErr,
-            );
-          }
-        }
-      }
-
-      return appended;
+      return {
+        appended,
+        loadedState: loaded.state,
+        loadedVersion: loaded.version,
+        loadedEventsSinceSnapshot: loaded.eventsSinceSnapshot,
+        filled,
+        noOp: false,
+      };
     } catch (err) {
       lastError = err;
       // Retry only on default-expected-version mismatches (the SDK's
@@ -257,6 +302,98 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
     `runCommand: retry budget exhausted after ${attempt} attempt(s)`,
     { attempts: attempt, lastError },
   );
+}
+
+/**
+ * Run a command against an aggregate stream.
+ *
+ *   1. Read snapshot (swallow {@link SnapshotNotFound}).
+ *   2. Page through `readStream` from `version + 1`, folding `apply`.
+ *   3. `execute(state, command)`; normalise to array. Empty → no-op.
+ *   4. `appendToStream(streamUuid, expected.exact(version), events)`.
+ *   5. On {@link WrongExpectedVersion} with default expectedVersion,
+ *      reload and retry up to `retryBudget`.
+ *
+ * No aggregate cache, no advisory lock, no transaction held across
+ * the user's `execute` (it's pure code). `def.apply` is invoked
+ * **only during load** — the just-appended events are not folded
+ * back through `apply` by this function. Callers wanting the
+ * post-append state use {@link runCommandAndApply}.
+ *
+ * Does **not** invoke `def.snapshotPolicy`; see
+ * `runCommandWithSnapshots` in `aggregate-snapshots.ts` for the
+ * L3 orchestrator that does. The TypeScript SDK's `Instructed`
+ * facade and the PM worker's command dispatch both use the L3
+ * wrapper, so users of those layers see the same observable
+ * snapshot behaviour as before the step-5 slice 2 refactor.
+ */
+export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
+  client: Client,
+  def: AggregateDefinition<S, C, E>,
+  streamUuid: string,
+  command: C,
+  opts: RunCommandOptions = {},
+): Promise<AppendedEvent[]> {
+  const r = await executeCommand(client, def, streamUuid, command, opts);
+  return r.appended;
+}
+
+/**
+ * Run a command against an aggregate stream, returning the
+ * appended events plus the post-append staged state. Same loop
+ * as {@link runCommand}; additionally folds the just-appended
+ * events through `def.apply` so the caller can make snapshot /
+ * projection decisions without re-loading.
+ *
+ * The fold is the *only* observable difference from `runCommand`:
+ * `apply` will be invoked once per appended event with the
+ * post-execute, pre-snapshot state. `apply` MUST be pure (as
+ * required for the load path); the extra invocations are
+ * idempotent on state.
+ *
+ * Does **not** invoke `def.snapshotPolicy`; see
+ * `runCommandWithSnapshots` (L3).
+ */
+export async function runCommandAndApply<
+  S,
+  C,
+  E extends DomainEvent = DomainEvent,
+>(
+  client: Client,
+  def: AggregateDefinition<S, C, E>,
+  streamUuid: string,
+  command: C,
+  opts: RunCommandOptions = {},
+): Promise<RanCommand<S>> {
+  const r = await executeCommand(client, def, streamUuid, command, opts);
+
+  if (r.noOp) {
+    return {
+      appended: r.appended,
+      state: r.loadedState,
+      version: r.loadedVersion,
+      eventsSinceSnapshot: r.loadedEventsSinceSnapshot,
+    };
+  }
+
+  // Fold appended events through apply to produce the staged
+  // state. Cheap; `apply` is pure user code on at most a
+  // command-worth of events.
+  let stagedState = r.loadedState;
+  for (const e of r.filled) {
+    stagedState = def.apply(stagedState, {
+      type: e.event_type,
+      data: e.data,
+      metadata: e.metadata,
+    } as E);
+  }
+
+  return {
+    appended: r.appended,
+    state: stagedState,
+    version: r.appended[r.appended.length - 1].stream_version,
+    eventsSinceSnapshot: r.loadedEventsSinceSnapshot + r.appended.length,
+  };
 }
 
 // ---- internals ----

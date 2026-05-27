@@ -18,6 +18,7 @@ import {
   expected,
   RetryBudgetExhausted,
   runCommand,
+  runCommandWithSnapshots,
   WrongExpectedVersion,
 } from "../src/index.ts";
 import type {
@@ -268,7 +269,11 @@ describe("runCommand — OCC retry (D-0005 / AGG-010)", () => {
   });
 });
 
-describe("runCommand — snapshot policy (§6)", () => {
+describe("runCommandWithSnapshots — snapshot policy (§6)", () => {
+  // Snapshot orchestration moved to L3 per step-5 slice 2; the L2
+  // `runCommand` no longer invokes `def.snapshotPolicy`. These tests
+  // exercise the L3 wrapper, which is what `Instructed.dispatch` and
+  // the PM worker delegate to.
   test("everyN(n) writes a snapshot after the threshold is crossed", async () => {
     const s = randomUUID();
     await seed(s);
@@ -280,7 +285,7 @@ describe("runCommand — snapshot policy (§6)", () => {
         // crosses the threshold).
         snapshotPolicy: everyN(2),
       };
-    await runCommand(client, def, s, { kind: "add", n: 4 });
+    await runCommandWithSnapshots(client, def, s, { kind: "add", n: 4 });
     const snap = await client.readSnapshot<CounterState>(s);
     assert.equal(snap.sourceType, "Counter");
     assert.equal(snap.sourceVersion, 2n);
@@ -294,13 +299,13 @@ describe("runCommand — snapshot policy (§6)", () => {
     // fresh snapshot and reads zero unseen events.
     const def: AggregateDefinition<CounterState, CounterCommand, CounterEvent> =
       { ...counter(), snapshotPolicy: everyN(1) };
-    await runCommand(client, def, s, { kind: "add", n: 3 });
+    await runCommandWithSnapshots(client, def, s, { kind: "add", n: 3 });
 
     // Probe: count apply() calls on the second run. If the snapshot is
     // used, apply is only called once (for the just-appended Added(5)
-    // inside the snapshot-policy post-fold). If the snapshot were
-    // ignored, apply would also be called for the Seed event and the
-    // first Added event = 3 total.
+    // folded through apply to produce the staged snapshot state). If
+    // the snapshot were ignored, apply would also be called for the
+    // Seed event and the first Added event = 3 total.
     let appliesSeen = 0;
     const probe: AggregateDefinition<
       CounterState,
@@ -313,11 +318,26 @@ describe("runCommand — snapshot policy (§6)", () => {
         return counter().apply(state, event);
       },
     };
-    await runCommand(client, probe, s, { kind: "add", n: 5 });
+    await runCommandWithSnapshots(client, probe, s, { kind: "add", n: 5 });
     assert.equal(appliesSeen, 1);
     const snap = await client.readSnapshot<CounterState>(s);
     assert.equal(snap.data.value, 8);
     assert.equal(snap.sourceVersion, 3n);
+  });
+
+  test("L2 runCommand does NOT invoke snapshotPolicy", async () => {
+    // Step-5 slice 2 contract: snapshot orchestration is L3, not L2.
+    // A direct call to runCommand must not write a snapshot even if
+    // the def declares a policy.
+    const s = randomUUID();
+    await seed(s);
+    const def: AggregateDefinition<CounterState, CounterCommand, CounterEvent> =
+      { ...counter(), snapshotPolicy: everyN(1) };
+    await runCommand(client, def, s, { kind: "add", n: 1 });
+    await assert.rejects(
+      () => client.readSnapshot<CounterState>(s),
+      (err: Error) => err.name === "SnapshotNotFound",
+    );
   });
 });
 

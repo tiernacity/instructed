@@ -49,6 +49,13 @@ export {
   type PartitionBy,
 } from "./partition-by.ts";
 
+// `runCommandWithSnapshots`: L3 orchestrator that wraps the L2
+// `runCommandAndApply` primitive with best-effort snapshot writes
+// per `def.snapshotPolicy`. The `Instructed` facade and the PM
+// worker both delegate to this; direct callers who want snapshot
+// orchestration without the facade also use this entry.
+export { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
+
 // Consistency-on-dispatch wait (polls the L1 `is_subscription_caught_up`
 // predicate). ML-0002 may eventually rework the mechanism into
 // LISTEN/NOTIFY; the L3 shape is intended to stay stable across that
