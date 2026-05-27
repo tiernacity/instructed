@@ -147,16 +147,20 @@ export {
   type ProjectionWorkerOptions,
 } from "./projection-worker.ts";
 
-// PM processing-worker adapter.
+// PM substrate (L2): snapshot+ack lifecycle, rebuild on snapshot
+// miss / module-version mismatch, lease management. The substrate's
+// `handle` returns `{ complete? }` only -- no command dispatch. A
+// port reproduces this substrate to support process managers; the
+// by-value `commands`-list orchestration is L3 (`startPmWorker` in
+// the bare `instructed-sdk` entry).
 export {
-  startPmWorker,
+  startPmSubstrate,
   PM_SNAPSHOT_MODULE_VERSION_KEY,
-  type PmDefinition,
-  type PmHandleResult,
-  type PmHandlerContext,
-  type PmWorkerOptions,
-  type DispatchedCommand,
-} from "./pm-worker.ts";
+  type PmSubstrateDefinition,
+  type PmSubstrateHandleResult,
+  type PmSubstrateHandlerContext,
+  type PmSubstrateOptions,
+} from "./pm-substrate.ts";
 
 // Shared worker handle (L2 interface; the loop functions above all
 // return one).

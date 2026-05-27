@@ -39,8 +39,8 @@ The three layers (per `SDK-REWORK-NOTES.md` and
 | Layer | Modules | Key exports | Purpose |
 |---|---|---|---|
 | **L1 — procedure bindings** | `client.ts`, `errors.ts` (SQLSTATE-bound classes), `types.ts` | `Client`, `InstructedError` + subclasses, wire shapes | One method per `instructed.*` stored procedure; SQLSTATE → typed-error translation. Every SDK port reproduces this surface verbatim. |
-| **L2 — core behaviours** | `aggregate.ts`, `routing-worker.ts`, `processing-worker.ts`, `projection-worker.ts` (adapter), `pm-worker.ts` | `runCommand`, `runCommandAndApply`, `startRoutingWorker`, `startProcessingWorker`, `startProjectionWorker`, `startPmWorker`, `ErrorPolicy`, `RetryBudgetExhausted` | Aggregate load-execute-append loop with OCC retry (D-0005); D-0025 per-batch routing worker; per-item lease + heartbeat processing worker; kind-specific projection / PM adapters. Every SDK port reproduces the *behaviours*; the shape can be language-idiomatic. |
-| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `partition-by.ts`, `aggregate-snapshots.ts`, `error-policies.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `runCommandWithSnapshots`, `exponentialBackoff`, `linearBackoff`, `retryUpTo`, `ConsistencyTimeout`, `UnknownAggregateType` | By-name aggregate dispatch, projection / PM registration, single `startWorker()` / `close()`, consistency-on-dispatch wait, `PartitionBy` sugar over the routing extension point, snapshot-policy orchestration over the L2 aggregate primitive, retry/error-policy standard library. **May differ per language port.** |
+| **L2 — core behaviours** | `aggregate.ts`, `routing-worker.ts`, `processing-worker.ts`, `projection-worker.ts` (adapter), `pm-substrate.ts` | `runCommand`, `runCommandAndApply`, `startRoutingWorker`, `startProcessingWorker`, `startProjectionWorker`, `startPmSubstrate`, `ErrorPolicy`, `RetryBudgetExhausted` | Aggregate load-execute-append loop with OCC retry (D-0005); D-0025 per-batch routing worker; per-item lease + heartbeat processing worker; kind-specific projection / PM-substrate adapters. The PM substrate is the snapshot+ack lifecycle without command dispatch (that's L3). Every SDK port reproduces the *behaviours*; the shape can be language-idiomatic. |
+| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `partition-by.ts`, `aggregate-snapshots.ts`, `error-policies.ts`, `pm-worker.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `runCommandWithSnapshots`, `exponentialBackoff`, `linearBackoff`, `retryUpTo`, `startPmWorker`, `ConsistencyTimeout`, `UnknownAggregateType` | By-name aggregate dispatch, projection / PM registration, single `startWorker()` / `close()`, consistency-on-dispatch wait, `PartitionBy` sugar over the routing extension point, snapshot-policy orchestration over the L2 aggregate primitive, retry/error-policy standard library, by-value-`commands` PM wrapper over the L2 substrate. **May differ per language port.** |
 
 L1 + L2 = the `instructed-sdk/core` sub-path. L1 + L2 + L3 = the
 bare `instructed-sdk` entry. See `src/core.ts` and `src/index.ts`
@@ -161,7 +161,8 @@ sdks/typescript/
 │   ├── processing-worker.ts   -- L2 per-item lease + heartbeat (extension point: retry / error policy)
 │   ├── error-policies.ts      -- L3 exponentialBackoff / linearBackoff / retryUpTo (retry std library)
 │   ├── projection-worker.ts   -- L2 projection adapter over processing-worker
-│   ├── pm-worker.ts           -- L2 snapshot+ack + L3 dispatch helper
+│   ├── pm-substrate.ts        -- L2 PM snapshot+ack lifecycle (substrate)
+│   ├── pm-worker.ts           -- L3 by-value-`commands` wrapper over pm-substrate
 │   ├── consistency.ts         -- L3 waitForProjection
 │   ├── instructed.ts          -- L3 facade
 │   ├── core.ts                -- public entry for `instructed-sdk/core`

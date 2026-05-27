@@ -56,6 +56,23 @@ export {
 // orchestration without the facade also use this entry.
 export { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
 
+// PM worker wrapper (L3): thin convenience over `startPmSubstrate`
+// (L2, exported from `instructed-sdk/core`) that interprets a
+// user-returned `commands` list and dispatches each command via
+// `runCommandWithSnapshots` between `handle` and the substrate's
+// snapshot+ack tx. Idiomatic-not-required: a port may ship a
+// different shape for "PM handler returns commands" and still be
+// conformant. The `Instructed` facade and direct callers wanting
+// the by-value commands shape use this entry.
+export {
+  startPmWorker,
+  type PmDefinition,
+  type PmHandleResult,
+  type PmHandlerContext,
+  type PmWorkerOptions,
+  type DispatchedCommand,
+} from "./pm-worker.ts";
+
 // Retry/error-policy standard library (L3). The contract
 // (`ErrorPolicy<PolicyState>`) and the observable default
 // (`DEFAULT_ERROR_POLICY`) live in `processing-worker.ts` (L2);

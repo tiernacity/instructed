@@ -20,9 +20,9 @@ Status (2026-05-27):
     addressed; see `§3 resolution status` below.
   - step 5 (pluggable extension points): **complete**
     (2026-05-27). All three slices landed. PM L2/L3 split
-    (asymmetry #1) and `quarantineAfter` (TODO #7 co-design)
-    parked with reasons; SNAP-002 / snapshot module versioning
-    stays under TODO #5, not here. TODO #2 (SDK restructuring)
+    (asymmetry #1, landed 2026-05-27 as follow-on) and
+    `quarantineAfter` (TODO #7 co-design) cleared; SNAP-002 /
+    snapshot module versioning stays under TODO #5, not here. TODO #2 (SDK restructuring)
     is discharged; the porting checklist (`docs/porting-checklist.md`)
     is in place; TODO #6 (additional language SDKs) can now
     start against a stable `core.ts`.
@@ -296,16 +296,21 @@ Surfaced by the classification pass.
 
 ### Resolution status:
 
-  - **#1 `pm-worker.ts` L2/L3 mix**: **deferred to step 5.** The
-    clean physical split is to extract an L2 PM substrate whose
-    `handle` callback returns no commands (snapshot+ack only),
-    then make the current `startPmWorker` a thin L3 wrapper that
-    interprets a returned `commands` list via `runCommand`. That
-    refactor changes the user-facing `PmDefinition.handle`
-    signature and intersects directly with the pluggable
-    extension-points discussion (specifically the
-    "PM-handler-dispatch error visibility" item from §4). Doing
-    it now would prejudge that conversation; step 5 owns it.
+  - ~~**#1 `pm-worker.ts` L2/L3 mix**: deferred to step 5.~~
+    **Done (2026-05-27)** as the step-5 follow-on. New file
+    `src/pm-substrate.ts` hosts the L2 substrate
+    (`startPmSubstrate`, `PmSubstrateDefinition`, etc.) with
+    `handle` returning `{ complete? }` only; `src/pm-worker.ts`
+    is now the thin L3 wrapper that captures user-returned
+    `commands` and dispatches via `runCommandWithSnapshots`
+    between `handle` and the substrate's snapshot+ack tx.
+    User-facing API preserved exactly; `core.ts` exports the
+    substrate (L2); `index.ts` exports the wrapper (L3).
+    Candidate #6 (PM-handler-dispatch error visibility)
+    resolved as "document the asymmetry, no hook" — users
+    wanting custom dispatch error handling omit `commands` from
+    the return and dispatch inside `handle` (the escape hatch).
+    See pm-worker.ts module header for the visibility note.
   - **#2 `errors.ts` layer annotation**: landed (step 4).
   - **#3 `readSubscriptionBatch` / `advanceSubscription` pre-SUB-A
     survivors**: landed. Both stay on `Client` and stay in
@@ -665,15 +670,23 @@ shipped library; tests for each shipped strategy.
     TODO #7's `instructedctl` `failed`-row surface. The
     contract from §7.4 is forward-compatible; the helper
     can ship later without re-doing the type.
-  - **PM L2/L3 split (asymmetry #1) + candidate #6
-    (PM-handler-dispatch error visibility).** Originally
-    queued as a step-5 slice ("second slice" in the prior
-    draft). Re-parked: it's not really an *extension point*
-    in the §7.1 sense — it's a layer-recut similar to slice
-    2, but without a corresponding contract that needs
-    naming. Land it as a follow-on after step 5 closes
-    (still before TODO #6 hits porting, ideally), or in the
-    same pass as TODO #7 if that comes first.
+  - ~~**PM L2/L3 split (asymmetry #1) + candidate #6
+    (PM-handler-dispatch error visibility).**~~ **Landed
+    2026-05-27** as a follow-on after step 5 closed (before
+    TODO #6 starts porting). `src/pm-substrate.ts` is the new
+    L2 substrate (snapshot+ack lifecycle, rebuild on miss /
+    module-version mismatch, lease management);
+    `src/pm-worker.ts` is the thin L3 wrapper that captures
+    user-returned `commands` and dispatches between `handle`
+    and the substrate's snapshot+ack tx. Candidate #6 resolved
+    as "document, no hook": dispatch errors surface via
+    `onError` / SUB-B error policy (not the user's
+    `try/catch`); users wanting custom dispatch error
+    handling omit `commands` from the return and dispatch
+    inside `handle` themselves. User-facing API preserved
+    exactly; 145/145 tests pass; porting-checklist §3 updated
+    to name the substrate as required-core and the wrapper as
+    idiomatic-not-required.
   - **Middleware (candidate #5).** Doesn't fit the
     contract+library pattern (middleware is a *chain*, not a
     single function). Separate post-step-5 conversation when

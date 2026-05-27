@@ -72,8 +72,18 @@ See `sdks/typescript/src/` for the reference implementations:
     processing loop.
   - `projection-worker.ts` — projection adapter
     (`complete_work_item_projection`).
-  - `pm-worker.ts` — PM adapter (snapshot+ack tx; rebuild on
-    miss/mismatch).
+  - `pm-substrate.ts` — PM substrate (L2): snapshot+ack tx;
+    rebuild on miss / module-version mismatch; lease management.
+    The substrate's `handle` returns `{ complete? }` only — no
+    command-dispatch orchestration. **This is the required-core
+    PM surface every port reproduces.**
+  - `pm-worker.ts` — PM wrapper (L3): the by-value-`commands`
+    shape (`PmHandleResult = { commands?, complete? }`) layered
+    over the L2 substrate. Idiomatic-not-required: a port may
+    ship a different shape for "PM handler returns commands"
+    (yield-style, eager dispatch, an actor message protocol,
+    etc.) and still be conformant, provided the substrate
+    contract above is preserved.
 
 Each is annotated in `docs/todo/sdk-rework.md` §2 with the
 behaviours a port MUST reproduce.
