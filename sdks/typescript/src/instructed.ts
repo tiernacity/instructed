@@ -58,10 +58,12 @@ import {
 } from "./routing-worker.ts";
 import {
   startProjectionWorker,
-  routingFnForPartitionBy,
-  type PartitionBy,
   type ProjectionHandler,
 } from "./projection-worker.ts";
+import {
+  routingFnForPartitionBy,
+  type PartitionBy,
+} from "./partition-by.ts";
 import {
   startPmWorker,
   type PmDefinition,

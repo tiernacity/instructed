@@ -117,8 +117,8 @@ export {
 
 // Projection processing-worker adapter. The `PartitionBy` sugar
 // (`routingFnForPartitionBy`, `SEQUENTIAL_PARTITION_KEY`, `PartitionBy`)
-// is L3 and lives only in the bare `instructed-sdk` entry; consumers
-// using `instructed-sdk/core` write their own `RoutingFn` directly.
+// lives in `src/partition-by.ts` and is L3-only; consumers using
+// `instructed-sdk/core` write their own `RoutingFn` directly.
 export {
   startProjectionWorker,
   type ProjectionHandler,

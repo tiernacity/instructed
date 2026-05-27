@@ -287,51 +287,46 @@ L3.
 
 Surfaced by the classification pass.
 
-### Resolution status (after step 4):
+### Resolution status:
 
-  - **#1 `pm-worker.ts` L2/L3 mix**: open. Step 4 kept the file
-    intact; the docstring already separates the two halves but
-    the dispatch helper is still re-exported via
-    `instructed-sdk/core` (because `startPmWorker` is the only
-    way callers get the L2 snapshot+ack behaviour, and the
-    helper is intertwined). The porting checklist will name the
-    snapshot+ack contract and mark the in-loop dispatch as a
-    TS-specific convenience. Revisit during step 5.
-  - **#2 `errors.ts` layer annotation**: landed. Each section
-    header in `src/errors.ts` is now tagged with its layer; the
-    file-level docstring spells out which classes belong to
-    `core` vs. the bare entry.
+  - **#1 `pm-worker.ts` L2/L3 mix**: **deferred to step 5.** The
+    clean physical split is to extract an L2 PM substrate whose
+    `handle` callback returns no commands (snapshot+ack only),
+    then make the current `startPmWorker` a thin L3 wrapper that
+    interprets a returned `commands` list via `runCommand`. That
+    refactor changes the user-facing `PmDefinition.handle`
+    signature and intersects directly with the pluggable
+    extension-points discussion (specifically the
+    "PM-handler-dispatch error visibility" item from §4). Doing
+    it now would prejudge that conversation; step 5 owns it.
+  - **#2 `errors.ts` layer annotation**: landed (step 4).
   - **#3 `readSubscriptionBatch` / `advanceSubscription` pre-SUB-A
-    survivors**: open. Both still on `Client`, still re-exported
-    via `instructed-sdk/core` (a port MUST expose every SQL
-    procedure). Documentation pass owed in the porting checklist:
-    "bespoke long-lease loop primitives; not used by the supplied
-    workers under D-0025."
+    survivors**: landed. Both stay on `Client` and stay in
+    `instructed-sdk/core` (a port MUST expose every SQL
+    procedure). Each now carries a docstring noting it is not
+    called by the supplied workers under D-0025; new code should
+    prefer the routing-worker substrate; the procedures survive
+    for callers writing bespoke long-lease loops above the
+    `Client` layer.
   - **#4 `mapPgError` / `MapPgErrorContext` public re-exports**:
-    landed. Both dropped from `src/core.ts` and `src/index.ts`;
-    they remain exported from `errors.ts` for internal use by
-    `client.ts` and `internal/with-transaction.ts`. The one test
-    that touches `mapPgError` directly imports from the source
-    file path, not the package entry, and continues to work.
-  - **#5 `Instructed.dispatch`'s `consistency:` option**:
-    documented but unchanged. L3 shape; L1 mechanism. ML-0002
-    will rework the mechanism without changing the shape.
-  - **#6 `RunningWorker` shared handle**: landed as L2 in
-    `src/core.ts` (re-exported from `internal/running-worker.ts`).
-    Porting checklist names the contract (`stopped`, `close`),
-    not the file location.
+    landed (step 4).
+  - ~~**#5 `Instructed.dispatch`'s `consistency:` option**~~:
+    **retired from the asymmetries list.** On review this isn't an
+    asymmetry -- both the option (L3) and the mechanism (L1
+    `is_subscription_caught_up`) sit in their right layers. The
+    note that ML-0002 may rework the mechanism without changing
+    the shape is forward-looking, not a present-day problem.
+  - **#6 `RunningWorker` shared handle**: landed (step 4).
 
-New asymmetry surfaced during step 4:
+New asymmetry surfaced during step 4 and now resolved:
 
-  - **PartitionBy sugar location.** `routingFnForPartitionBy`,
-    `SEQUENTIAL_PARTITION_KEY`, and `PartitionBy` live in
-    `src/projection-worker.ts` (alongside the L2 projection
-    adapter) but are re-exported only from the bare
-    `instructed-sdk` entry, not from `instructed-sdk/core`. The
-    file's contents are mixed-layer; the public re-export
-    surface is clean. A later refactor could move the sugar to
-    its own file (`src/partition-by.ts`?) if the mixing
-    becomes confusing in practice.
+  - **PartitionBy sugar location**: landed. Moved to
+    `src/partition-by.ts` so the file boundary matches the layer
+    boundary. `projection-worker.ts` is now pure L2 (the
+    adapter); `partition-by.ts` is pure L3 (the sugar);
+    `instructed.ts` and `index.ts` updated to import from the
+    new location; one test file updated (the rest import via the
+    public `instructed-sdk` entry, which is unaffected).
 
 ---
 

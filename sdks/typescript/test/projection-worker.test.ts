@@ -27,12 +27,14 @@ import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
 import { startRoutingWorker } from "../src/routing-worker.ts";
 import {
-  routingFnForPartitionBy,
-  SEQUENTIAL_PARTITION_KEY,
   startProjectionWorker,
   type ProjectionDefinition,
   type ProjectionHandlerContext,
 } from "../src/projection-worker.ts";
+import {
+  routingFnForPartitionBy,
+  SEQUENTIAL_PARTITION_KEY,
+} from "../src/partition-by.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 import type { RecordedEvent } from "../src/types.ts";

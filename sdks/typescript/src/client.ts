@@ -378,6 +378,22 @@ export class Client {
     );
   }
 
+  /**
+   * Read up to `qty` events from `subscriptionName` starting at
+   * `last_seen + 1`. Requires that the caller holds the
+   * subscription's lease (via `claimSubscription` with the same
+   * `workerId`); raises `SubscriptionLeaseLost` (IS022) if not.
+   *
+   * **Not used by the supplied workers.** Under D-0025 the SUB-A
+   * routing worker (`startRoutingWorker`) reads `$all` directly
+   * via `readAll` and uses `routeBatch` to advance the cursor and
+   * insert work items atomically. This procedure survives from the
+   * pre-SUB-A single-cursor subscription model and remains part of
+   * the SQL contract for callers writing bespoke long-lease loops
+   * above the `Client` layer (paired with `advanceSubscription` and
+   * `extendSubscriptionClaim` for heartbeating). New code should
+   * prefer the routing-worker substrate.
+   */
   async readSubscriptionBatch<E = unknown>(
     streamUuid: string,
     subscriptionName: string,
@@ -403,6 +419,18 @@ export class Client {
     return res.rows.map((r) => mapRecordedEvent<E>(r));
   }
 
+  /**
+   * Advance `subscriptionName`'s cursor to `upToPosition` (monotone:
+   * `greatest(last_seen, upToPosition)`). Requires the caller's
+   * lease; raises `SubscriptionLeaseLost` (IS022) otherwise.
+   *
+   * **Not used by the supplied workers.** The SUB-A routing worker
+   * advances the cursor atomically with work-item INSERTs via
+   * `routeBatch`, not via this procedure. Survives in the SQL
+   * contract for bespoke long-lease loops above the `Client` layer
+   * (paired with `readSubscriptionBatch`). New code should prefer
+   * the routing-worker substrate.
+   */
   async advanceSubscription(
     streamUuid: string,
     subscriptionName: string,

@@ -238,8 +238,11 @@ describe("waitForProjection — timeout", () => {
 describe("waitForProjection — SUB-A work-item conjunct", () => {
   test("routed-but-pending blocks; predicate flips to true once handler completes", async () => {
     const { startRoutingWorker } = await import("../src/routing-worker.ts");
-    const { startProjectionWorker, routingFnForPartitionBy } = await import(
+    const { startProjectionWorker } = await import(
       "../src/projection-worker.ts"
+    );
+    const { routingFnForPartitionBy } = await import(
+      "../src/partition-by.ts"
     );
 
     const stream = randomUUID();
@@ -383,8 +386,11 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
     // subscription before any user stream exists (per-stream sources
     // would raise IS003 at claim-time).
     const { startRoutingWorker } = await import("../src/routing-worker.ts");
-    const { startProjectionWorker, routingFnForPartitionBy } = await import(
+    const { startProjectionWorker } = await import(
       "../src/projection-worker.ts"
+    );
+    const { routingFnForPartitionBy } = await import(
+      "../src/partition-by.ts"
     );
 
     const stream = randomUUID();

@@ -14,23 +14,17 @@
  * SDK does not assume one. At-least-once delivery; the handler MUST be
  * idempotent against redelivery.
  *
- * This module also owns the `PartitionBy` -> `RoutingFn` translation
- * helper (`routingFnForPartitionBy`). The translation is used by the
- * slice-9 facade and by slice-6 tests; it produces a `RoutingFn` that
- * never returns `"ignore"`. A projection that needs routing-side
- * filtering (the legacy `selector` parameter's role) uses a raw
- * `routeFn: RoutingFn` directly via the layer-5 facade -- see
- * `docs/architecture.md` "How a worker runs" for the routing /
- * processing split.
- *
- * Not yet re-exported from `src/index.ts`. The layer-5 facade in
- * slice 9 will wire `registerProjection` here; tests import the
- * module directly.
+ * The `PartitionBy` sugar that pairs with this adapter (PRJ-A) lives
+ * in its own file (`src/partition-by.ts`) so the file boundary matches
+ * the layer boundary: this adapter is L2 and is re-exported from
+ * `instructed-sdk/core`; the sugar is L3 and is re-exported only from
+ * the bare `instructed-sdk` entry. A consumer of `core` writes a raw
+ * `RoutingFn` directly. See `docs/architecture.md` "How a worker
+ * runs" for the routing / processing split.
  */
 
 import type { Client } from "./client.ts";
 import type { RecordedEvent } from "./types.ts";
-import type { RoutingFn } from "./routing-worker.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
@@ -38,49 +32,6 @@ import {
   type ProcessingWorkerOptions,
 } from "./processing-worker.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
-
-// ============================================================================
-// PartitionBy + RoutingFn translation (sugar)
-// ============================================================================
-
-/**
- * Three-mode partitioning sugar over a routing-layer `RoutingFn`. None of
- * the modes can emit `"ignore"`; if you need to filter at routing time,
- * pass a raw `RoutingFn` (slice-9 facade). PRJ-A.
- */
-export type PartitionBy<E = unknown> =
-  | { kind: "sequential" }
-  | { kind: "per-event" }
-  | { kind: "per-key"; key: (event: RecordedEvent<E>) => string };
-
-/** The synthetic partition key used by `{ kind: "sequential" }`. */
-export const SEQUENTIAL_PARTITION_KEY = "_default";
-
-/**
- * Translate a `PartitionBy` into a routing-layer `RoutingFn`. The
- * returned function is pure and never produces `"ignore"`.
- *
- *   sequential -> always `{ partitionKey: '_default' }`.
- *   per-event  -> `{ partitionKey: String(event.event_number) }`.
- *   per-key    -> `{ partitionKey: key(event) }`.
- *
- * The per-key user function may throw or return a non-string value;
- * those errors propagate to the routing worker, which surfaces them
- * via `onError` and stalls (SUB-A "no silent skip"). No clever
- * recovery here.
- */
-export function routingFnForPartitionBy<E>(pb: PartitionBy<E>): RoutingFn<E> {
-  switch (pb.kind) {
-    case "sequential":
-      return () => ({ partitionKey: SEQUENTIAL_PARTITION_KEY });
-    case "per-event":
-      return (event) => ({ partitionKey: String(event.event_number) });
-    case "per-key": {
-      const key = pb.key;
-      return (event) => ({ partitionKey: key(event) });
-    }
-  }
-}
 
 // ============================================================================
 // Projection processing worker

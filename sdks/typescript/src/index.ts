@@ -40,15 +40,14 @@ export * from "./core.ts";
 // conformant. See `SDK-REWORK-NOTES.md` \u00a72 and D-0027.
 // ----------------------------------------------------------------------------
 
-// `PartitionBy` sugar over a routing-layer `RoutingFn`. Exported from
-// projection-worker.ts to keep the helper co-located with the
-// projection adapter; surfaced as L3 here because it's not part of the
-// porting checklist.
+// `PartitionBy` sugar over a routing-layer `RoutingFn`. Pure L3 --
+// lives in its own file so the file boundary matches the layer
+// boundary.
 export {
   routingFnForPartitionBy,
   SEQUENTIAL_PARTITION_KEY,
   type PartitionBy,
-} from "./projection-worker.ts";
+} from "./partition-by.ts";
 
 // Consistency-on-dispatch wait (polls the L1 `is_subscription_caught_up`
 // predicate). ML-0002 may eventually rework the mechanism into
