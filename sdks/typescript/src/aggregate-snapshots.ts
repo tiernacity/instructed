@@ -2,13 +2,12 @@
  * L3 aggregate orchestration: `runCommand` plus best-effort snapshot
  * writes.
  *
- * Per `docs/todo/sdk-rework.md` §7.3, snapshot policy invocation is
- * an L3 concern. The L2 primitive `runCommandAndApply` (in
- * `aggregate.ts`) does load + execute + append + OCC retry and
- * returns the post-append state; this file's
- * `runCommandWithSnapshots` wraps that primitive and, on success,
- * invokes `def.snapshotPolicy.shouldSnapshot` and writes the
- * snapshot best-effort via a separate `recordSnapshot` call.
+ * Snapshot policy invocation is an L3 concern. The L2 primitive
+ * `runCommandAndApply` (in `aggregate.ts`) does load + execute +
+ * append + OCC retry and returns the post-append state; this
+ * file's `runCommandWithSnapshots` wraps that primitive and, on
+ * success, invokes `def.snapshotPolicy.shouldSnapshot` and writes
+ * the snapshot best-effort via a separate `recordSnapshot` call.
  *
  * # Events vs. snapshots
  *

@@ -16,8 +16,9 @@
  * bare entry: the first re-exports everything from `./core.ts` (L1 +
  * L2), the second adds the L3 conveniences on top.
  *
- * See also `docs/todo/sdk-rework.md` for the annotated export map and
- * `sdks/typescript/README.md` for the user-facing layer description.
+ * See `sdks/typescript/README.md` for the user-facing layer
+ * description and `sdks/porting-checklist.md` for the per-port
+ * reading list.
  */
 
 // ----------------------------------------------------------------------------
@@ -37,7 +38,7 @@ export * from "./core.ts";
 // The idiomatic facade and the consistency-on-dispatch helper. None of
 // these are part of the porting-checklist surface; a Python / Go /
 // Elixir port may ship something quite different here and still be
-// conformant. See `SDK-REWORK-NOTES.md` \u00a72 and D-0027.
+// conformant. See `sdks/porting-checklist.md` and D-0027.
 // ----------------------------------------------------------------------------
 
 // `PartitionBy` sugar over a routing-layer `RoutingFn`. Pure L3 --

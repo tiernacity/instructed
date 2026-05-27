@@ -4,7 +4,7 @@
  * # The routing extension point
  *
  * Routing is one of the SDK's three named extension points (see
- * `docs/todo/sdk-rework.md` §7.1). It follows the family pattern
+ * `sdks/porting-checklist.md` §4.1). It follows the family pattern
  * **contract + standard library + escape hatch**:
  *
  *   - **Contract.** `RoutingFn<E>` (this file). Given a

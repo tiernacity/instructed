@@ -8,8 +8,8 @@
  *
  * # Layering note (step-5 slice 2, 2026-05-27)
  *
- * Snapshot **policy invocation** is no longer part of `runCommand`.
- * Per `docs/todo/sdk-rework.md` §7.3, the layering is:
+ * Snapshot **policy invocation** is not part of `runCommand`. The
+ * layering is:
  *
  *   - **L2 (this file).** `runCommand` does load + execute + append
  *     + OCC retry. `runCommandAndApply` is the same loop returning
@@ -66,8 +66,8 @@ export interface DomainEvent {
 
 /**
  * Aggregate snapshot policy — the contract half of the
- * snapshot-policy extension point (see `docs/todo/sdk-rework.md`
- * §7.1 / §7.3 and `sdks/porting-checklist.md` §4.2).
+ * snapshot-policy extension point (see `sdks/porting-checklist.md`
+ * §4.2).
  *
  * `eventsSinceLast` counts events folded into the current state
  * since the last persisted snapshot (or since `initialState()`

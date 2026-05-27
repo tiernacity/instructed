@@ -2,8 +2,9 @@
  * Routing-extension-point standard library: `PartitionBy` modes
  * translated to routing-layer `RoutingFn`s.
  *
- * Per `docs/todo/sdk-rework.md` §7.1, the routing extension point
- * follows the contract + standard library + escape hatch pattern.
+ * The routing extension point follows the contract + standard
+ * library + escape hatch pattern (see `sdks/porting-checklist.md`
+ * §4.1).
  * The contract lives in `routing-worker.ts` (`RoutingFn`,
  * `RoutingDecision`). This file is the **standard library** — the
  * shipped fixed strategies for the common cases. A consumer who

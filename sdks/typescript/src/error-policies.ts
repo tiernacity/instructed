@@ -1,9 +1,10 @@
 /**
  * Retry/error-policy standard library.
  *
- * Per `docs/todo/sdk-rework.md` §7.4, the retry/error-policy
- * extension point follows the contract + standard library + escape
- * hatch pattern. The contract lives in `processing-worker.ts`
+ * Retry/error policy is one of the SDK's three named extension
+ * points (see `sdks/porting-checklist.md` §4.3), following the
+ * **contract + standard library + escape hatch** pattern. The
+ * contract lives in `processing-worker.ts`
  * (`ErrorPolicy<PolicyState>`, `ErrorPolicyDecision`,
  * `ErrorPolicyContext`, `ErrorPolicyResult`). This file is the
  * **standard library** — shipped composable strategies for the

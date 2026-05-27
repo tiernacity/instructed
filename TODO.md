@@ -523,7 +523,7 @@ meaning. Gaps in the numbering are expected.
   with NULL fields. `docs/sql-contract.md` updated to call out the
   nullable diagnostic fields. Full conformance suite (169/169, +1
   new) and full TS SDK suite (131/131) green. First piece of the
-  TODO #2 SDK rework; classified in `docs/todo/sdk-rework.md`.
+  TODO #2 SDK rework (now discharged).
 - **#13 `streams_stream_uuid_key` race in `append_to_stream`.**
   Fixed by wrapping the `'exact'` V=0 missing-stream-create
   INSERT in `sql/instructed.sql` with a `unique_violation`
@@ -645,9 +645,9 @@ meaning. Gaps in the numbering are expected.
 
 ## 16. Pluggable logger surface for the TypeScript SDK
 
-**Why this exists.** Surfaced during the TODO #2 SDK rework
-(`docs/todo/sdk-rework.md` §2). The SDK currently uses
-`console.warn` directly for non-fatal observable events:
+**Why this exists.** Surfaced during the TODO #2 SDK rework.
+The SDK currently uses `console.warn` directly for non-fatal
+observable events:
 
   - Aggregate snapshot-write failure (L3
     `aggregate-snapshots.ts`; D-0019 best-effort semantics).

@@ -8,13 +8,12 @@
  * always shipped (a `PmDefinition.handle` returning
  * `{ commands?, complete? }`).
  *
- * Per `docs/todo/sdk-rework.md` §3 asymmetry #1 + §7.5 (the step-5
- * follow-on), this file is the L3 half of the PM L2/L3 split. The
- * monolithic pre-split `pm-worker.ts` did snapshot+ack lifecycle
- * AND command dispatch in one function; the split puts the
- * lifecycle in the substrate (required-core for any port) and
- * keeps the by-value `commands`-list shape here as idiomatic
- * TypeScript convenience.
+ * This file is the L3 half of the PM L2/L3 split. The L2
+ * substrate (`pm-substrate.ts`) does the snapshot+ack lifecycle
+ * (required-core for any port); this wrapper keeps the by-value
+ * `commands`-list shape as idiomatic TypeScript convenience. See
+ * `sdks/porting-checklist.md` §3 for the cross-language
+ * treatment.
  *
  * # Dispatch ordering
  *
@@ -26,14 +25,14 @@
  * The work item stays `claimed` and the lease is held by the
  * processing-worker heartbeat.
  *
- * # PM-handler-dispatch error visibility (sdk-rework §4 #6)
+ * # PM-handler-dispatch error visibility
  *
  * Errors from SDK-dispatched commands surface via the worker's
  * `onError` callback and the SUB-B error policy, **not** through
  * the user's `try/catch` around `handle`'s body. This asymmetry
- * is deliberate (`docs/todo/sdk-rework.md` §7.5): a user wanting
- * custom dispatch-error handling can omit `commands` from the
- * `handle` return and dispatch directly inside `handle` using
+ * is deliberate: a user wanting custom dispatch-error handling
+ * can omit `commands` from the `handle` return and dispatch
+ * directly inside `handle` using
  * `runCommandWithSnapshots` (or any other call). The escape
  * hatch is always available.
  *

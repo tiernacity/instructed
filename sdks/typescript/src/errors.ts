@@ -6,8 +6,7 @@
  * serialization_failure, …) pass through unwrapped — they are
  * infrastructure failures, not contract failures.
  *
- * **Layer membership** (per [D-0027](../../../docs/decisions.md#d-0027)
- * and `docs/todo/sdk-rework.md`):
+ * **Layer membership** (per [D-0027](../../../docs/decisions.md#d-0027)):
  *
  *   - **L1 (procedure bindings)** classes are SQLSTATE-bound and form
  *     part of the contract every SDK port must reproduce. The base

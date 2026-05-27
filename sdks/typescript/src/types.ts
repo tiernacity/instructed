@@ -27,8 +27,9 @@ export type JsonValue =
 /**
  * Expected-version tag passed to `append_to_stream`.
  *
- * See `sql/instructed.sql` :: append_to_stream and
- * `docs/todo/sdk-rework.md` for the annotated export map.
+ * See `sql/instructed.sql` :: append_to_stream for the SQL
+ * contract; `src/core.ts` and `src/index.ts` for the SDK's
+ * export inventory.
  */
 export type ExpectedVersion =
   | { kind: "any" }

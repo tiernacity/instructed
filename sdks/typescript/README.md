@@ -14,7 +14,7 @@ for what the system promises see [`docs/guarantees.md`](../../docs/guarantees.md
 docker compose up -d                                # in repo root
 cd sdks/typescript
 npm install
-npm test                                            # 77 tests against the live DB
+npm test                                            # runs against the live DB
 ```
 
 End-to-end example:
@@ -33,8 +33,7 @@ npm package (`instructed-sdk`) with two entry points:
   - **`instructed-sdk/core`** — L1 + L2 only; the porting-checklist
     inventory. For consumers writing their own L3 facade.
 
-The three layers (per `SDK-REWORK-NOTES.md` and
-`docs/todo/sdk-rework.md`):
+The three layers:
 
 | Layer | Modules | Key exports | Purpose |
 |---|---|---|---|
@@ -44,8 +43,7 @@ The three layers (per `SDK-REWORK-NOTES.md` and
 
 L1 + L2 = the `instructed-sdk/core` sub-path. L1 + L2 + L3 = the
 bare `instructed-sdk` entry. See `src/core.ts` and `src/index.ts`
-for the authoritative export inventory; the annotated map lives in
-[`docs/todo/sdk-rework.md`](../../docs/todo/sdk-rework.md).
+for the authoritative export inventory.
 
 ### Extension points
 
@@ -71,76 +69,105 @@ per-port reading list.
 ## Typical usage
 
 ```ts
-import { Pool } from "pg";
-import { Instructed } from "./src/index.ts";   // or "instructed-sdk" once published
+import {
+  Instructed,
+  everyN,
+  type AggregateDefinition,
+  type RegisterProjectionInput,
+} from "instructed-sdk";
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-const app = new Instructed({ pool });
+const Account: AggregateDefinition<AccountState, AccountCommand, AccountEvent> = {
+  type: "Account",
+  initialState: () => ({ opened: false, owner: null, balance: 0 }),
+  execute(state, command) {
+    /* return one event, an array of events, or throw */
+  },
+  apply(state, event) {
+    /* return new state */
+  },
+  // Optional snapshot orchestration (L3); fires on every Nth command.
+  snapshotPolicy: everyN(100),
+  // Optional module-version tag (SNAP-002). Bump to invalidate
+  // previously-written snapshots after a state-shape change.
+  snapshotModuleVersion: "v1",
+};
 
-app.registerAggregate({
-  name: "Account",
-  streamPrefix: "account-",
-  initial: () => ({ version: 0, balance: 0 }),
-  execute: (state, command) => { /* return events or throw */ },
-  apply: (state, event) => { /* return new state */ },
-});
+const balances: RegisterProjectionInput = {
+  startFrom: "origin",
+  handler: async (event, ctx) => {
+    /* write to your read model; idempotent (handlers may redeliver) */
+  },
+};
 
-app.registerProjection({
-  name: "Balances",
-  subscribe: { stream: "$all", startFrom: "origin" },
-  handler: async (event, ctx) => { /* write to your read model */ },
-});
+const app = new Instructed({ db: process.env.DATABASE_URL });
+app.registerAggregate(Account);
+app.registerProjection("Balances", balances);
 
 const worker = await app.startWorker();
 
-await app.dispatch(openAccount("alice"));
-await app.dispatch(deposit("alice", 1000), { consistency: ["Balances"] });
+await app.dispatch("Account", "account-alice", { kind: "Open", owner: "alice" });
+await app.dispatch(
+  "Account",
+  "account-alice",
+  { kind: "Deposit", amount: 1000 },
+  { consistency: ["Balances"] },
+);
 
 await worker.close();
-await pool.end();
+await app.close();
 ```
 
 A worked end-to-end version, with a process manager modelling a
-transfer, is in [`examples/bank-account/`](../../examples/bank-account/).
+transfer, is in
+[`examples/typescript/bank-account/`](../../examples/typescript/bank-account/).
 
 ## Errors
 
-Every SQLSTATE is translated to a typed exception. Class hierarchy:
+Every SQLSTATE is translated to a typed exception. L1 classes are
+SQLSTATE-bound (every port reproduces them); L2 and L3 classes are
+emitted by SDK runtime code at their respective layers.
 
 ```
 Error
   └── InstructedError
-        ├── WrongExpectedVersionError      (IS001)
-        ├── StreamExistsError              (IS002)
-        ├── StreamNotFoundError            (IS003)
-        ├── DuplicateEventError            (IS004)
-        ├── ReservedStreamUuidError        (IS005)
-        ├── AppendOnlyViolationError       (IS006)
-        ├── SnapshotNotFoundError          (IS010)
-        ├── SubscriptionNotFoundError      (IS020)
-        ├── SubscriptionAlreadyClaimedError (reserved IS021)
-        ├── SubscriptionLeaseLostError     (IS022)
-        └── ConsistencyTimeoutError        (SDK-only)
+        ├── AppendError                       (L1; base for IS001–IS005)
+        │     ├── WrongExpectedVersion        (IS001)
+        │     ├── StreamExists                (IS002)
+        │     ├── StreamNotFound              (IS003)
+        │     ├── DuplicateEvent              (IS004)
+        │     └── ReservedStreamUuid          (IS005)
+        ├── AppendOnlyViolation               (L1; IS006)
+        ├── SnapshotNotFound                  (L1; IS010)
+        ├── SubscriptionError                 (L1; base for IS020–IS022)
+        │     ├── SubscriptionNotFound        (IS020)
+        │     ├── SubscriptionAlreadyClaimed  (IS021)
+        │     └── SubscriptionLeaseLost       (IS022)
+        ├── WorkItemLeaseLost                 (L1; IS030)
+        ├── InvalidParameterValue             (L1; 22023)
+        ├── RetryBudgetExhausted              (L2; aggregate OCC retry loop)
+        ├── ConsistencyTimeout                (L3; waitForProjection)
+        ├── ConsistencyTargetError            (L3; waitForProjection)
+        └── UnknownAggregateType              (L3; Instructed facade)
 ```
 
+L1 classes ship via `instructed-sdk/core`; L2 adds
+`RetryBudgetExhausted`; L3 adds the consistency / facade classes.
 See `src/errors.ts` for the full mapping.
 
 ## What this SDK does not do
 
 - **Cache aggregate state between commands.** Every dispatch reloads
-  from the store. Configure `snapshotPolicy: { every: N }` per
-  aggregate to keep the load tail short.
+  from the store. Configure `snapshotPolicy: everyN(N)` per aggregate
+  to keep the load tail short.
 - **Provide transactional atomicity between a handler and the cursor
   advance.** Handlers run outside any SDK transaction; the cursor
   advances in a separate short transaction after the handler returns.
   Handlers must be idempotent. See [D-0016](../../docs/decisions.md#d-0016).
-- **Enforce snapshot module versioning.** The SQL contract has the
-  metadata column but the v1 SDK does not enforce reject-on-mismatch.
-  Applications that evolve aggregate schemas should handle this in
-  their own `apply` / `initial`.
-- **Distribute one subscription across multiple workers.** Single
-  active worker per subscription. Throughput scales by splitting into
-  multiple named subscriptions. Partitioned consumers are deferred
+- **Distribute one subscription across multiple processing workers
+  with `concurrency_limit > 1`.** Single active routing worker per
+  subscription (per-batch claim/release rotation under D-0025);
+  multiple processing workers compete for work items via per-item
+  claim. True multi-routing-worker subscriptions are deferred
   (ML-0013).
 
 ## Layout

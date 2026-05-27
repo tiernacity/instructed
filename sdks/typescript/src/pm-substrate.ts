@@ -8,9 +8,9 @@
  * about what the user does in `handle` — it accepts a return shape
  * of `{ complete?: boolean }` only.
  *
- * Per `docs/todo/sdk-rework.md` §3 asymmetry #1 + §7.5 (the
- * step-5 follow-on), this file is the result of splitting the
- * monolithic `pm-worker.ts` into:
+ * The PM workers split across two layers (see
+ * `sdks/porting-checklist.md` §3 for the required-core /
+ * idiomatic-not-required treatment):
  *
  *   - **L2 substrate (this file).** Snapshot+ack tx, rebuild on
  *     snapshot miss / module-version mismatch, lease management
