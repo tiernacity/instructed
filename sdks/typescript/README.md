@@ -20,28 +20,32 @@ npm test                                            # 77 tests against the live 
 End-to-end example:
 
 ```sh
-node --experimental-strip-types examples/bank-account/main.ts   # in repo root
+cd examples/typescript/bank-account && docker compose up
 ```
 
 ## Layer structure
 
-The SDK splits into five layers. Each is independently usable; the
-facade (Layer 5) is the conventional entry point.
+Per [D-0027](../../docs/decisions.md#d-0027) the SDK ships as one
+npm package (`instructed-sdk`) with two entry points:
 
-| Layer | Module | Surface | Purpose |
+  - **`instructed-sdk`** — the full surface; the conventional entry
+    point. What application code imports.
+  - **`instructed-sdk/core`** — L1 + L2 only; the porting-checklist
+    inventory. For consumers writing their own L3 facade.
+
+The three layers (per `SDK-REWORK-NOTES.md` and
+`docs/todo/sdk-rework.md`):
+
+| Layer | Modules | Key exports | Purpose |
 |---|---|---|---|
-| 0 | `src/client.ts` | `Client` | Thin wrappers over every stored procedure. `SQLSTATE → typed Error` translation. |
-| 1 | `src/aggregate.ts` | `runCommand`, `AggregateDefinition` | Load-execute-append loop with OCC retry. |
-| 2 | `src/subscription.ts` | `startProjection`, `ProjectionDefinition` | Persistent-subscription worker — claim, heartbeat, batch read, handler invocation, ack, release. |
-| 3 | `src/process-manager.ts` | `startProcessManager`, `ProcessManagerDefinition` | Routing PM worker over the Layer 2 loop. Snapshot+ack in one short SDK-internal tx; dispatch on a separate connection. |
-| 4 | `src/consistency.ts` | `waitForProjection` | Consistency-on-dispatch wait — polls subscription positions. |
-| 5 | `src/instructed.ts` | `Instructed` facade | Registry of aggregates / projections / process managers; `dispatch`, `startWorker`. |
+| **L1 — procedure bindings** | `client.ts`, `errors.ts` (SQLSTATE-bound classes), `types.ts` | `Client`, `InstructedError` + subclasses, wire shapes | One method per `instructed.*` stored procedure; SQLSTATE → typed-error translation. Every SDK port reproduces this surface verbatim. |
+| **L2 — core behaviours** | `aggregate.ts`, `routing-worker.ts`, `processing-worker.ts`, `projection-worker.ts` (adapter), `pm-worker.ts` | `runCommand`, `startRoutingWorker`, `startProcessingWorker`, `startProjectionWorker`, `startPmWorker`, `ErrorPolicy`, `RetryBudgetExhausted` | Aggregate load-execute-append loop with OCC retry (D-0005); D-0025 per-batch routing worker; per-item lease + heartbeat processing worker; kind-specific projection / PM adapters. Every SDK port reproduces the *behaviours*; the shape can be language-idiomatic. |
+| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `PartitionBy` sugar in `projection-worker.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `ConsistencyTimeout`, `UnknownAggregateType` | By-name aggregate dispatch, projection / PM registration, single `startWorker()` / `close()`, consistency-on-dispatch wait, partition-by sugar. **May differ per language port.** |
 
-**Core vs conveniences.** Layers 0–2 are the **core** every SDK port
-must provide (in some shape). Layers 3–5 are **conveniences** — they
-could be replaced by language-idiomatic equivalents in another SDK
-without breaking the SQL contract. See
-[`docs/architecture.md`](../../docs/architecture.md) "SDK structure".
+L1 + L2 = the `instructed-sdk/core` sub-path. L1 + L2 + L3 = the
+bare `instructed-sdk` entry. See `src/core.ts` and `src/index.ts`
+for the authoritative export inventory; the annotated map lives in
+[`docs/todo/sdk-rework.md`](../../docs/todo/sdk-rework.md).
 
 ## Typical usage
 
@@ -125,18 +129,23 @@ sdks/typescript/
 ├── README.md                  -- this file
 ├── package.json
 ├── tsconfig{,.build,.cjs}.json
-├── src/                       -- layers 0..5
-│   ├── client.ts
-│   ├── aggregate.ts
-│   ├── subscription.ts
-│   ├── process-manager.ts
-│   ├── consistency.ts
-│   ├── instructed.ts
-│   ├── errors.ts
-│   ├── types.ts
-│   ├── index.ts               -- public re-exports
-│   └── internal/              -- private (worker-id, retry, raw SQL)
+├── src/                       -- L1 + L2 + L3 (D-0027)
+│   ├── client.ts              -- L1 procedure bindings
+│   ├── errors.ts              -- L1 + L2 + L3 error classes (annotated)
+│   ├── types.ts               -- L1 wire shapes
+│   ├── aggregate.ts           -- L2 OCC loop
+│   ├── routing-worker.ts      -- L2 D-0025 routing
+│   ├── processing-worker.ts   -- L2 per-item lease + heartbeat
+│   ├── projection-worker.ts   -- L2 adapter + L3 PartitionBy sugar
+│   ├── pm-worker.ts           -- L2 snapshot+ack + L3 dispatch helper
+│   ├── consistency.ts         -- L3 waitForProjection
+│   ├── instructed.ts          -- L3 facade
+│   ├── core.ts                -- public entry for `instructed-sdk/core`
+│   ├── index.ts               -- public entry for `instructed-sdk`
+│   └── internal/              -- private (worker-id, sleep, with-transaction)
 └── test/                      -- node --test against docker-compose Postgres
 ```
 
-Examples live at the repo root under [`examples/`](../../examples/).
+Examples live under [`examples/typescript/`](../../examples/typescript/).
+See [`examples/typescript/bank-account/`](../../examples/typescript/bank-account/)
+for a multi-process end-to-end walkthrough.

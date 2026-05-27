@@ -5,6 +5,29 @@
  * `sql/instructed.sql`. Standard Postgres errors (connection loss,
  * serialization_failure, …) pass through unwrapped — they are
  * infrastructure failures, not contract failures.
+ *
+ * **Layer membership** (per [D-0027](../../../docs/decisions.md#d-0027)
+ * and `docs/todo/sdk-rework.md`):
+ *
+ *   - **L1 (procedure bindings)** classes are SQLSTATE-bound and form
+ *     part of the contract every SDK port must reproduce. The base
+ *     `InstructedError`, the IS00x append errors, `SnapshotNotFound`,
+ *     the IS02x subscription errors, `WorkItemLeaseLost`, and
+ *     `InvalidParameterValue` are all L1. They are re-exported from
+ *     `instructed-sdk/core`.
+ *   - **L2 (core behaviours)** classes are emitted by SDK runtime
+ *     code, not by SQL. `RetryBudgetExhausted` is the only L2 entry
+ *     (aggregate retry loop). Re-exported from `instructed-sdk/core`.
+ *   - **L3 (conveniences)** classes are emitted by the idiomatic
+ *     facade. `ConsistencyTimeout`, `ConsistencyTargetError`,
+ *     `UnknownAggregateType`, `HandlerError`. Re-exported only from
+ *     the bare `instructed-sdk` entry, not from `/core`.
+ *   - `mapPgError` and `MapPgErrorContext` are L1-internal: used by
+ *     `Client` to translate errors at the call site; not re-exported
+ *     from any public entry.
+ *
+ * Section headers below tag each block; the layer split is wired in
+ * `src/core.ts` and `src/index.ts`.
  */
 
 export class InstructedError extends Error {
@@ -27,7 +50,7 @@ export class InstructedError extends Error {
   }
 }
 
-// ---- IS00x: append-path errors ---------------------------------------------
+// ---- L1 — IS00x: append-path errors ----------------------------------------
 
 export class AppendError extends InstructedError {}
 
@@ -131,7 +154,7 @@ export class ReservedStreamUuid extends AppendError {
  */
 export class AppendOnlyViolation extends InstructedError {}
 
-// ---- IS010 -----------------------------------------------------------------
+// ---- L1 — IS010: snapshot errors -------------------------------------------
 
 export class SnapshotNotFound extends InstructedError {
   readonly sourceUuid?: string;
@@ -150,7 +173,7 @@ export class SnapshotNotFound extends InstructedError {
   }
 }
 
-// ---- IS020 / IS021 / IS022: subscription errors ----------------------------
+// ---- L1 — IS020 / IS021 / IS022: subscription errors -----------------------
 
 export class SubscriptionError extends InstructedError {
   readonly streamUuid?: string;
@@ -183,7 +206,7 @@ export class SubscriptionNotFound extends SubscriptionError {}
 export class SubscriptionAlreadyClaimed extends SubscriptionError {}
 export class SubscriptionLeaseLost extends SubscriptionError {}
 
-// ---- IS030: work-item errors (SUB-A) --------------------------------------
+// ---- L1 — IS030: work-item errors (SUB-A) ---------------------------------
 
 /**
  * Raised by `complete_work_item_*` and `fail_work_item` when the caller is
@@ -224,11 +247,20 @@ export class WorkItemLeaseLost extends InstructedError {
   }
 }
 
-// ---- 22023 -----------------------------------------------------------------
+// ---- L1 — 22023: invalid parameter value -----------------------------------
 
 export class InvalidParameterValue extends InstructedError {}
 
-// ---- SDK-level (no SQLSTATE) ----------------------------------------------
+// ---- L2 / L3 — SDK-level (no SQLSTATE) ------------------------------------
+//
+// `RetryBudgetExhausted` is L2: emitted by the aggregate retry loop
+// (`runCommand` in `aggregate.ts`). Belongs in `instructed-sdk/core`.
+//
+// `ConsistencyTimeout`, `ConsistencyTargetError`, `UnknownAggregateType`,
+// `HandlerError` are L3: emitted by the convenience layer
+// (`consistency.ts` and `instructed.ts`). Available only via the bare
+// `instructed-sdk` entry. `HandlerError` is currently unused by SDK
+// code and is a candidate for removal in a later pass.
 
 export class RetryBudgetExhausted extends InstructedError {
   readonly attempts: number;
@@ -301,7 +333,13 @@ export class HandlerError extends InstructedError {
   }
 }
 
-// ---- Translation -----------------------------------------------------------
+// ---- L1-internal — PG error translation ------------------------------------
+//
+// `mapPgError` and `MapPgErrorContext` are used by `Client` (and by
+// `internal/with-transaction.ts`) to translate raw `pg` errors at the
+// call site. Neither is re-exported from the package's public
+// entries; consumers wanting custom translation should write their
+// own.
 
 interface PgErrorLike {
   code?: string;

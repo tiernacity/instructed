@@ -13,7 +13,11 @@ Status (2026-05-27):
   - step 3 (package shape decision): landed as
     [D-0027](../decisions.md#d-0027) -- single `instructed-sdk`
     package with an `instructed-sdk/core` sub-path for L1+L2.
-  - step 4 (re-export grouping + sub-path wiring): open.
+  - step 4 (re-export grouping + sub-path wiring): landed.
+    `src/core.ts` is the L1+L2 entry; `src/index.ts` re-exports it
+    plus L3. Asymmetries 2 (errors annotation), 4 (`mapPgError`
+    hidden), and the `PartitionBy`-sugar-as-L3 split all
+    addressed; see `§3 resolution status` below.
   - step 5 (pluggable extension points): open.
 
 ---
@@ -281,46 +285,53 @@ L3.
 
 ## 3. Asymmetries and decisions to record
 
-Surfaced by the classification pass; each is open for the rework:
+Surfaced by the classification pass.
 
-1. **`pm-worker.ts` mixes L2 (snapshot+ack tx, module-version
-   rebuild) with L3 (in-loop `runCommand` dispatch).** Splitting
-   could either be physical (two files) or notional (one file,
-   docstring split). The shape that lets a porter say "I must
-   reproduce the snapshot+ack; my language's PM facade is mine"
-   is what we need. Likely: keep the file, add a section header
-   between the two, mark the dispatch helper as a TS-specific
-   convenience in the porting checklist.
+### Resolution status (after step 4):
 
-2. **`errors.ts` co-locates SQLSTATE-bound classes (L1, porter MUST
-   reproduce) with layer-specific ones (`RetryBudgetExhausted` L2,
-   `ConsistencyTimeout` L3, `UnknownAggregateType` L3, `HandlerError`
-   TBC).** Annotate per class with the layer that emits it; do not
-   split the file (the closed set is more useful contiguous).
+  - **#1 `pm-worker.ts` L2/L3 mix**: open. Step 4 kept the file
+    intact; the docstring already separates the two halves but
+    the dispatch helper is still re-exported via
+    `instructed-sdk/core` (because `startPmWorker` is the only
+    way callers get the L2 snapshot+ack behaviour, and the
+    helper is intertwined). The porting checklist will name the
+    snapshot+ack contract and mark the in-loop dispatch as a
+    TS-specific convenience. Revisit during step 5.
+  - **#2 `errors.ts` layer annotation**: landed. Each section
+    header in `src/errors.ts` is now tagged with its layer; the
+    file-level docstring spells out which classes belong to
+    `core` vs. the bare entry.
+  - **#3 `readSubscriptionBatch` / `advanceSubscription` pre-SUB-A
+    survivors**: open. Both still on `Client`, still re-exported
+    via `instructed-sdk/core` (a port MUST expose every SQL
+    procedure). Documentation pass owed in the porting checklist:
+    "bespoke long-lease loop primitives; not used by the supplied
+    workers under D-0025."
+  - **#4 `mapPgError` / `MapPgErrorContext` public re-exports**:
+    landed. Both dropped from `src/core.ts` and `src/index.ts`;
+    they remain exported from `errors.ts` for internal use by
+    `client.ts` and `internal/with-transaction.ts`. The one test
+    that touches `mapPgError` directly imports from the source
+    file path, not the package entry, and continues to work.
+  - **#5 `Instructed.dispatch`'s `consistency:` option**:
+    documented but unchanged. L3 shape; L1 mechanism. ML-0002
+    will rework the mechanism without changing the shape.
+  - **#6 `RunningWorker` shared handle**: landed as L2 in
+    `src/core.ts` (re-exported from `internal/running-worker.ts`).
+    Porting checklist names the contract (`stopped`, `close`),
+    not the file location.
 
-3. **`readSubscriptionBatch` / `advanceSubscription` survive on the
-   `Client` from the pre-SUB-A single-cursor era.** They are still
-   in the SQL contract and a porter MUST expose them at L1, but the
-   supplied SDK workers don't use them. Document as "bespoke loop
-   primitives, not used by `startRoutingWorker`."
+New asymmetry surfaced during step 4:
 
-4. **`mapPgError` and `MapPgErrorContext` are publicly re-exported
-   today.** Probably should not be. Step-3 (re-export grouping)
-   decision; either drop from `index.ts` or move under an
-   `instructed-sdk/internal` sub-path.
-
-5. **The `Instructed` facade's `consistency:` option lives on
-   `DispatchOptions` and lights up `waitForProjection` after
-   append.** Both pieces are L3. The mechanism (server-side
-   `is_subscription_caught_up` predicate) is L1. ML-0002 may
-   eventually rework the polling into LISTEN/NOTIFY; the L3 shape
-   should stay stable across that change.
-
-6. **`RunningWorker` is a shared worker-handle shape that crosses
-   L2 (each worker function returns one) and L3 (`Instructed`
-   composes them).** Probably stays in `internal/` but exported;
-   the porting checklist names the *contract* (`stopped`, `close`),
-   not the file location.
+  - **PartitionBy sugar location.** `routingFnForPartitionBy`,
+    `SEQUENTIAL_PARTITION_KEY`, and `PartitionBy` live in
+    `src/projection-worker.ts` (alongside the L2 projection
+    adapter) but are re-exported only from the bare
+    `instructed-sdk` entry, not from `instructed-sdk/core`. The
+    file's contents are mixed-layer; the public re-export
+    surface is clean. A later refactor could move the sugar to
+    its own file (`src/partition-by.ts`?) if the mixing
+    becomes confusing in practice.
 
 ---
 
@@ -389,28 +400,12 @@ Already in TODO that touches this layer:
     `instructed-sdk/core` sub-path exposing L1+L2 (the porting
     checklist surface). The bare `instructed-sdk` entry adds the
     L3 facade and helpers on top.
-  - **Re-export grouping in `src/index.ts`.** The re-exports
-    should make the L1/L2/L3 split legible. Probably:
-    ```ts
-    // L1 — procedure bindings
-    export { Client, ... } from "./client.ts";
-    export * from "./errors.ts";  // (after L2/L3 annotation)
-    export * from "./types.ts";
-
-    // L2 — core behaviours
-    export { runCommand, ... } from "./aggregate.ts";
-    export { startRoutingWorker, ... } from "./routing-worker.ts";
-    export { startProcessingWorker, ... } from "./processing-worker.ts";
-    export { startProjectionWorker, ... } from "./projection-worker.ts";
-    export { startPmWorker, ... } from "./pm-worker.ts";
-
-    // L3 — conveniences
-    export { waitForProjection, ... } from "./consistency.ts";
-    export { Instructed, ... } from "./instructed.ts";
-    ```
-    Should land alongside or after step 2's package-shape decision
-    so the comments above re-exports can name the package layout
-    they imply.
+  - **Re-export grouping in `src/index.ts`.** Landed in step 4.
+    Source of truth: `src/core.ts` re-exports L1+L2 with section
+    headers; `src/index.ts` re-exports `./core.ts` then adds L3
+    behind a second labelled section. The CJS and ESM `dist/`
+    outputs both carry a `core.{js,d.ts}` alongside `index.*`
+    so the `instructed-sdk/core` sub-path resolves at runtime.
   - **Porting checklist as a separate doc.** `SDK-REWORK-NOTES.md`
     §2 suggests `docs/porting-checklist.md`. Probably right; the
     audience (a porter writing a Python/Go/Elixir SDK) is distinct
@@ -420,14 +415,16 @@ Already in TODO that touches this layer:
 
 ## 6. Stale documentation to fix in the same pass
 
-  - `sdks/typescript/README.md` "Layer structure" table references
-    `subscription.ts` and `process-manager.ts` — both removed
-    during SUB-A. Update to the actual current file set (or to the
-    L1/L2/L3 view after the rework).
-  - The same README's example invocation
+  - ~~`sdks/typescript/README.md` "Layer structure" table references
+    `subscription.ts` and `process-manager.ts`~~ -- fixed in step 4;
+    table now describes the actual L1/L2/L3 file set and names the
+    `instructed-sdk/core` sub-path.
+  - ~~The same README's example invocation
     (`node --experimental-strip-types examples/bank-account/main.ts`)
-    is out of date: examples moved to
-    `examples/typescript/bank-account/` in commit `5d39ae3`.
+    is out of date~~ -- fixed in step 4; README now points at
+    `examples/typescript/bank-account/`.
   - SDK design doc — mentioned in `aggregate.ts` ("see
     `docs/sdk-design.md` §3 layer 1"); confirm whether it survives
-    the rework or whether this file replaces it.
+    the rework or whether this file replaces it. **Open.** Grep
+    confirms the file does not exist; the comment is a dangling
+    reference. Clean up during step 5 or earlier.

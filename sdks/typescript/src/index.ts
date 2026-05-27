@@ -1,87 +1,59 @@
 /**
- * instructed TypeScript SDK — public surface.
+ * `instructed-sdk` \u2014 the full TypeScript SDK surface.
  *
- * See sdks/typescript/README.md for the layered design. This file
- * re-exports only the public contract; everything under `src/internal/`
- * is private.
+ * Per [D-0027](../../../docs/decisions.md#d-0027) the SDK is one
+ * package with two entry points:
  *
- * SUB-A note (slice 9): the legacy `startProjection` /
- * `startProcessManager` worker functions and the
- * `ProjectionDefinition` / `ProcessManagerDefinition` shapes are
- * removed. Subscriptions now run on the work-queue substrate -- see
- * `startRoutingWorker` + `startProjectionWorker` / `startPmWorker`.
- * The layer-5 `Instructed.registerProjection` /
- * `registerProcessManager` shapes also changed (breaking).
+ *   - `instructed-sdk` (this file) \u2014 L1 + L2 + L3; the conventional
+ *     entry. Application code that uses the `Instructed` facade,
+ *     `waitForProjection`, the `PartitionBy` sugar, etc. imports from
+ *     here.
+ *   - `instructed-sdk/core` (`src/core.ts`) \u2014 L1 + L2 only; the
+ *     porting-checklist inventory. For consumers building their own
+ *     L3 facade.
+ *
+ * The two layers below are kept legible by section header even at the
+ * bare entry: the first re-exports everything from `./core.ts` (L1 +
+ * L2), the second adds the L3 conveniences on top.
+ *
+ * See also `docs/todo/sdk-rework.md` for the annotated export map and
+ * `sdks/typescript/README.md` for the user-facing layer description.
  */
 
-export { Client, type ClientOptions } from "./client.ts";
-export {
-  runCommand,
-  everyN,
-  DEFAULT_RETRY_BUDGET,
-  type AggregateDefinition,
-  type RunCommandOptions,
-  type SnapshotPolicy,
-  type DomainEvent,
-} from "./aggregate.ts";
+// ----------------------------------------------------------------------------
+// L1 + L2 \u2014 procedure bindings + core behaviours
+//
+// Re-exported verbatim from the `instructed-sdk/core` sub-path entry.
+// Adding or removing a symbol from `core.ts` automatically updates the
+// bare entry; that's the source of truth for the porting-checklist
+// surface.
+// ----------------------------------------------------------------------------
 
-// SUB-A: routing worker (slice 4).
-export {
-  startRoutingWorker,
-  DEFAULT_ROUTING_BATCH_SIZE,
-  DEFAULT_ROUTING_LEASE_SECONDS,
-  DEFAULT_ROUTING_POLL_INTERVAL_MS,
-  type RoutingDecision,
-  type RoutingFn,
-  type RoutingDefinition,
-  type RoutingWorkerOptions,
-} from "./routing-worker.ts";
+export * from "./core.ts";
 
-// SUB-A: processing worker (slice 5) -- kind-agnostic poll loop and
-// SUB-B error-policy primitives. Most users use the projection / PM
-// adapters below; this is exposed for advanced cases.
-export {
-  startProcessingWorker,
-  DEFAULT_PROCESSING_LEASE_SECONDS,
-  DEFAULT_PROCESSING_POLL_INTERVAL_MS,
-  DEFAULT_ERROR_POLICY,
-  type ProcessingHandler,
-  type ProcessingCompleter,
-  type ProcessingHandlerContext,
-  type ProcessingWorkerDefinition,
-  type ProcessingWorkerOptions,
-  type ErrorPolicy,
-  type ErrorPolicyDecision,
-  type ErrorPolicyContext,
-} from "./processing-worker.ts";
+// ----------------------------------------------------------------------------
+// L3 \u2014 conveniences
+//
+// The idiomatic facade and the consistency-on-dispatch helper. None of
+// these are part of the porting-checklist surface; a Python / Go /
+// Elixir port may ship something quite different here and still be
+// conformant. See `SDK-REWORK-NOTES.md` \u00a72 and D-0027.
+// ----------------------------------------------------------------------------
 
-// SUB-A: projection processing worker (slice 6).
+// `PartitionBy` sugar over a routing-layer `RoutingFn`. Exported from
+// projection-worker.ts to keep the helper co-located with the
+// projection adapter; surfaced as L3 here because it's not part of the
+// porting checklist.
 export {
-  startProjectionWorker,
   routingFnForPartitionBy,
   SEQUENTIAL_PARTITION_KEY,
   type PartitionBy,
-  type ProjectionHandler,
-  type ProjectionHandlerContext,
-  type ProjectionDefinition,
-  type ProjectionWorkerOptions,
 } from "./projection-worker.ts";
 
-// SUB-A: PM processing worker (slice 7).
-export {
-  startPmWorker,
-  PM_SNAPSHOT_MODULE_VERSION_KEY,
-  type PmDefinition,
-  type PmHandleResult,
-  type PmHandlerContext,
-  type PmWorkerOptions,
-  type DispatchedCommand,
-} from "./pm-worker.ts";
-
-// Shared worker handle.
-export type { RunningWorker } from "./internal/running-worker.ts";
-
-// SUB-A: consistency wait (slice 8).
+// Consistency-on-dispatch wait (polls the L1 `is_subscription_caught_up`
+// predicate). ML-0002 may eventually rework the mechanism into
+// LISTEN/NOTIFY; the L3 shape is intended to stay stable across that
+// change.
 export {
   waitForProjection,
   DEFAULT_WAIT_POLL_INTERVAL_MS,
@@ -90,7 +62,16 @@ export {
   type WaitForProjectionOptions,
 } from "./consistency.ts";
 
-// Layer 5 facade.
+// L3 error classes (emitted only by the facade / consistency helpers).
+export {
+  ConsistencyTimeout,
+  ConsistencyTargetError,
+  UnknownAggregateType,
+  HandlerError,
+} from "./errors.ts";
+
+// The `Instructed` facade: by-name aggregate dispatch, projection / PM
+// registration, single `startWorker()`, single `close()`.
 export {
   Instructed,
   type InstructedOptions,
@@ -100,6 +81,3 @@ export {
   type RegisterProcessManagerInput,
   type DispatchOptions,
 } from "./instructed.ts";
-
-export * from "./errors.ts";
-export * from "./types.ts";
