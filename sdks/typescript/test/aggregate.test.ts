@@ -341,6 +341,172 @@ describe("runCommandWithSnapshots — snapshot policy (§6)", () => {
   });
 });
 
+describe("aggregate snapshot module versioning (SNAP-002, TODO #5)", () => {
+  // Generalises the PM substrate's module-version mechanism to
+  // aggregates. The metadata key (`SNAPSHOT_MODULE_VERSION_KEY`)
+  // is shared between L2 aggregate and L2 PM substrate.
+  // Comparison is strict: undefined matches only undefined.
+
+  test("matching version: snapshot is used", async () => {
+    const s = randomUUID();
+    await seed(s);
+    const def: AggregateDefinition<CounterState, CounterCommand, CounterEvent> =
+      {
+        ...counter(),
+        snapshotPolicy: everyN(1),
+        snapshotModuleVersion: "v1",
+      };
+    // First command writes a snapshot stamped with "v1".
+    await runCommandWithSnapshots(client, def, s, { kind: "add", n: 3 });
+    const snap = await client.readSnapshot<CounterState>(s);
+    assert.deepEqual(
+      (snap.metadata as Record<string, unknown>)["snapshot_module_version"],
+      "v1",
+    );
+
+    // Second command with the same version: apply runs only for the
+    // newly-appended event (1 call), not for the loaded events from
+    // origin (which would be 2 calls: Seed + Added).
+    let appliesSeen = 0;
+    const probe: AggregateDefinition<
+      CounterState,
+      CounterCommand,
+      CounterEvent
+    > = {
+      ...def,
+      apply(state, event) {
+        appliesSeen += 1;
+        return counter().apply(state, event);
+      },
+    };
+    await runCommandWithSnapshots(client, probe, s, { kind: "add", n: 5 });
+    assert.equal(appliesSeen, 1, "snapshot should have been used");
+  });
+
+  test("mismatched version: snapshot discarded, full replay from origin", async () => {
+    const s = randomUUID();
+    await seed(s);
+
+    // Phase 1: write a snapshot with version "v1".
+    const v1: AggregateDefinition<CounterState, CounterCommand, CounterEvent> =
+      {
+        ...counter(),
+        snapshotPolicy: everyN(1),
+        snapshotModuleVersion: "v1",
+      };
+    await runCommandWithSnapshots(client, v1, s, { kind: "add", n: 7 });
+    // Sanity: snapshot exists with v1 stamped.
+    const v1Snap = await client.readSnapshot<CounterState>(s);
+    assert.equal(
+      (v1Snap.metadata as Record<string, unknown>)["snapshot_module_version"],
+      "v1",
+    );
+
+    // Phase 2: a NEW def with version "v2" loads. The v1 snapshot
+    // is mismatched -> discarded; the load pages all events from
+    // origin (Seed + Added = 2 events).
+    let appliesSeen = 0;
+    const v2: AggregateDefinition<CounterState, CounterCommand, CounterEvent> =
+      {
+        ...counter(),
+        snapshotPolicy: everyN(1),
+        snapshotModuleVersion: "v2",
+        apply(state, event) {
+          appliesSeen += 1;
+          return counter().apply(state, event);
+        },
+      };
+    await runCommandWithSnapshots(client, v2, s, { kind: "add", n: 4 });
+
+    // load -> 2 applies (Seed, Added(7)); the snapshot was rejected.
+    // The `apply` count includes only the loaded events; the
+    // post-append fold in `runCommandAndApply` adds 1 more for the
+    // just-appended Added(4) = 3 total.
+    assert.equal(
+      appliesSeen,
+      3,
+      `expected full replay (2 loaded + 1 post-append fold = 3); got ${appliesSeen}`,
+    );
+
+    // Final state is correct: 0 + 7 + 4 = 11.
+    const final = await client.readSnapshot<CounterState>(s);
+    assert.equal(final.data.value, 11);
+    // And the snapshot is now stamped with v2.
+    assert.equal(
+      (final.metadata as Record<string, unknown>)["snapshot_module_version"],
+      "v2",
+    );
+  });
+
+  test("strict: snapshot has version but def does not -> mismatch", async () => {
+    const s = randomUUID();
+    await seed(s);
+
+    // Phase 1: write with v1.
+    const versioned: AggregateDefinition<
+      CounterState,
+      CounterCommand,
+      CounterEvent
+    > = {
+      ...counter(),
+      snapshotPolicy: everyN(1),
+      snapshotModuleVersion: "v1",
+    };
+    await runCommandWithSnapshots(client, versioned, s, { kind: "add", n: 1 });
+
+    // Phase 2: def WITHOUT a version. The v1-stamped snapshot is
+    // mismatched (strict semantics: "absent on one side" counts).
+    let appliesSeen = 0;
+    const unversioned: AggregateDefinition<
+      CounterState,
+      CounterCommand,
+      CounterEvent
+    > = {
+      ...counter(),
+      apply(state, event) {
+        appliesSeen += 1;
+        return counter().apply(state, event);
+      },
+    };
+    await runCommand(client, unversioned, s, { kind: "add", n: 2 });
+    // Full replay: Seed + Added(1) = 2 loaded events.
+    assert.equal(appliesSeen, 2, "v1 snapshot should be rejected by unversioned def");
+  });
+
+  test("strict: def has version but snapshot does not -> mismatch", async () => {
+    const s = randomUUID();
+    await seed(s);
+
+    // Phase 1: write WITHOUT a version (no metadata stamped).
+    const unversioned: AggregateDefinition<
+      CounterState,
+      CounterCommand,
+      CounterEvent
+    > = { ...counter(), snapshotPolicy: everyN(1) };
+    await runCommandWithSnapshots(client, unversioned, s, { kind: "add", n: 1 });
+    const u = await client.readSnapshot<CounterState>(s);
+    assert.equal(u.metadata, null, "unversioned snapshot has no metadata");
+
+    // Phase 2: def WITH "v1". The unversioned snapshot is mismatched.
+    let appliesSeen = 0;
+    const versioned: AggregateDefinition<
+      CounterState,
+      CounterCommand,
+      CounterEvent
+    > = {
+      ...counter(),
+      snapshotModuleVersion: "v1",
+      apply(state, event) {
+        appliesSeen += 1;
+        return counter().apply(state, event);
+      },
+    };
+    await runCommand(client, versioned, s, { kind: "add", n: 2 });
+    // Full replay: Seed + Added(1) = 2 loaded events.
+    assert.equal(appliesSeen, 2, "unversioned snapshot should be rejected by versioned def");
+  });
+});
+
 // ---- helpers --------------------------------------------------------------
 
 async function loadFresh(streamUuid: string): Promise<CounterState> {

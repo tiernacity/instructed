@@ -155,12 +155,17 @@ export {
 // the bare `instructed-sdk` entry).
 export {
   startPmSubstrate,
-  PM_SNAPSHOT_MODULE_VERSION_KEY,
   type PmSubstrateDefinition,
   type PmSubstrateHandleResult,
   type PmSubstrateHandlerContext,
   type PmSubstrateOptions,
 } from "./pm-substrate.ts";
+
+// SNAP-002 — the SDK-reserved metadata key both aggregates and PMs
+// use for snapshot module versioning. Part of the porting checklist:
+// every conformant port reproduces the same key string so cross-SDK
+// snapshot reads work.
+export { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 
 // Shared worker handle (L2 interface; the loop functions above all
 // return one).

@@ -66,11 +66,6 @@ import type {
 import type { RecordedEvent } from "./types.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 
-// Re-export the substrate's module-version-key constant so existing
-// callers (including `core.ts`) continue to find it via this module
-// without an extra import path change.
-export { PM_SNAPSHOT_MODULE_VERSION_KEY } from "./pm-substrate.ts";
-
 // ============================================================================
 // Public surface
 // ============================================================================

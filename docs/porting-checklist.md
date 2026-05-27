@@ -246,6 +246,49 @@ separate; (b) snapshot failure is best-effort; (c) the policy
 sees the post-append state, version, and the
 events-since-last-snapshot counter.
 
+#### Module versioning (SNAP-002 / AGG-003)
+
+Both aggregates and PMs MUST implement snapshot module
+versioning. The mechanism is part of required-core; the
+*shape* of the version-tag field on the user-facing
+definition is idiomatic.
+
+**Contract.** Each definition carries an optional version
+string (TS: `def.snapshotModuleVersion`). On snapshot write,
+the SDK stamps the string into the snapshot's metadata under
+the SDK-reserved key `"snapshot_module_version"` (TS:
+`SNAPSHOT_MODULE_VERSION_KEY` in `snapshot-version.ts`). On
+snapshot read, the SDK compares the metadata value strictly
+to the definition's value; on mismatch, the snapshot's `data`
+is discarded and the source is rebuilt from origin
+(aggregates: page events from version 0; PMs: fold `apply`
+over `listPmRebuildEvents`).
+
+**The key string is part of the porting checklist.** Every
+conformant port MUST use `"snapshot_module_version"` as the
+metadata key. A port that picks a different string can't read
+snapshots written by another port -- breaks the cross-SDK
+story.
+
+**Strict comparison.** "Version on one side, absent on the
+other" counts as mismatch. This prevents accidental adoption:
+if a developer adds versioning to a previously-unversioned
+aggregate, every existing snapshot is invalidated in one go
+rather than being silently treated as v1.
+
+**Silent fall-back.** The mismatch path is silent (no
+warning). A deliberate version bump would otherwise produce a
+warning on every aggregate's next touch, which is noise rather
+than signal.
+
+**Cross-language note.** Languages with stronger type systems
+(Rust, Haskell) might encode the schema version in the type
+itself; the metadata-key string mechanism is the
+lowest-common-denominator. A port that prefers a typed
+encoding MAY ship it as an additional convenience, but the
+string-keyed metadata mechanism MUST remain available for
+cross-SDK reads.
+
 ### 4.3 Retry / error policy
 
 **Contract.** Decide what to do after a handler attempt fails:

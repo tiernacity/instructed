@@ -28,11 +28,11 @@ import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
 import { startRoutingWorker } from "../src/routing-worker.ts";
 import {
-  PM_SNAPSHOT_MODULE_VERSION_KEY,
   startPmWorker,
   type DispatchedCommand,
   type PmDefinition,
 } from "../src/pm-worker.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "../src/snapshot-version.ts";
 import type { AggregateDefinition, DomainEvent } from "../src/aggregate.ts";
 import type { RecordedEvent } from "../src/types.ts";
 import type pg from "pg";
@@ -471,7 +471,7 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
     assert.ok(v1Snap, "v1 snapshot should exist");
     assert.deepEqual(
       (v1Snap.metadata as Record<string, unknown>)[
-        PM_SNAPSHOT_MODULE_VERSION_KEY
+        SNAPSHOT_MODULE_VERSION_KEY
       ],
       "v1",
     );
@@ -529,7 +529,7 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
     // The v2 snapshot now carries v2 in its metadata.
     assert.deepEqual(
       (finalSnap.metadata as Record<string, unknown>)[
-        PM_SNAPSHOT_MODULE_VERSION_KEY
+        SNAPSHOT_MODULE_VERSION_KEY
       ],
       "v2",
     );

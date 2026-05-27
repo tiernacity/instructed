@@ -58,6 +58,7 @@ import {
   type DomainEvent,
   type RunCommandOptions,
 } from "./aggregate.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import type { AppendedEvent } from "./types.ts";
 
 /**
@@ -107,12 +108,21 @@ export async function runCommandWithSnapshots<
       result.eventsSinceSnapshot,
     )
   ) {
+    // SNAP-002: stamp the module-version metadata so the next
+    // load can detect a shape change. Strict semantics on read:
+    // a snapshot written with a version is rejected by a def
+    // without one, and vice versa.
+    const metadata =
+      def.snapshotModuleVersion !== undefined
+        ? { [SNAPSHOT_MODULE_VERSION_KEY]: def.snapshotModuleVersion }
+        : undefined;
     try {
       await client.recordSnapshot({
         sourceUuid: streamUuid,
         sourceType: def.type,
         sourceVersion: result.version,
         data: result.state,
+        metadata,
       });
     } catch (snapErr) {
       // Best-effort per D-0019. The load path works without the

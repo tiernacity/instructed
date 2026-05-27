@@ -66,6 +66,7 @@
 
 import type { Client } from "./client.ts";
 import { SnapshotNotFound } from "./errors.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
@@ -78,9 +79,6 @@ import type { RunningWorker } from "./internal/running-worker.ts";
 // ============================================================================
 // Public surface
 // ============================================================================
-
-/** The metadata key that carries `snapshotModuleVersion` on PM snapshots. */
-export const PM_SNAPSHOT_MODULE_VERSION_KEY = "snapshot_module_version";
 
 /**
  * What a substrate `handle` returns. Strictly snapshot+ack
@@ -198,7 +196,7 @@ export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
         snap.metadata !== null
       ) {
         const v = (snap.metadata as Record<string, unknown>)[
-          PM_SNAPSHOT_MODULE_VERSION_KEY
+          SNAPSHOT_MODULE_VERSION_KEY
         ];
         if (typeof v === "string") snapModuleVersion = v;
       }
@@ -284,7 +282,7 @@ export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
       // tag for the next state-load.
       const metadata: Record<string, unknown> = {};
       if (def.snapshotModuleVersion !== undefined) {
-        metadata[PM_SNAPSHOT_MODULE_VERSION_KEY] = def.snapshotModuleVersion;
+        metadata[SNAPSHOT_MODULE_VERSION_KEY] = def.snapshotModuleVersion;
       }
       await client.completeWorkItemPm<S>(
         stream,

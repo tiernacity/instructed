@@ -96,20 +96,19 @@ the former, but worth a deliberate re-read.
 
 ## 5. SNAP-002 — snapshot module versioning in the SDK
 
-**Why this exists.** `guarantees.md` SNAP-002 records that snapshots
-carry a `snapshot_module_version` in their metadata, and that readers
-MUST reject mismatched-version snapshots and fall back to full event
-replay. The SQL contract provides the metadata column. The TypeScript
-SDK does *not* implement the reject-and-fall-back policy — the
-application using `instructed` would have to do it themselves.
-
-**What to do.** Decide whether SNAP-002 enforcement belongs in the
-core SDK (which would make it part of the "what every SDK port must
-provide" checklist in TODO #2) or stays as application-level concern
-documented in usage examples.
-
-**Output.** Either an SDK feature + tests, or a short addendum to
-whatever doc replaces `guarantees.md` that says "this is your problem".
+**Done (2026-05-27).** Landed as part of the TODO #2 step-5
+follow-on. Aggregate snapshots now carry and check
+`snapshot_module_version` metadata, generalising the PM
+substrate's existing mechanism. Shared metadata-key constant
+(`SNAPSHOT_MODULE_VERSION_KEY`) lives in
+`sdks/typescript/src/snapshot-version.ts` and is named on
+`docs/porting-checklist.md` §4.2 as required-core (every
+conformant port reproduces the same key string). Comparison is
+strict; fall-back is silent (no warning). See `docs/invariants.md`
+SNAP-002 / AGG-003 for the canonical statement and
+`sdks/typescript/test/aggregate.test.ts` for the four
+locked-in behaviours (matching version, mismatched version,
+strict semantics on absence either side).
 
 ---
 

@@ -42,6 +42,7 @@ import {
   StreamNotFound,
   WrongExpectedVersion,
 } from "./errors.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import { expected as ev } from "./types.ts";
 import type {
   AppendedEvent,
@@ -124,6 +125,31 @@ export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> 
    * field (they are unopinionated about snapshot orchestration).
    */
   snapshotPolicy?: SnapshotPolicy<S>;
+
+  /**
+   * SDK-managed snapshot version tag (SNAP-002). When set:
+   *
+   *   - On write (via `runCommandWithSnapshots`): the value is
+   *     stamped into the snapshot's metadata under
+   *     `SNAPSHOT_MODULE_VERSION_KEY`.
+   *   - On read (in `loadAggregate`): the metadata's value is
+   *     compared strictly to this field; on mismatch (including
+   *     "version present on one side and absent on the other"),
+   *     the snapshot is discarded and the aggregate is rebuilt
+   *     by paging events from version 0.
+   *
+   * Use this when changing the shape of `S` between deploys:
+   * bump the version string to invalidate every previously-
+   * written snapshot in one go, forcing a full replay through
+   * the new `apply`. Failing to do so risks feeding stale-shape
+   * state to the new `apply` — a silent correctness bug.
+   *
+   * Comparison is strict: leaving the field undefined and
+   * encountering a snapshot whose metadata HAS a version (or
+   * vice versa) counts as mismatch. This prevents
+   * "accidentally adopting versioning silently."
+   */
+  snapshotModuleVersion?: string;
 }
 
 export interface RunCommandOptions {
@@ -414,11 +440,38 @@ async function loadAggregate<S, C, E extends DomainEvent>(
   let version = 0n;
   let eventsSinceSnapshot = 0;
 
-  // 1. Try snapshot.
+  // 1. Try snapshot. SNAP-002: read the snapshot's metadata for
+  // `SNAPSHOT_MODULE_VERSION_KEY` and compare strictly against
+  // `def.snapshotModuleVersion`. On mismatch (including "version
+  // on one side and absent on the other"), discard the
+  // snapshot's data and fall back to paging events from
+  // version 0. Silent: no warning is emitted because every
+  // aggregate would log on its next touch after a deliberate
+  // version bump, which is noise.
   try {
     const snap = await client.readSnapshot<S>(streamUuid);
-    state = snap.data;
-    version = snap.sourceVersion;
+    let snapModuleVersion: string | undefined;
+    if (
+      snap.metadata &&
+      typeof snap.metadata === "object" &&
+      snap.metadata !== null
+    ) {
+      const v = (snap.metadata as Record<string, unknown>)[
+        SNAPSHOT_MODULE_VERSION_KEY
+      ];
+      if (typeof v === "string") snapModuleVersion = v;
+    }
+    const want = def.snapshotModuleVersion;
+    const matches =
+      want === undefined
+        ? snapModuleVersion === undefined
+        : snapModuleVersion === want;
+    if (matches) {
+      state = snap.data;
+      version = snap.sourceVersion;
+    }
+    // Mismatch: leave `state` / `version` at their initial
+    // values; the readStream loop below will page from 0.
   } catch (err) {
     if (!(err instanceof SnapshotNotFound)) throw err;
     // No snapshot: start from initialState() at version 0.

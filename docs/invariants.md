@@ -413,10 +413,12 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
 - **AGG-003** — If a snapshot's `metadata.snapshot_module_version`
   does not match the configured value, the snapshot MUST be
   ignored and the aggregate MUST hydrate from the full event
-  stream. **(Honest gap, v1 TS SDK):** the store provides the
-  metadata column; the v1 TypeScript SDK does not enforce this
-  check. Applications that evolve aggregate schemas should
-  implement the check themselves until the SDK does.
+  stream. The v1 TypeScript SDK enforces this in
+  `loadAggregate` (`aggregate.ts`): the metadata's
+  `SNAPSHOT_MODULE_VERSION_KEY` value is compared strictly to
+  `def.snapshotModuleVersion`; on mismatch, the snapshot's
+  `data` is discarded and the stream is paged from version 0.
+  See SNAP-002 for the shared treatment with PM snapshots.
 - **AGG-005** — Command handlers run as `(state, command) → events`.
 - **AGG-006** — Return values: zero, one, or many events, or an
   error / thrown exception. An error or exception leaves state
@@ -443,14 +445,18 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
 - **SNAP-002** — `metadata.snapshot_module_version` is the
   aggregate-module schema marker. Mismatch on read MUST cause
   the snapshot to be ignored and the source to be rebuilt from
-  events. **(Honest gap, v1 TS SDK -- aggregate side only):**
-  the v1 SDK enforces this for *process-manager* snapshots
-  (the PM worker compares `snapshot_module_version` from
-  metadata against `def.snapshotModuleVersion` and rebuilds via
-  `apply` on mismatch); for *aggregate* snapshots the SDK does
-  not yet enforce it. After PM-C the PM rebuild path is no
-  worse than the aggregate rebuild path; closing the aggregate
-  side is now a straight port of the PM-side machinery.
+  events. The v1 TS SDK enforces this for **both** aggregate
+  snapshots (`loadAggregate` in `aggregate.ts`) and
+  process-manager snapshots (`pm-substrate.ts:loadState`); the
+  metadata key constant `SNAPSHOT_MODULE_VERSION_KEY` lives in
+  `snapshot-version.ts` as the shared source of truth.
+  Comparison is strict: "version on one side, absent on the
+  other" counts as mismatch (prevents accidental version
+  adoption). On the aggregate side, fall-back is a full replay
+  from origin via the existing `readStream` pagination; on the
+  PM side, via `listPmRebuildEvents`. Failure mode is silent
+  (no warning emitted) because a deliberate version bump would
+  otherwise produce a warning on every aggregate's next touch.
 - **SNAP-003** — A failed snapshot write MUST NOT fail the
   command that triggered it; the events are already durable.
 - **SNAP-004** — `source_version` recorded in a snapshot equals
@@ -559,17 +565,11 @@ split decides what to do with it.
 
 ## Honest gaps in v1
 
-Three places where what's specified above is not (yet) what's
+Two places where what's specified above is not (yet) what's
 delivered by the v1 TypeScript SDK. Each is recorded so the
 gaps don't get lost.
 
-1. **`SNAP-002` / `AGG-003` — snapshot module versioning,
-   aggregate side.** The store provides the metadata column;
-   the v1 TS SDK enforces it for *process-manager* snapshots
-   (PM-C / PM-state rebuild) but not yet for *aggregate*
-   snapshots. Applications that evolve aggregate schemas should
-   implement the check themselves until the SDK adopts it.
-2. **PM-E — deterministic event IDs for PM-dispatched
+1. **PM-E — deterministic event IDs for PM-dispatched
    commands.** When a PM `handle` is re-invoked for the same
    claimed event (SUB-B `retry-in` after a post-dispatch
    failure, or a lease-takeover redelivery), commands
@@ -582,7 +582,7 @@ gaps don't get lost.
    PM's `forwarded` counter is incremented exactly once per
    triggering event regardless of redelivery count -- see
    `tests/soak/` for the verification under churn).
-3. **Routing-worker `close()` is a drop, not a flush.** On
+2. **Routing-worker `close()` is a drop, not a flush.** On
    graceful close mid-batch the routing worker drops the
    accumulated decisions; the relaunched worker re-reads from
    `last_seen` and the work-items PK absorbs duplicate
