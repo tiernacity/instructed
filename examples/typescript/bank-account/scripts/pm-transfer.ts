@@ -14,6 +14,7 @@
  * retrying that step until the underlying problem is fixed.
  */
 
+import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import type {
   DispatchedCommand,
@@ -80,23 +81,24 @@ function withTrace<E extends import("instructed-sdk").Event>(
 }
 
 async function main(): Promise<void> {
-  const app = new Instructed({ db: PG_URL });
-  app.registerAggregate(Account);
-  app.registerAggregate(Transfer);
-  app.registerCommandRouter(appCommandRouter);
-  app.registerProcessManager(withTrace(transferProcessManager()), {
-    pollInterval: 50,
-    heartbeatInterval: 1_000,
-    onError: (err: Error) =>
-      process.stderr.write(`  [PM error] ${err.message}\n`),
-  });
+  const pool = new pg.Pool({ connectionString: PG_URL });
+  const app = new Instructed({ db: pool })
+    .register(Account)
+    .register(Transfer)
+    .register(appCommandRouter)
+    .register(withTrace(transferProcessManager()), {
+      pollInterval: 50,
+      heartbeatInterval: 1_000,
+      onError: (err: Error) =>
+        process.stderr.write(`  [PM error] ${err.message}\n`),
+    });
 
-  const worker = await app.startWorker();
+  const worker = await app.poll();
   process.stdout.write(`[${TransferProcessManager}] worker started\n`);
 
   installSignalHandlers(async () => {
     await worker.close();
-    await app.close();
+    await pool.end();
   });
 
   await worker.stopped;

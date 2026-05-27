@@ -19,20 +19,20 @@ import { readBalances } from "../src/projections/balances/queries.ts";
 const PRINT_INTERVAL_MS = 2_000;
 
 async function main(): Promise<void> {
-  // The projection's read-store pool is application-owned (D-0016):
-  // it's *not* the SDK's connection, and the SDK gives the handler
-  // no DB handle. We close it on shutdown.
+  // One application-owned pool, shared by the SDK (event store) and
+  // the projection handler (read store). The SDK is opaque to the
+  // pool's other uses; the application is responsible for `pool.end()`
+  // on shutdown.
   const pool = new pg.Pool({ connectionString: PG_URL });
 
-  const app = new Instructed({ db: PG_URL });
-  app.registerProjection(balancesProjection(pool), {
+  const app = new Instructed({ db: pool }).register(balancesProjection(pool), {
     pollInterval: 50,
     heartbeatInterval: 1_000,
     onError: (err: Error) =>
       process.stderr.write(`  [Balances error] ${err.message}\n`),
   });
 
-  const worker = await app.startWorker();
+  const worker = await app.poll();
   process.stdout.write(
     `[Balances] worker started; refreshing every ${PRINT_INTERVAL_MS}ms\n`,
   );
@@ -62,7 +62,6 @@ async function main(): Promise<void> {
   installSignalHandlers(async () => {
     clearInterval(ticker);
     await worker.close();
-    await app.close();
     await pool.end();
   });
 

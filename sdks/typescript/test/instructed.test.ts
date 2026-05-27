@@ -7,7 +7,7 @@
  *
  *   - registerAggregate + dispatch (by-name lookup, UnknownAggregateType)
  *   - registerProjection: partitionBy / routeFn mutual exclusivity
- *   - startWorker fans out routing+processing workers for a
+ *   - poll fans out routing+processing workers for a
  *     projection and a PM under one handle; close() stops them all
  *   - dispatch( ... , { consistency: [...] }) waits for the
  *     projection to catch up
@@ -87,35 +87,30 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
 describe("Instructed -- dispatch (registry lookup)", () => {
   test("dispatches a registered aggregate by name; throws UnknownAggregateType otherwise", async () => {
     const app = new Instructed({ db: pool });
-    try {
-      const Counter = counter();
-      app.registerAggregate(Counter);
+    const Counter = counter();
+    app.register(Counter);
 
-      const stream = randomUUID();
-      const appended = await app.dispatch<CounterCommand>(
-        "Counter",
-        stream,
-        { kind: "add", n: 3 },
-      );
-      assert.equal(appended.length, 1);
-      assert.equal(appended[0].stream_version, 1n);
+    const stream = randomUUID();
+    const appended = await app.dispatch<CounterCommand>(
+      "Counter",
+      stream,
+      { kind: "add", n: 3 },
+    );
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].stream_version, 1n);
 
-      await assert.rejects(
-        () => app.dispatch("DoesNotExist", stream, {}),
-        (err: unknown) =>
-          err instanceof UnknownAggregateType &&
-          (err as UnknownAggregateType).aggregateType === "DoesNotExist",
-      );
-    } finally {
-      await app.close();
-    }
+    await assert.rejects(
+      () => app.dispatch("DoesNotExist", stream, {}),
+      (err: unknown) =>
+        err instanceof UnknownAggregateType &&
+        (err as UnknownAggregateType).aggregateType === "DoesNotExist",
+    );
   });
 
-  test("does not own the user-supplied Pool; close() leaves it usable", async () => {
+  test("does not own the user-supplied Pool; pool stays usable after dispatch", async () => {
     const app = new Instructed({ db: pool });
-    app.registerAggregate(counter());
+    app.register(counter());
     await app.dispatch<CounterCommand>("Counter", randomUUID(), { kind: "add", n: 1 });
-    await app.close();
     const r = await pool.query("SELECT 1 AS x");
     assert.equal(r.rows[0].x, 1);
   });
@@ -124,40 +119,36 @@ describe("Instructed -- dispatch (registry lookup)", () => {
 // ---------------------------------------------------------------------------
 
 describe("Instructed -- registerProjection validation", () => {
-  test("registerProjection rejects mutually-exclusive partitionBy + routeFn", () => {
+  test("register rejects mutually-exclusive partitionBy + routeFn on a projection", () => {
     const app = new Instructed({ db: pool });
-    try {
-      assert.throws(
-        () =>
-          app.registerProjection({
-            type: "p",
-            partitionBy: { kind: "sequential" },
-            routeFn: () => ({ partitionKey: "k" }),
-            async handler() {},
-          }),
-        /mutually exclusive/,
-      );
-    } finally {
-      void app.close();
-    }
+    assert.throws(
+      () =>
+        app.register({
+          type: "p",
+          partitionBy: { kind: "sequential" },
+          routeFn: () => ({ partitionKey: "k" }),
+          async handler() {},
+        }),
+      /mutually exclusive/,
+    );
   });
 });
 
 // ---------------------------------------------------------------------------
 
-describe("Instructed -- startWorker fan-out", () => {
+describe("Instructed -- poll fan-out", () => {
   test("runs a registered projection and PM under one handle; close stops both", async () => {
     const app = new Instructed({ db: pool });
 
     const Counter = counter();
-    app.registerAggregate(Counter);
+    app.register(Counter);
 
     // A projection on $all that counts events of type "Triggered".
     // SUB-A: legacy `selector` is recovered via a routeFn that
     // returns `"ignore"` for the would-be-skipped events.
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let projSeen = 0;
-    app.registerProjection(
+    app.register(
       {
         type: projName,
         routeFn: (e) =>
@@ -176,7 +167,7 @@ describe("Instructed -- startWorker fan-out", () => {
     // (so the PM stops after one event per partition).
     const pmName = `pm-${randomUUID().slice(0, 8)}`;
     const targetStream = randomUUID();
-    app.registerProcessManager<{ done: boolean }>(
+    app.register(
       {
         type: pmName,
         routeFn: (e) =>
@@ -202,7 +193,7 @@ describe("Instructed -- startWorker fan-out", () => {
       { pollInterval: 25, heartbeatInterval: 1_000 },
     );
 
-    const handle = await app.startWorker();
+    const handle = await app.poll();
     try {
       const trigger = randomUUID();
       await app.client().appendToStream(trigger, expected.noStream, [
@@ -222,17 +213,12 @@ describe("Instructed -- startWorker fan-out", () => {
       }, 5_000, "PM-dispatched events to land");
     } finally {
       await handle.close();
-      await app.close();
     }
   });
 
   test("throws when no projections or PMs are registered", async () => {
     const app = new Instructed({ db: pool });
-    try {
-      await assert.rejects(() => app.startWorker(), /no projections or process managers/);
-    } finally {
-      await app.close();
-    }
+    await assert.rejects(() => app.poll(), /no projections or process managers/);
   });
 });
 
@@ -241,11 +227,11 @@ describe("Instructed -- startWorker fan-out", () => {
 describe("Instructed -- dispatch consistency wait", () => {
   test("waits for a named subscription to catch up before returning", async () => {
     const app = new Instructed({ db: pool });
-    app.registerAggregate(counter());
+    app.register(counter());
 
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let seen = 0;
-    app.registerProjection(
+    app.register(
       {
         type: projName,
         routeFn: (e: RecordedEvent) =>
@@ -256,7 +242,7 @@ describe("Instructed -- dispatch consistency wait", () => {
       },
       { pollInterval: 25, heartbeatInterval: 1_000 },
     );
-    const handle = await app.startWorker();
+    const handle = await app.poll();
     try {
       await app.dispatch<CounterCommand>(
         "Counter",
@@ -269,7 +255,6 @@ describe("Instructed -- dispatch consistency wait", () => {
       assert.ok(seen >= 1, `expected handler to have run, got ${seen}`);
     } finally {
       await handle.close();
-      await app.close();
     }
   });
 });
@@ -280,57 +265,45 @@ describe("Instructed -- command router", () => {
   test("dispatch(command) routes via the registered router", async () => {
     const app = new Instructed({ db: pool });
     const Counter = counter();
-    app.registerAggregate(Counter);
+    app.register(Counter);
 
     type AddN = Command<"AddN"> & { counterId: string; n: number };
     const router = commandRouter<AddN>({
       AddN: { aggregate: Counter, id: (c) => c.counterId },
     });
-    app.registerCommandRouter(router);
+    app.register(router);
 
-    try {
-      const id = randomUUID();
-      // Lean overload: no aggregateType, no streamUuid -- the router
-      // resolves AddN to (Counter, id).
-      await app.dispatch<AddN>({ type: "AddN", counterId: id, n: 7 });
-      // Verify the event landed on the derived stream "Counter-<id>".
-      const rows = await app.client().readStream(`Counter-${id}`, 1n, 10);
-      assert.equal(rows.length, 1);
-      assert.equal(rows[0].type, "Added");
-      assert.deepEqual(rows[0].data, { n: 7 });
-    } finally {
-      await app.close();
-    }
+    const id = randomUUID();
+    // Lean overload: no aggregateType, no streamUuid -- the router
+    // resolves AddN to (Counter, id).
+    await app.dispatch<AddN>({ type: "AddN", counterId: id, n: 7 });
+    // Verify the event landed on the derived stream "Counter-<id>".
+    const rows = await app.client().readStream(`Counter-${id}`, 1n, 10);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].type, "Added");
+    assert.deepEqual(rows[0].data, { n: 7 });
   });
 
   test("dispatch(command) without a registered router throws", async () => {
     const app = new Instructed({ db: pool });
-    app.registerAggregate(counter());
-    try {
-      await assert.rejects(
-        () =>
-          app.dispatch<Command<"Whatever">>({ type: "Whatever" } as never),
-        /no command router registered/,
-      );
-    } finally {
-      await app.close();
-    }
+    app.register(counter());
+    await assert.rejects(
+      () =>
+        app.dispatch<Command<"Whatever">>({ type: "Whatever" } as never),
+      /no command router registered/,
+    );
   });
 
-  test("registerCommandRouter rejects a second registration", () => {
+  test("register(router) rejects a second router registration", () => {
     const app = new Instructed({ db: pool });
     const router: CommandRouter = () => ({
       aggregateType: "X",
       aggregateId: "y",
     });
-    app.registerCommandRouter(router);
-    try {
-      assert.throws(
-        () => app.registerCommandRouter(router),
-        /already registered/,
-      );
-    } finally {
-      void app.close();
-    }
+    app.register(router);
+    assert.throws(
+      () => app.register(router),
+      /already registered/,
+    );
   });
 });

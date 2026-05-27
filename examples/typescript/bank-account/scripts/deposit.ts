@@ -4,6 +4,7 @@
  *   npm run deposit <name> <amount>
  */
 
+import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import { PG_URL, requireArg } from "../src/common.ts";
 import { Account } from "../src/aggregates/account.ts";
@@ -17,10 +18,11 @@ async function main(): Promise<void> {
     throw new Error(`invalid amount: ${process.argv[3]}`);
   }
 
-  const app = new Instructed({ db: PG_URL });
-  app.registerAggregate(Account);
-  app.registerCommandRouter(appCommandRouter);
+  const pool = new pg.Pool({ connectionString: PG_URL });
   try {
+    const app = new Instructed({ db: pool })
+      .register(Account)
+      .register(appCommandRouter);
     await app.dispatch({
       type: DepositToAccount,
       accountId: name,
@@ -28,7 +30,7 @@ async function main(): Promise<void> {
     });
     process.stdout.write(`deposited ${amount} to "${name}"\n`);
   } finally {
-    await app.close();
+    await pool.end();
   }
 }
 

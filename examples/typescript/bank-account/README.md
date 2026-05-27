@@ -143,9 +143,11 @@ dispatches its terminating mark-command.
 
 ## What the example demonstrates
 
-- **The `Instructed` facade.** `registerAggregate` /
-  `registerProjection` / `registerProcessManager` per process;
-  one `startWorker()` per process; one `close()` to stop.
+- **The `Instructed` facade.** One chainable `register()` covers
+  aggregates, command routers, projections and process managers;
+  `poll()` returns a worker the application stops itself. The
+  pool is supplied by the application and the application closes
+  it — the facade does not own or close DB resources.
 - **Multi-process scaling.** Each projection and the PM run in
   their own process. Adding a second `projection:balances`
   process while the first is running shows lease takeover and

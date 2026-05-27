@@ -18,17 +18,18 @@ import { readTransfers } from "../src/projections/transfers/queries.ts";
 const PRINT_INTERVAL_MS = 2_000;
 
 async function main(): Promise<void> {
+  // One application-owned pool, shared by the SDK and the read-store
+  // queries. See projection-balances.ts for the rationale.
   const pool = new pg.Pool({ connectionString: PG_URL });
 
-  const app = new Instructed({ db: PG_URL });
-  app.registerProjection(transfersProjection(pool), {
+  const app = new Instructed({ db: pool }).register(transfersProjection(pool), {
     pollInterval: 50,
     heartbeatInterval: 1_000,
     onError: (err: Error) =>
       process.stderr.write(`  [Transfers error] ${err.message}\n`),
   });
 
-  const worker = await app.startWorker();
+  const worker = await app.poll();
   process.stdout.write(
     `[Transfers] worker started; refreshing every ${PRINT_INTERVAL_MS}ms\n`,
   );
@@ -59,7 +60,6 @@ async function main(): Promise<void> {
   installSignalHandlers(async () => {
     clearInterval(ticker);
     await worker.close();
-    await app.close();
     await pool.end();
   });
 

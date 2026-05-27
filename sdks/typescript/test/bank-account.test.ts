@@ -6,7 +6,7 @@
  * the SUB-A registration shapes in slice 10; for slice 9 we inline a
  * minimal copy of the relevant domain code so the SDK test suite is
  * not blocked on the example migration and so the test compiles
- * against the new `Instructed.registerProjection` /
+ * against the new `Instructed.register` /
  * `registerProcessManager` surfaces.
  *
  * Exercises the example end-to-end against the docker-compose
@@ -339,31 +339,30 @@ async function transferHandle(
 
 describe("bank-account end-to-end (standalone)", () => {
   test("successful transfer + refused transfer", async () => {
-    const app = new Instructed({ db: PG_URL });
     const view = newBalancesView();
+    const app = new Instructed({ db: pool })
+      .register(Account)
+      .register(Transfer)
+      .register(
+        {
+          type: "Balances",
+          routeFn: balancesRouteFn,
+          handler: balancesHandler(view),
+        },
+        { pollInterval: 25, heartbeatInterval: 1_000 },
+      )
+      .register(
+        {
+          type: TRANSFER_PM_NAME,
+          routeFn: transferRouteFn,
+          initialState: () => ({ stage: "starting" }),
+          apply: transferApply,
+          handle: transferHandle,
+        },
+        { pollInterval: 25, heartbeatInterval: 1_000 },
+      );
 
-    app.registerAggregate(Account);
-    app.registerAggregate(Transfer);
-    app.registerProjection(
-      {
-        type: "Balances",
-        routeFn: balancesRouteFn,
-        handler: balancesHandler(view),
-      },
-      { pollInterval: 25, heartbeatInterval: 1_000 },
-    );
-    app.registerProcessManager<TransferStage>(
-      {
-        type: TRANSFER_PM_NAME,
-        routeFn: transferRouteFn,
-        initialState: () => ({ stage: "starting" }),
-        apply: transferApply,
-        handle: transferHandle,
-      },
-      { pollInterval: 25, heartbeatInterval: 1_000 },
-    );
-
-    const worker = await app.startWorker();
+    const worker = await app.poll();
     try {
       const alice = randomUUID();
       const bob = randomUUID();
@@ -456,7 +455,6 @@ describe("bank-account end-to-end (standalone)", () => {
       assert.deepEqual(types, ["AccountOpened", "Deposited", "WithdrawalRefused"]);
     } finally {
       await worker.close();
-      await app.close();
     }
   });
 });

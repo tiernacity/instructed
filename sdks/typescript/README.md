@@ -39,7 +39,7 @@ The three layers:
 |---|---|---|---|
 | **L1 — procedure bindings** | `client.ts`, `errors.ts` (SQLSTATE-bound classes), `types.ts` | `Client`, `InstructedError` + subclasses, wire shapes | One method per `instructed.*` stored procedure; SQLSTATE → typed-error translation. Every SDK port reproduces this surface verbatim. |
 | **L2 — core behaviours** | `aggregate.ts`, `routing-worker.ts`, `processing-worker.ts`, `projection-worker.ts` (adapter), `pm-substrate.ts` | `runCommand`, `runCommandAndApply`, `startRoutingWorker`, `startProcessingWorker`, `startProjectionWorker`, `startPmSubstrate`, `ErrorPolicy`, `RetryBudgetExhausted` | Aggregate load-execute-append loop with OCC retry (D-0005); D-0025 per-batch routing worker; per-item lease + heartbeat processing worker; kind-specific projection / PM-substrate adapters. The PM substrate is the snapshot+ack lifecycle without command dispatch (that's L3). Every SDK port reproduces the *behaviours*; the shape can be language-idiomatic. |
-| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `partition-by.ts`, `aggregate-snapshots.ts`, `error-policies.ts`, `pm-worker.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `runCommandWithSnapshots`, `exponentialBackoff`, `linearBackoff`, `retryUpTo`, `startPmWorker`, `ConsistencyTimeout`, `UnknownAggregateType` | By-name aggregate dispatch, projection / PM registration, single `startWorker()` / `close()`, consistency-on-dispatch wait, `PartitionBy` sugar over the routing extension point, snapshot-policy orchestration over the L2 aggregate primitive, retry/error-policy standard library, by-value-`commands` PM wrapper over the L2 substrate. **May differ per language port.** |
+| **L3 — conveniences** | `consistency.ts`, `instructed.ts`, `partition-by.ts`, `routing-helpers.ts`, `command-router.ts`, `aggregate-snapshots.ts`, `error-policies.ts`, `pm-worker.ts` | `Instructed`, `waitForProjection`, `PartitionBy`, `onlyTypes`, `commandRouter`, `runCommandWithSnapshots`, `exponentialBackoff`, `linearBackoff`, `retryUpTo`, `startPmWorker`, `ConsistencyTimeout`, `UnknownAggregateType` | Chainable `register()` for aggregates / projections / PMs / command routers; `dispatch(command)` via router or `dispatch(type, id, command)` explicit; `poll()` returns an application-owned worker; consistency-on-dispatch wait; `PartitionBy` sugar over the routing extension point; `onlyTypes` routing combinator; snapshot-policy orchestration over the L2 aggregate primitive; retry/error-policy standard library; by-value-`commands` PM wrapper over the L2 substrate. **May differ per language port.** |
 
 L1 + L2 = the `instructed-sdk/core` sub-path. L1 + L2 + L3 = the
 bare `instructed-sdk` entry. See `src/core.ts` and `src/index.ts`
@@ -73,7 +73,7 @@ import {
   Instructed,
   everyN,
   type AggregateDefinition,
-  type RegisterProjectionInput,
+  type ProjectionDefinition,
 } from "instructed-sdk";
 
 const Account: AggregateDefinition<AccountState, AccountCommand, AccountEvent> = {
@@ -92,30 +92,37 @@ const Account: AggregateDefinition<AccountState, AccountCommand, AccountEvent> =
   snapshotModuleVersion: "v1",
 };
 
-const balances: RegisterProjectionInput = {
+const balances: ProjectionDefinition = {
+  type: "Balances",
   startFrom: "origin",
   handler: async (event, ctx) => {
     /* write to your read model; idempotent (handlers may redeliver) */
   },
 };
 
-const app = new Instructed({ db: process.env.DATABASE_URL });
-app.registerAggregate(Account);
-app.registerProjection("Balances", balances);
+import pg from "pg";
+const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL });
+const app = new Instructed({ db: pool })
+  .register(Account)
+  .register(balances);
 
-const worker = await app.startWorker();
+const worker = await app.poll();
 
-await app.dispatch("Account", "account-alice", { kind: "Open", owner: "alice" });
+await app.dispatch("Account", "alice", { type: "OpenAccount", owner: "alice" });
 await app.dispatch(
   "Account",
-  "account-alice",
-  { kind: "Deposit", amount: 1000 },
+  "alice",
+  { type: "DepositToAccount", amount: 1000 },
   { consistency: ["Balances"] },
 );
 
-await worker.close();
-await app.close();
+await worker.close();   // application stops the worker
+await pool.end();       // application closes the pool
 ```
+
+The `Instructed` facade does **not** own the pool and does **not**
+track the worker — both lifecycles are the application's. The
+facade is a registration / dispatch surface, nothing more.
 
 A worked end-to-end version, with a process manager modelling a
 transfer, is in

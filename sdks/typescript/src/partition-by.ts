@@ -35,7 +35,7 @@
  * not (per [D-0027](../../../docs/decisions.md#d-0027) and PRJ-A).
  *
  * A consumer of the bare entry uses these helpers via
- * `Instructed.registerProjection({ partitionBy: ... })`. A consumer
+ * `Instructed.register(projectionDef)` with `{ partitionBy: ... }`. A consumer
  * of `instructed-sdk/core` writes a raw `RoutingFn` directly --
  * the translation is straightforward enough that having it as
  * sugar over a `RoutingFn` is the right shape (rather than a

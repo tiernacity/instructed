@@ -47,7 +47,7 @@
  *     produces `'failed'` rows.
  *
  * Not yet exported from src/index.ts; the layer-5 facade wires this
- * into `Instructed.registerProjection` / `registerProcessManager` in
+ * into `Instructed.register(...)` (projection / process-manager) in
  * slice 9. Tests import this module directly.
  */
 

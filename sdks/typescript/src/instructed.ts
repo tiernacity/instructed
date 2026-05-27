@@ -2,7 +2,7 @@
  * Layer 5: the `Instructed` facade (SUB-A slice 9 rewrite).
  *
  * Thin composition over Layers 0-4. `register*` declares what this
- * process can do; `startWorker()` fans out one **routing worker** +
+ * process can do; `poll()` fans out one **routing worker** +
  * one **processing worker** per registered projection / process
  * manager. `dispatch(aggregateType, ...)` resolves the aggregate
  * through the registry and delegates to `runCommandWithSnapshots`. `dispatch`
@@ -11,23 +11,18 @@
  * for the named subscriptions to catch up (D-0010: no `:strong`
  * shorthand).
  *
- * SUB-A registration surface (PRJ-A + PM-F, slice 9):
+ * Registration surface: a single chainable `register(arg, opts?)`
+ * that takes any of the four registerable shapes and dispatches
+ * structurally to the right private handler. See the per-method
+ * doc-comment on `register` for the overload set.
  *
- *   registerProjection(name, { partitionBy? | routeFn?, handler,
- *                              stream?, errorPolicy?, startFrom? },
- *                      opts?)
- *     - `partitionBy` and `routeFn` are mutually exclusive.
- *     - Default: `{ kind: 'sequential' }`.
- *     - The legacy `selector` parameter is removed; the same
- *       observable behaviour is recoverable via a `routeFn` that
- *       returns `"ignore"` for would-be-skipped events.
- *
- *   registerProcessManager(name, { routeFn, apply, handle,
- *                                  initialState, snapshotModuleVersion?,
- *                                  stream?, errorPolicy?, startFrom? },
- *                          opts?)
- *     - The old single-`handle` signature is **removed** (breaking;
- *       not deprecated).
+ *   - `AggregateDefinition` (has `execute`): no `opts`.
+ *   - `CommandRouter` (a function): no `opts`; at most one.
+ *   - `ProjectionDefinition` (has `handler`): `opts` for
+ *     lease/poll/heartbeat/onError. `partitionBy` and `routeFn`
+ *     are mutually exclusive; default `{ kind: 'sequential' }`.
+ *   - `ProcessManagerDefinition` (has `handle` + `routeFn`): same
+ *     `opts` shape as projections.
  *
  * Pool management:
  *   - the client wraps the user's `db` (env-var or default when
@@ -102,8 +97,19 @@ export interface InstructedDefaults {
 }
 
 export interface InstructedOptions {
-  /** `pg.Pool`, a connection string, or any Queryable. */
-  db?: pg.Pool | Queryable | string;
+  /**
+   * The database handle. A `pg.Pool` (typical), a `pg.PoolClient`,
+   * or anything else conforming to `Queryable`. **The application
+   * owns this connection** — it must end / release it itself when
+   * tearing down (the facade does not). This makes the pool's
+   * lifecycle explicit and lets the application share the pool
+   * with non-SDK code (read-store queries, ad-hoc admin work).
+   *
+   * No env-var fallback and no string-URL convenience: the
+   * application is responsible for constructing the pool exactly
+   * as it wants.
+   */
+  db: pg.Pool | Queryable;
   defaults?: InstructedDefaults;
 }
 
@@ -184,13 +190,13 @@ export interface ProcessManagerDefinition<S, E extends Event = Event>
 
 interface RegisteredProjection {
   stream: string;
-  def: ProjectionDefinition<any>;
+  def: ProjectionDefinition<Event>;
   opts: RegistrationOptions;
 }
 
 interface RegisteredProcessManager {
   stream: string;
-  def: ProcessManagerDefinition<any, any>;
+  def: ProcessManagerDefinition<unknown, Event>;
   opts: RegistrationOptions;
 }
 
@@ -199,72 +205,142 @@ interface RegisteredProcessManager {
 // ============================================================================
 
 export class Instructed {
-  private readonly persistPool: pg.Pool | Queryable;
-  private readonly persistOwned: boolean;
-
   private readonly persistClient_: Client;
 
   private readonly defaults: Required<InstructedDefaults>;
 
   private readonly aggregates = new Map<
     string,
-    AggregateDefinition<any, any, any>
+    AggregateDefinition<unknown, unknown, DomainEvent>
   >();
   private readonly projections: RegisteredProjection[] = [];
   private readonly processManagers: RegisteredProcessManager[] = [];
   private commandRouter_: CommandRouter | null = null;
 
-  private worker: RunningWorker | null = null;
-  private closed = false;
-
-  constructor(opts: InstructedOptions | string = {}) {
-    const o: InstructedOptions = typeof opts === "string" ? { db: opts } : opts;
-
-    // Pool. Single pool for the whole SDK under D-0026.
-    let dbArg: pg.Pool | Queryable | string | undefined = o.db;
-    if (dbArg === undefined) {
-      dbArg = process.env.INSTRUCTED_DATABASE_URL || undefined;
-    }
-    if (dbArg === undefined) {
-      this.persistPool = new pg.Pool();
-      this.persistOwned = true;
-    } else if (typeof dbArg === "string") {
-      this.persistPool = new pg.Pool({ connectionString: dbArg });
-      this.persistOwned = true;
-    } else {
-      this.persistPool = dbArg;
-      this.persistOwned = false;
-    }
-    this.persistClient_ = new Client(this.persistPool as Queryable);
+  constructor(opts: InstructedOptions) {
+    // The application owns the pool. The facade just wraps it.
+    this.persistClient_ = new Client(opts.db);
 
     this.defaults = {
-      leaseSeconds: o.defaults?.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS,
-      batchSize: o.defaults?.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE,
-      pollInterval: o.defaults?.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS,
-      retryBudget: o.defaults?.retryBudget ?? DEFAULT_RETRY_BUDGET,
+      leaseSeconds: opts.defaults?.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS,
+      batchSize: opts.defaults?.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE,
+      pollInterval:
+        opts.defaults?.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS,
+      retryBudget: opts.defaults?.retryBudget ?? DEFAULT_RETRY_BUDGET,
     };
   }
 
   // ---- registry ----
 
-  registerAggregate<S, C, E extends DomainEvent = DomainEvent>(
+  /**
+   * Unified, chainable registration. One public method registers all
+   * four SDK extension points; the overload TS picks is determined
+   * by the argument's structural shape:
+   *
+   *   - `CommandRouter`: a function `(Command) => { aggregateType,
+   *     aggregateId }`. At most one per facade.
+   *   - `AggregateDefinition`: object with an `execute` method.
+   *     Indexed by `def.type`; duplicate types raise.
+   *   - `ProjectionDefinition`: object with a `handler` method.
+   *     `opts` configures lease / poll / heartbeat / onError.
+   *   - `ProcessManagerDefinition`: object with `handle` + `routeFn`.
+   *     Same `opts` as projections.
+   *
+   * Returns `this` so registrations chain:
+   *
+   *     new Instructed({ db })
+   *       .register(Account)
+   *       .register(Transfer)
+   *       .register(appCommandRouter)
+   *       .register(balancesProjection(pool), { pollInterval: 50 })
+   *       .register(transferProcessManager(), { pollInterval: 50 });
+   *
+   * `opts` is rejected for aggregate and router registrations (it's
+   * meaningless there) — silent acceptance would hide typos.
+   *
+   * Internally delegates to the per-kind private methods
+   * (`#registerAggregate`, `#registerProjection`, etc.); those keep
+   * named, narrowly-typed signatures for the implementation and for
+   * any future SDK-internal callers that want to bypass the
+   * structural dispatch.
+   */
+  register(router: CommandRouter): this;
+  register<S, C, E extends DomainEvent = DomainEvent>(
     def: AggregateDefinition<S, C, E>,
-  ): void {
+  ): this;
+  register<E extends Event = Event>(
+    def: ProjectionDefinition<E>,
+    opts?: RegistrationOptions,
+  ): this;
+  register<S, E extends Event = Event>(
+    def: ProcessManagerDefinition<S, E>,
+    opts?: RegistrationOptions,
+  ): this;
+  register(
+    arg:
+      | CommandRouter
+      | AggregateDefinition<unknown, unknown, DomainEvent>
+      | ProjectionDefinition<Event>
+      | ProcessManagerDefinition<unknown, Event>,
+    opts?: RegistrationOptions,
+  ): this {
+    // Discriminate structurally. The four registerable shapes are
+    // disjoint by these markers (TS narrows the union through each
+    // `in` check, so no casts are needed):
+    //   typeof === function   -> CommandRouter
+    //   has "execute"          -> AggregateDefinition
+    //   has "handle" + routeFn -> ProcessManagerDefinition
+    //   has "handler"          -> ProjectionDefinition
+    if (typeof arg === "function") {
+      if (opts !== undefined) {
+        throw new Error(
+          "Instructed.register: a CommandRouter takes no options",
+        );
+      }
+      return this.registerCommandRouter(arg);
+    }
+    if ("execute" in arg) {
+      if (opts !== undefined) {
+        throw new Error(
+          "Instructed.register: an AggregateDefinition takes no options",
+        );
+      }
+      return this.registerAggregate(arg);
+    }
+    if ("handle" in arg && "routeFn" in arg) {
+      return this.registerProcessManager(arg, opts);
+    }
+    if ("handler" in arg) {
+      return this.registerProjection(arg, opts);
+    }
+    throw new Error(
+      "Instructed.register: argument doesn't match any registerable shape " +
+        "(CommandRouter / AggregateDefinition / ProjectionDefinition / " +
+        "ProcessManagerDefinition)",
+    );
+  }
+
+  // ---- per-kind registration (private; reached via `register()`) ----
+
+  private registerAggregate<S, C, E extends DomainEvent = DomainEvent>(
+    def: AggregateDefinition<S, C, E>,
+  ): this {
     if (this.aggregates.has(def.type)) {
       throw new Error(
-        `Instructed.registerAggregate: aggregate type "${def.type}" already registered`,
+        `Instructed.register: aggregate type "${def.type}" already registered`,
       );
     }
     this.aggregates.set(def.type, def);
+    return this;
   }
 
-  registerProjection<E extends Event = Event>(
+  private registerProjection<E extends Event = Event>(
     def: ProjectionDefinition<E>,
     opts: RegistrationOptions = {},
-  ): void {
+  ): this {
     if (def.partitionBy !== undefined && def.routeFn !== undefined) {
       throw new Error(
-        `Instructed.registerProjection("${def.type}"): \`partitionBy\` and \`routeFn\` are mutually exclusive`,
+        `Instructed.register("${def.type}"): \`partitionBy\` and \`routeFn\` are mutually exclusive`,
       );
     }
     this.projections.push({
@@ -272,37 +348,29 @@ export class Instructed {
       def,
       opts,
     });
+    return this;
   }
 
-  registerProcessManager<S, E extends Event = Event>(
+  private registerProcessManager<S, E extends Event = Event>(
     def: ProcessManagerDefinition<S, E>,
     opts: RegistrationOptions = {},
-  ): void {
+  ): this {
     this.processManagers.push({
       stream: def.stream ?? "$all",
       def,
       opts,
     });
+    return this;
   }
 
-  /**
-   * Register the application's command router. The router resolves
-   * a {@link Command} to `(aggregateType, aggregateId)`; the facade
-   * uses it both for the lean `dispatch(command, opts)` overload
-   * and for the PM worker's lean {@link DispatchedCommand} shape
-   * (PM `handle` returning bare commands instead of the explicit
-   * `{ aggregate, streamUuid, command }`).
-   *
-   * Build a router via {@link commandRouter} (static map) or
-   * provide your own function.
-   */
-  registerCommandRouter(router: CommandRouter): void {
+  private registerCommandRouter(router: CommandRouter): this {
     if (this.commandRouter_ !== null) {
       throw new Error(
-        "Instructed.registerCommandRouter: a command router is already registered",
+        "Instructed.register: a command router is already registered",
       );
     }
     this.commandRouter_ = router;
+    return this;
   }
 
   // ---- dispatch ----
@@ -354,7 +422,7 @@ export class Instructed {
       if (!this.commandRouter_) {
         throw new Error(
           "Instructed.dispatch: no command router registered. Call " +
-            "`registerCommandRouter()` first, or use the explicit " +
+            "`register(router)` first, or use the explicit " +
             "`dispatch(aggregateType, id, command, opts?)` overload.",
         );
       }
@@ -395,13 +463,26 @@ export class Instructed {
 
   // ---- worker ----
 
-  async startWorker(opts: { workerId?: string } = {}): Promise<RunningWorker> {
-    if (this.worker) {
-      throw new Error("Instructed.startWorker: a worker is already running");
-    }
+  /**
+   * Start polling the work queue. Spins up one routing worker +
+   * one processing worker per registered projection / process
+   * manager and returns a composite handle covering all of them.
+   *
+   * The application owns the returned `RunningWorker`: it must
+   * call `.close()` to stop, and may keep a reference to
+   * `.stopped` for a clean shutdown wait. The facade does *not*
+   * track or auto-stop returned workers.
+   *
+   * Calling `poll()` more than once on the same `Instructed`
+   * starts independent worker sets — unusual, but not forbidden.
+   * Multiple processes pointing the same registration at the
+   * same database is the normal HA story; multiple `poll()`s
+   * inside one process is mostly useful for tests.
+   */
+  async poll(opts: { workerId?: string } = {}): Promise<RunningWorker> {
     if (this.projections.length === 0 && this.processManagers.length === 0) {
       throw new Error(
-        "Instructed.startWorker: no projections or process managers registered",
+        "Instructed.poll: no projections or process managers registered",
       );
     }
 
@@ -445,7 +526,7 @@ export class Instructed {
           ? { startFrom: pm.def.startFrom }
           : {}),
       }, routingOpts);
-      const pmDef: PmDefinition<any, any> = {
+      const pmDef: PmDefinition<unknown, Event> = {
         type: pm.def.type,
         stream: pm.stream,
         initialState: pm.def.initialState,
@@ -479,7 +560,7 @@ export class Instructed {
       workers.push(routing, processing);
     }
 
-    const composite: RunningWorker = {
+    return {
       stopped: Promise.all(workers.map((w) => w.stopped)).then(() => {}),
       close: async () => {
         // Parallel close: routing-worker dropping mid-batch is the
@@ -489,30 +570,12 @@ export class Instructed {
         await Promise.all(workers.map((w) => w.close()));
       },
     };
-    this.worker = composite;
-    return composite;
   }
 
   // ---- escape hatches ----
 
   client(): Client {
     return this.persistClient_;
-  }
-
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    if (this.worker) {
-      try {
-        await this.worker.close();
-      } catch {
-        // ignore
-      }
-      this.worker = null;
-    }
-    if (this.persistOwned && isPool(this.persistPool)) {
-      await this.persistPool.end();
-    }
   }
 
   // ---- internals ----
@@ -572,11 +635,4 @@ function normaliseConsistency(
   );
 }
 
-function isPool(con: unknown): con is pg.Pool {
-  return (
-    typeof con === "object" &&
-    con !== null &&
-    typeof (con as { end?: unknown }).end === "function" &&
-    typeof (con as { connect?: unknown }).connect === "function"
-  );
-}
+

@@ -8,6 +8,7 @@
  * `Account` aggregate with id taken from `command.accountId`.
  */
 
+import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import { PG_URL, requireArg } from "../src/common.ts";
 import { Account } from "../src/aggregates/account.ts";
@@ -16,10 +17,12 @@ import { appCommandRouter } from "../src/command-router.ts";
 
 async function main(): Promise<void> {
   const name = requireArg(process.argv, 2, "name");
-  const app = new Instructed({ db: PG_URL });
-  app.registerAggregate(Account);
-  app.registerCommandRouter(appCommandRouter);
+  // The application owns the pool. The facade just wraps it.
+  const pool = new pg.Pool({ connectionString: PG_URL });
   try {
+    const app = new Instructed({ db: pool })
+      .register(Account)
+      .register(appCommandRouter);
     await app.dispatch({
       type: OpenAccount,
       accountId: name,
@@ -27,7 +30,7 @@ async function main(): Promise<void> {
     });
     process.stdout.write(`opened account "${name}"\n`);
   } finally {
-    await app.close();
+    await pool.end();
   }
 }
 

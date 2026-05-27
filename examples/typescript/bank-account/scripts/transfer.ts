@@ -9,6 +9,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import { PG_URL, requireArg } from "../src/common.ts";
 import { Transfer } from "../src/aggregates/transfer.ts";
@@ -24,10 +25,11 @@ async function main(): Promise<void> {
   }
 
   const transferId = randomUUID();
-  const app = new Instructed({ db: PG_URL });
-  app.registerAggregate(Transfer);
-  app.registerCommandRouter(appCommandRouter);
+  const pool = new pg.Pool({ connectionString: PG_URL });
   try {
+    const app = new Instructed({ db: pool })
+      .register(Transfer)
+      .register(appCommandRouter);
     await app.dispatch({
       type: RequestTransfer,
       transferId,
@@ -39,7 +41,7 @@ async function main(): Promise<void> {
       `requested transfer ${transferId.slice(0, 8)}  ${from} -> ${to}  ${amount}\n`,
     );
   } finally {
-    await app.close();
+    await pool.end();
   }
 }
 
