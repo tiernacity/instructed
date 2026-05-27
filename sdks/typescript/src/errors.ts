@@ -20,8 +20,8 @@
  *     (aggregate retry loop). Re-exported from `instructed-sdk/core`.
  *   - **L3 (conveniences)** classes are emitted by the idiomatic
  *     facade. `ConsistencyTimeout`, `ConsistencyTargetError`,
- *     `UnknownAggregateType`, `HandlerError`. Re-exported only from
- *     the bare `instructed-sdk` entry, not from `/core`.
+ *     `UnknownAggregateType`. Re-exported only from the bare
+ *     `instructed-sdk` entry, not from `/core`.
  *   - `mapPgError` and `MapPgErrorContext` are L1-internal: used by
  *     `Client` to translate errors at the call site; not re-exported
  *     from any public entry.
@@ -256,11 +256,10 @@ export class InvalidParameterValue extends InstructedError {}
 // `RetryBudgetExhausted` is L2: emitted by the aggregate retry loop
 // (`runCommand` in `aggregate.ts`). Belongs in `instructed-sdk/core`.
 //
-// `ConsistencyTimeout`, `ConsistencyTargetError`, `UnknownAggregateType`,
-// `HandlerError` are L3: emitted by the convenience layer
-// (`consistency.ts` and `instructed.ts`). Available only via the bare
-// `instructed-sdk` entry. `HandlerError` is currently unused by SDK
-// code and is a candidate for removal in a later pass.
+// `ConsistencyTimeout`, `ConsistencyTargetError`, `UnknownAggregateType`
+// are L3: emitted by the convenience layer (`consistency.ts` and
+// `instructed.ts`). Available only via the bare `instructed-sdk`
+// entry.
 
 export class RetryBudgetExhausted extends InstructedError {
   readonly attempts: number;
@@ -320,16 +319,6 @@ export class UnknownAggregateType extends InstructedError {
   constructor(aggregateType: string) {
     super(`Unknown aggregate type: ${aggregateType}`);
     this.aggregateType = aggregateType;
-  }
-}
-
-export class HandlerError extends InstructedError {
-  readonly cause: unknown;
-  readonly event: unknown;
-  constructor(message: string, opts: { cause: unknown; event: unknown }) {
-    super(message, { cause: opts.cause });
-    this.cause = opts.cause;
-    this.event = opts.event;
   }
 }
 

@@ -104,7 +104,6 @@ export {
   ConsistencyTimeout,
   ConsistencyTargetError,
   UnknownAggregateType,
-  HandlerError,
 } from "./errors.ts";
 
 // The `Instructed` facade: by-name aggregate dispatch, projection / PM

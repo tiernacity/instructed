@@ -24,8 +24,7 @@
  *   - `Instructed` and its registration / dispatch surface
  *     (L3 \u2014 `instructed.ts`).
  *   - `ConsistencyTimeout`, `ConsistencyTargetError`,
- *     `UnknownAggregateType`, `HandlerError` (L3; emitted by the
- *     facade).
+ *     `UnknownAggregateType` (L3; emitted by the facade).
  *   - `mapPgError`, `MapPgErrorContext` (L1-internal).
  *
  * Application code that wants the conventional one-import shape

@@ -36,7 +36,7 @@
  * # The contract this layer orchestrates
  *
  * Snapshot policy is one of the SDK's three named extension points
- * (see `docs/porting-checklist.md` §4.2). The contract lives on
+ * (see `sdks/porting-checklist.md` §4.2). The contract lives on
  * `AggregateDefinition.snapshotPolicy` in `aggregate.ts`; the
  * standard library currently ships `everyN(n)` only. This file is
  * the orchestrator: it decides when to call the policy, what state

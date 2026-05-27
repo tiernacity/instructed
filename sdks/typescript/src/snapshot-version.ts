@@ -10,10 +10,10 @@
  * PMs, fold `apply` over `listPmRebuildEvents`.
  *
  * The key string is **part of the porting checklist** (see
- * `docs/porting-checklist.md` §4.2). A port that disagrees on the
- * key string can't read snapshots written by another port; the
- * TypeScript value `"snapshot_module_version"` is the canonical
- * choice and every conformant port reproduces it.
+ * `sdks/porting-checklist.md` §4.2). A port that disagrees on
+ * the key string can't read snapshots written by another port;
+ * the TypeScript value `"snapshot_module_version"` is the
+ * canonical choice and every conformant port reproduces it.
  *
  * Lives in its own file so both `aggregate.ts` (L2) and
  * `pm-substrate.ts` (L2) import from one place. Re-exported from

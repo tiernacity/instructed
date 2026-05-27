@@ -67,7 +67,7 @@ export interface DomainEvent {
 /**
  * Aggregate snapshot policy — the contract half of the
  * snapshot-policy extension point (see `docs/todo/sdk-rework.md`
- * §7.1 / §7.3 and `docs/porting-checklist.md` §4.2).
+ * §7.1 / §7.3 and `sdks/porting-checklist.md` §4.2).
  *
  * `eventsSinceLast` counts events folded into the current state
  * since the last persisted snapshot (or since `initialState()`

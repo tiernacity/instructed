@@ -65,7 +65,7 @@ reproduces the shape, though language idiom may rename or restructure
 (generics become interfaces, etc.). The **standard library** at each
 point is idiomatic-not-required: a port may ship its own equivalents,
 different equivalents, or none at all. See
-[`docs/porting-checklist.md`](../../docs/porting-checklist.md) for the
+[`sdks/porting-checklist.md`](../porting-checklist.md) for the
 per-port reading list.
 
 ## Typical usage

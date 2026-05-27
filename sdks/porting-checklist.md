@@ -1,26 +1,24 @@
 # Porting checklist
 
 What to build when porting the `instructed` SDK to a new language.
-The TypeScript SDK in `sdks/typescript/` is the reference; this
+The TypeScript SDK in `typescript/` is the reference; this
 doc is the reading list that turns it into a porter's spec.
 
-Status: **incomplete**. Step 5 of the SDK rework
-(`docs/todo/sdk-rework.md` §7) wrote this doc one slice at a
-time. As of 2026-05-27 all three extension points (routing,
-aggregate snapshot policy, retry / error policy) are
-documented. The L1 procedure inventory and the per-port L2
-behaviour notes (§2, §3) are still skeletons; a follow-on pass
-fills them in.
+Status: **incomplete**. As of 2026-05-27 all three extension
+points (routing, aggregate snapshot policy, retry / error
+policy) are documented, plus the PM substrate/wrapper split
+and SNAP-002 module versioning. The L1 procedure inventory
+and the per-port L2 behaviour notes (§2, §3) are still
+skeletons; the first language port (TODO #6) fills them in as
+it surfaces ambiguities.
 
-Reference SQL contract: `docs/sql-contract.md` plus `sql/instructed.sql`.
-Reference SDK: `sdks/typescript/src/`. Reference invariants:
-`docs/invariants.md`.
+Reference SQL contract: `../docs/sql-contract.md` plus
+`../sql/instructed.sql`. Reference SDK: `typescript/src/`.
+Reference invariants: `../docs/invariants.md`.
 
 ---
 
 ## 1. The three-layer model
-
-Per `docs/todo/sdk-rework.md` §1 and §2:
 
   - **L1 — procedure bindings.** One method per `instructed.*`
     stored procedure; SQLSTATE → typed-error translation. **Every
@@ -51,9 +49,9 @@ required surface.
 
 Mirror every `instructed.*` SQL procedure as a method on a
 `Client`-shaped object. SQLSTATE codes are listed in
-`docs/invariants.md`; each maps to a typed error class in your
-language's idiom. See `sdks/typescript/src/client.ts` and
-`errors.ts`.
+`../docs/invariants.md`; each maps to a typed error class in
+your language's idiom. See `typescript/src/client.ts` and
+`typescript/src/errors.ts`.
 
 This section will be filled in with the per-procedure inventory
 during a later pass; the TS `Client` is currently the
@@ -63,7 +61,7 @@ authoritative list.
 
 ## 3. Required L2 behaviours
 
-See `sdks/typescript/src/` for the reference implementations:
+See `typescript/src/` for the reference implementations:
 
   - `aggregate.ts` — `runCommand` (load/execute/append with OCC
     retry; D-0005, AGG-001..010).
@@ -85,8 +83,9 @@ See `sdks/typescript/src/` for the reference implementations:
     etc.) and still be conformant, provided the substrate
     contract above is preserved.
 
-Each is annotated in `docs/todo/sdk-rework.md` §2 with the
-behaviours a port MUST reproduce.
+Each is annotated in the TypeScript reference with the
+behaviours a port MUST reproduce; module-level doc comments
+in each file call out the contract-level obligations.
 
 ---
 
@@ -95,7 +94,7 @@ behaviours a port MUST reproduce.
 The SDK offers three named extension points, each a place where
 application code plugs in either a shipped strategy or its own
 function. Each follows the **contract + standard library + escape
-hatch** pattern (see `docs/todo/sdk-rework.md` §7.1):
+hatch** pattern:
 
   - **Contract.** The function signature the SDK calls. **Required
     core.** Every port reproduces the shape, though language idiom
@@ -151,7 +150,7 @@ implement work-stealing across processes under D-0025. The TS
 reference is `routing-worker.ts:RoutingFn`.
 
 **Standard library (TS).** `PartitionBy` in
-`sdks/typescript/src/partition-by.ts` ships three modes:
+`typescript/src/partition-by.ts` ships three modes:
 
   - `sequential` — single partition (key = `"_default"`); fully
     serial processing.
@@ -347,7 +346,7 @@ discarded.
   - On `{ kind: 'stop' }`, the SDK exits the worker. The work
     item stays `claimed`; the lease expires and another worker
     may pick it up. The SDK does **not** transition the row to
-    `'failed'`. Per `docs/invariants.md` INV-SUB-W-013, the
+    `'failed'`. Per `../docs/invariants.md` INV-SUB-W-013, the
     `'failed'` state is operator-only.
   - A throwing policy is itself a `stop` signal. The SDK surfaces
     via `onError` and exits.

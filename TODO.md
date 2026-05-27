@@ -640,3 +640,41 @@ meaning. Gaps in the numbering are expected.
   - Full conformance suite (171/171 active, +4 new; 3 skipped
     as deferred per ML-0013) and full TS SDK suite (133/133,
     +4 new CON-B tests) green.
+
+---
+
+## 16. Pluggable logger surface for the TypeScript SDK
+
+**Why this exists.** Surfaced during the TODO #2 SDK rework
+(`docs/todo/sdk-rework.md` §2). The SDK currently uses
+`console.warn` directly for non-fatal observable events:
+
+  - Aggregate snapshot-write failure (L3
+    `aggregate-snapshots.ts`; D-0019 best-effort semantics).
+
+There is no pluggable logger interface, so applications can't
+route these to their own structured logger / aggregator / OTEL
+pipeline. The "best-effort" semantics are L2 / required-core;
+the "use `console.warn`" choice is TS-specific.
+
+**What to do.** Two shapes worth considering:
+
+  - **Minimal:** a `LoggerLike` interface with `warn` /
+    `info` / `error` methods, accepted via a top-level
+    SDK option (or per-worker option). Default = `console`.
+  - **Structured:** a single `onEvent` callback receiving
+    typed records (`{ kind: 'snapshot_write_failed',
+    streamUuid, error }` etc.). More work but better-typed.
+
+Today's single warn site is small; we can probably ship the
+minimal shape without much ceremony. Worth doing alongside
+TODO #7 (instructedctl observability) or whenever a concrete
+user complains.
+
+**Output.** A `LoggerLike`-style interface, a default that
+preserves today's `console.warn` behaviour, and the one
+existing warn site re-routed through it. Porting checklist
+notes that the choice of mechanism is idiomatic per language
+(a Python port might use `logging`, a Go port might use
+`slog`, etc.); the *observable events* are required-core.
+
