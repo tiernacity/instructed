@@ -298,8 +298,8 @@ export class Client {
     const res = await this.run<{
       result: "claimed" | "already_claimed";
       last_seen: string | number;
-      claimed_by: string;
-      claim_expires_at: Date | string;
+      claimed_by: string | null;
+      claim_expires_at: Date | string | null;
     }>(
       `SELECT result, last_seen, claimed_by, claim_expires_at
          FROM instructed.claim_subscription($1, $2, $3, $4, $5::jsonb)`,
@@ -317,11 +317,25 @@ export class Client {
       },
     );
     const r = res.rows[0];
+    // 'already_claimed' under one specific contention race returns
+    // (NULL, NULL) for the diagnostic fields -- see the
+    // claim_subscription SQL function and ClaimResult docs. Guard the
+    // toDate() call so we don't synthesise an `expected Date, got
+    // object` error from a legitimate contract outcome.
+    if (r.result === "claimed") {
+      return {
+        result: "claimed",
+        lastSeen: toBigInt(r.last_seen),
+        claimedBy: r.claimed_by as string,
+        claimExpiresAt: toDate(r.claim_expires_at as Date | string),
+      };
+    }
     return {
-      result: r.result,
+      result: "already_claimed",
       lastSeen: toBigInt(r.last_seen),
       claimedBy: r.claimed_by,
-      claimExpiresAt: toDate(r.claim_expires_at),
+      claimExpiresAt:
+        r.claim_expires_at === null ? null : toDate(r.claim_expires_at),
     };
   }
 

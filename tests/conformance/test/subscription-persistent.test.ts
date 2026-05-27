@@ -365,6 +365,85 @@ describe("subscriptions — single-active-subscriber and failover", () => {
     const s = await seedStream(1);
     await rejectsWithCode(() => extend(s, "no-such", "w1"), "IS020");
   });
+
+  // claim_subscription contention race (TODO #15): when the
+  //   FOR UPDATE SKIP LOCKED pre-check finds zero rows because another
+  //   transaction holds the row lock, the unlocked diagnostic re-read
+  //   sees the row in its released between-batches state (NULL
+  //   claimed_by, NULL claim_expires_at under D-0025). The procedure
+  //   MUST return 'already_claimed' with NULL diagnostic fields rather
+  //   than fabricating values. Two dedicated client connections with
+  //   explicit BEGIN pin the race: session 1 holds a SELECT FOR UPDATE
+  //   on the subscriptions row across session 2's claim attempt.
+  test("contention race: 'already_claimed' carries NULL diagnostic fields when SKIP LOCKED finds zero rows", async () => {
+    const s = await seedStream(1);
+    // Create the subscription row in the released state (claim then
+    // release leaves claimed_by / claim_expires_at = NULL). This is
+    // the D-0025 between-batches steady state.
+    await claim(s, "h", "w-setup");
+    await release(s, "h", "w-setup");
+
+    const { Client } = await import("pg");
+    const conn = {
+      host: process.env.PGHOST ?? "127.0.0.1",
+      port: Number(process.env.PGPORT ?? 5432),
+      user: process.env.PGUSER ?? "postgres",
+      password: process.env.PGPASSWORD ?? "postgres",
+      database: process.env.PGDATABASE ?? "instructed_test",
+    };
+    const blocker = new Client(conn);
+    const claimant = new Client(conn);
+    await blocker.connect();
+    await claimant.connect();
+    try {
+      // session 1: hold a row lock on the subscriptions row across
+      // session 2's call. Look the row up by (stream_uuid, name) via a
+      // join to streams; the row exists from the setup above.
+      await blocker.query("BEGIN");
+      const lockRes = await blocker.query<{ stream_id: number }>(
+        `SELECT sub.stream_id
+           FROM instructed.subscriptions sub
+           JOIN instructed.streams st ON st.stream_id = sub.stream_id
+          WHERE st.stream_uuid = $1 AND sub.subscription_name = $2
+          FOR UPDATE OF sub`,
+        [s, "h"],
+      );
+      assert.equal(lockRes.rows.length, 1);
+
+      // session 2: call claim_subscription. The FOR UPDATE SKIP LOCKED
+      // step inside the procedure finds zero rows (blocker holds the
+      // lock); the diagnostic unlocked re-read sees the released
+      // (NULL, NULL) row; the procedure returns 'already_claimed'
+      // with NULL fields.
+      const r = await claimant.query<{
+        result: string;
+        last_seen: string;
+        claimed_by: string | null;
+        claim_expires_at: Date | null;
+      }>(
+        `SELECT * FROM instructed.claim_subscription($1, $2, $3, $4, $5::jsonb)`,
+        [s, "h", "w-claimant", 30, JSON.stringify({})],
+      );
+      assert.equal(r.rows.length, 1);
+      const row = r.rows[0];
+      assert.equal(row.result, "already_claimed");
+      assert.equal(
+        row.claimed_by,
+        null,
+        "claimed_by must be NULL when SKIP LOCKED found zero rows",
+      );
+      assert.equal(
+        row.claim_expires_at,
+        null,
+        "claim_expires_at must be NULL when SKIP LOCKED found zero rows",
+      );
+
+      await blocker.query("ROLLBACK");
+    } finally {
+      await blocker.end();
+      await claimant.end();
+    }
+  });
 });
 
 // =============================================================================

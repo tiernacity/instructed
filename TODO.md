@@ -326,7 +326,14 @@ opportunistically):
 
 ---
 
-## 15. `claim_subscription` returns nullable diagnostic fields the SDK mistypes
+## 15. ~~`claim_subscription` returns nullable diagnostic fields the SDK mistypes~~ — LANDED 2026-05-27
+
+**Done.** See "Done items" entry at the bottom; the body below is
+retained for cross-references that point at TODO #15.
+
+---
+
+## 15 (original). `claim_subscription` returns nullable diagnostic fields the SDK mistypes
 
 **Why this exists.** Surfaced during the 2026-05-26 bank-account
 multi-process work. Starting a second `pm:transfer` worker against
@@ -494,6 +501,30 @@ meaning. Gaps in the numbering are expected.
 
 ## Done items (delete on confirmation)
 
+- **#15 `claim_subscription` returns nullable diagnostic fields the
+  SDK mistypes.** Pure SDK type fix + conformance test + SQL-contract
+  doc clarification; no SQL change. `ClaimResult` in
+  `sdks/typescript/src/types.ts` split into a discriminated union:
+  the `'claimed'` arm carries `claimedBy: string` /
+  `claimExpiresAt: Date` (always populated); the `'already_claimed'`
+  arm widens both to nullable to admit the SUB-A contention race
+  documented inline on the SQL function. `Client.claimSubscription`
+  in `sdks/typescript/src/client.ts` now branches on `result` and
+  guards the `toDate()` call. SQL-side audit confirmed no other
+  wrapper has the same off-by-one: `extend_subscription_claim` /
+  `extend_work_item_claim` raise on lease loss (never return NULL);
+  `claim_work_item` returns zero rows (already handled as `null`).
+  Deterministic conformance test added in
+  `tests/conformance/test/subscription-persistent.test.ts` using two
+  dedicated `pg.Client` connections: the blocker holds a SELECT FOR
+  UPDATE on the subscriptions row while the claimant calls
+  `claim_subscription` -- the SKIP LOCKED step finds zero rows, the
+  diagnostic unlocked re-read sees the released `(NULL, NULL)` state
+  from D-0025, and the procedure must return `'already_claimed'`
+  with NULL fields. `docs/sql-contract.md` updated to call out the
+  nullable diagnostic fields. Full conformance suite (169/169, +1
+  new) and full TS SDK suite (131/131) green. First piece of the
+  TODO #2 SDK rework; classified in `docs/todo/sdk-rework.md`.
 - **#13 `streams_stream_uuid_key` race in `append_to_stream`.**
   Fixed by wrapping the `'exact'` V=0 missing-stream-create
   INSERT in `sql/instructed.sql` with a `unique_violation`

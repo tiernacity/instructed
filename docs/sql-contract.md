@@ -72,7 +72,7 @@ raises it. SDKs that see it have bypassed the contract.
 
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
-| `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire routing-side lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else or the row is being concurrently written. Uses MVCC pre-check + `FOR UPDATE SKIP LOCKED` internally per [D-0025](decisions.md#d-0025) so contended callers never queue on a row lock. |
+| `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire routing-side lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else or the row is being concurrently written. Uses MVCC pre-check + `FOR UPDATE SKIP LOCKED` internally per [D-0025](decisions.md#d-0025) so contended callers never queue on a row lock. In the `'already_claimed'` outcome `claimed_by` and `claim_expires_at` are diagnostic and **may be NULL** when the `FOR UPDATE SKIP LOCKED` step finds the row locked: the released-between-batches D-0025 state and the row-deleted-between-checks race both surface as NULL fields. SDK wrappers MUST type both fields as nullable in the `'already_claimed'` branch. |
 | `extend_subscription_claim`     | `(claim_expires_at)`     | Routing-worker heartbeat |
 | `release_subscription`          | `void`                   | Clean release; cursor and queue preserved |
 | `read_subscription_position`    | `(last_seen)`            | Read routing cursor |
