@@ -30,7 +30,7 @@ import pg from "pg";
 import {
   Client,
   routingFnForPartitionBy,
-  type ProjectionDefinition,
+  type ProjectionWorkerDefinition,
   type RecordedEvent,
   type RoutingDefinition,
 } from "../../sdks/typescript/src/index.ts";
@@ -289,7 +289,7 @@ async function main(): Promise<number> {
       routeFn: routingFnForPartitionBy({ kind: "sequential" }),
       startFrom: "origin",
     };
-    const projDef: ProjectionDefinition = {
+    const projDef: ProjectionWorkerDefinition = {
       name: projectionName,
       stream: "$all",
       handler: (e: RecordedEvent) => balanceProj.handle(e),

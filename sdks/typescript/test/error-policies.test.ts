@@ -20,6 +20,7 @@ import {
   retryUpTo,
   startProcessingWorker,
   type ErrorPolicy,
+  type Event,
 } from "../src/index.ts";
 import type pg from "pg";
 
@@ -169,7 +170,7 @@ async function append(streamPrefix: string, n: number): Promise<bigint[]> {
     stream,
     expected.any,
     Array.from({ length: n }, (_, i) => ({
-      event_type: `E${i}`,
+      type: `E${i}`,
       data: { i },
     })),
   );
@@ -225,7 +226,7 @@ describe("processing worker — PolicyState lifecycle (slice 3)", () => {
       };
     };
 
-    const w = startProcessingWorker<unknown, number>(client, {
+    const w = startProcessingWorker<Event, number>(client, {
       name,
       handle: async () => {
         throw new Error("always-fails");

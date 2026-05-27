@@ -13,11 +13,8 @@
 import pg from "pg";
 import { Instructed } from "instructed-sdk";
 import { PG_URL, installSignalHandlers } from "../src/common.ts";
-import {
-  BALANCES_SUBSCRIPTION_NAME,
-  balancesProjection,
-  readBalances,
-} from "../src/balances.ts";
+import { BALANCES_SUBSCRIPTION_NAME, balancesProjection, readBalances }
+  from "../src/balances.ts";
 
 const PRINT_INTERVAL_MS = 2_000;
 
@@ -28,16 +25,12 @@ async function main(): Promise<void> {
   const pool = new pg.Pool({ connectionString: PG_URL });
 
   const app = new Instructed({ db: PG_URL });
-  app.registerProjection(
-    BALANCES_SUBSCRIPTION_NAME,
-    balancesProjection(pool),
-    {
-      pollInterval: 50,
-      heartbeatInterval: 1_000,
-      onError: (err) =>
-        process.stderr.write(`  [Balances error] ${err.message}\n`),
-    },
-  );
+  app.registerProjection(balancesProjection(pool), {
+    pollInterval: 50,
+    heartbeatInterval: 1_000,
+    onError: (err: Error) =>
+      process.stderr.write(`  [Balances error] ${err.message}\n`),
+  });
 
   const worker = await app.startWorker();
   process.stdout.write(

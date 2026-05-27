@@ -16,7 +16,7 @@
 import { Instructed } from "instructed-sdk";
 import type {
   DispatchedCommand,
-  RegisterProcessManagerInput,
+  ProcessManagerDefinition,
 } from "instructed-sdk";
 import { PG_URL, installSignalHandlers } from "../src/common.ts";
 import { Account } from "../src/account.ts";
@@ -33,20 +33,27 @@ import {
  * is a deployment concern, not a domain concern.
  */
 function withTrace(
-  base: RegisterProcessManagerInput<TransferPmStage>,
-): RegisterProcessManagerInput<TransferPmStage> {
+  base: ProcessManagerDefinition<TransferPmStage>,
+): ProcessManagerDefinition<TransferPmStage> {
   const baseHandle = base.handle;
   return {
     ...base,
     async handle(state, event, ctx) {
-      const tag = `${event.event_type}#${event.event_number}`;
+      const tag = `${event.type}#${event.event_number}`;
       try {
         const result = await baseHandle(state, event, ctx);
         const cmds = result.commands ?? [];
         const cmdSummary = cmds
           .map((c: DispatchedCommand) => {
-            const k = (c.command as { kind?: string }).kind ?? "?";
-            return `${c.aggregate.type}.${k}(${c.streamUuid})`;
+            // DispatchedCommand is a union: explicit
+            // (`{ aggregate, streamUuid, command }`) or lean
+            // (a bare `Command` resolved via the router at
+            // dispatch time). The trace logger handles both.
+            if ("aggregate" in c) {
+              const k = (c.command as { kind?: string }).kind ?? "?";
+              return `${c.aggregate.type}.${k}(${c.streamUuid})`;
+            }
+            return `${c.type}`;
           })
           .join(", ") || "(no commands)";
         const tail = result.complete ? " [complete]" : "";
@@ -66,16 +73,12 @@ async function main(): Promise<void> {
   const app = new Instructed({ db: PG_URL });
   app.registerAggregate(Account);
   app.registerAggregate(Transfer);
-  app.registerProcessManager(
-    TRANSFER_PM_NAME,
-    withTrace(transferProcessManager()),
-    {
-      pollInterval: 50,
-      heartbeatInterval: 1_000,
-      onError: (err) =>
-        process.stderr.write(`  [PM error] ${err.message}\n`),
-    },
-  );
+  app.registerProcessManager(withTrace(transferProcessManager()), {
+    pollInterval: 50,
+    heartbeatInterval: 1_000,
+    onError: (err: Error) =>
+      process.stderr.write(`  [PM error] ${err.message}\n`),
+  });
 
   const worker = await app.startWorker();
   process.stdout.write(`[${TRANSFER_PM_NAME}] worker started\n`);

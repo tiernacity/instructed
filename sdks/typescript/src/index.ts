@@ -50,6 +50,12 @@ export {
   type PartitionBy,
 } from "./partition-by.ts";
 
+// L3 routing-function combinators (composable wrappers over the L2
+// `RoutingFn`). `onlyTypes` is the type-set filter every projection
+// and PM seems to want; further combinators get added here if a
+// concrete use case demands them.
+export { onlyTypes } from "./routing-helpers.ts";
+
 // `runCommandWithSnapshots`: L3 orchestrator that wraps the L2
 // `runCommandAndApply` primitive with best-effort snapshot writes
 // per `def.snapshotPolicy`. The `Instructed` facade and the PM
@@ -72,7 +78,18 @@ export {
   type PmHandlerContext,
   type PmWorkerOptions,
   type DispatchedCommand,
+  type DispatchedCommandExplicit,
 } from "./pm-worker.ts";
+
+// Command router (L3). Resolves `Command`s to
+// `(aggregateType, aggregateId)`; consumed by `Instructed.dispatch`'s
+// lean overload and by `startPmWorker` for the lean
+// `DispatchedCommand` shape.
+export {
+  commandRouter,
+  type CommandRouter,
+  type CommandRoute,
+} from "./command-router.ts";
 
 // Retry/error-policy standard library (L3). The contract
 // (`ErrorPolicy<PolicyState>`) and the observable default
@@ -114,7 +131,7 @@ export {
   type InstructedOptions,
   type InstructedDefaults,
   type RegistrationOptions,
-  type RegisterProjectionInput,
-  type RegisterProcessManagerInput,
+  type ProjectionDefinition,
+  type ProcessManagerDefinition,
   type DispatchOptions,
 } from "./instructed.ts";

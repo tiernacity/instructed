@@ -18,8 +18,8 @@
 
 import type pg from "pg";
 import type {
+  ProjectionDefinition,
   RecordedEvent,
-  RegisterProjectionInput,
   RoutingFn,
 } from "instructed-sdk";
 
@@ -37,21 +37,22 @@ const BALANCES_EVENT_TYPES = new Set([
  * workers; the same account is always serial.
  */
 const balancesRouteFn: RoutingFn = (event) =>
-  BALANCES_EVENT_TYPES.has(event.event_type)
+  BALANCES_EVENT_TYPES.has(event.type)
     ? { partitionKey: event.stream_uuid }
     : "ignore";
 
 export function balancesProjection(
   pool: pg.Pool,
-): RegisterProjectionInput {
+): ProjectionDefinition {
   return {
+    type: BALANCES_SUBSCRIPTION_NAME,
     stream: "$all",
     routeFn: balancesRouteFn,
     async handler(event: RecordedEvent) {
       const n = event.event_number;
       const stream = event.stream_uuid;
 
-      switch (event.event_type) {
+      switch (event.type) {
         case "AccountOpened": {
           const { owner } = event.data as { owner: string };
           // First event on the stream -- INSERT, with the same

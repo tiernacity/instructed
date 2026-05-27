@@ -37,17 +37,8 @@ export function requireArg(argv: string[], index: number, name: string): string 
   return v;
 }
 
-/**
- * Stream-key helpers. Stream identifiers are arbitrary strings on
- * the SDK side, so the example uses human names directly --
- * `account-alice`, `transfer-<random-id>`. Production apps that
- * want global uniqueness across systems typically use UUIDs;
- * either works.
- */
-export function accountStream(name: string): string {
-  return `account-${name}`;
-}
-
-export function transferStream(transferId: string): string {
-  return `transfer-${transferId}`;
-}
+// Stream-key helpers removed: identifying aggregates by their
+// (type, id) pair and letting the SDK derive the stream is the
+// preferred application-level interface; see `AggregateDefinition.streamName`.
+// The Account aggregate defaults to `Account-<id>`; Transfer to
+// `Transfer-<id>`.

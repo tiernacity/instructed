@@ -55,13 +55,13 @@ export const Account: AggregateDefinition<
       case "Open":
         if (state.opened) throw new Error("account already open");
         return {
-          event_type: "AccountOpened",
+          type: "AccountOpened",
           data: { owner: command.owner },
         };
       case "Deposit":
         if (!state.opened) throw new Error("account not open");
         return {
-          event_type: "Deposited",
+          type: "Deposited",
           data: { amount: command.amount, transferId: command.transferId },
         };
       case "Withdraw":
@@ -72,7 +72,7 @@ export const Account: AggregateDefinition<
           // its routes and stops the process without ever needing
           // a compensating command.
           return {
-            event_type: "WithdrawalRefused",
+            type: "WithdrawalRefused",
             data: {
               reason: "insufficient funds",
               amount: command.amount,
@@ -81,7 +81,7 @@ export const Account: AggregateDefinition<
           };
         }
         return {
-          event_type: "Withdrawn",
+          type: "Withdrawn",
           data: {
             amount: command.amount,
             transferId: command.transferId,

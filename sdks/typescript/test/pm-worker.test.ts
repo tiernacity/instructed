@@ -67,7 +67,7 @@ async function appendN(
   const rows = await client.appendToStream(
     stream,
     expected.any,
-    events.map((e) => ({ event_type: e.type, data: e.data })),
+    events.map((e) => ({ type: e.type, data: e.data })),
   );
   return { stream, ens: rows.map((r) => r.event_number) };
 }
@@ -164,7 +164,7 @@ function noteAggregate(): AggregateDefinition<
         data: { from: c.from, tag: c.tag },
       };
       seen.push(ev);
-      return { event_type: ev.type, data: ev.data };
+      return { type: ev.type, data: ev.data };
     },
     apply(s, _e) {
       return { count: s.count + 1 };
@@ -182,10 +182,10 @@ interface PmState {
 
 function pmDef(
   name: string,
-  overrides: Partial<PmDefinition<PmState, { tag: string }>> = {},
-): PmDefinition<PmState, { tag: string }> {
+  overrides: Partial<PmDefinition<PmState, NoteEvent>> = {},
+): PmDefinition<PmState, NoteEvent> {
   return {
-    name,
+    type: name,
     // `stream` defaulted via spread by the caller; required so the PM
     // worker and the routing worker agree on the source stream (the
     // PM worker's `claim_work_item` is keyed on (stream, name, shard)).
@@ -256,7 +256,7 @@ describe("startPmWorker — multi-command dispatch", () => {
     const { stream } = await appendN("trig", [{ type: "T", data: { tag: "x" } }]);
 
     let triggeringEventId = "";
-    const def: PmDefinition<PmState, { tag: string }> = {
+    const def: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       handle: (_state, event) => {
         triggeringEventId = event.event_id;
@@ -320,7 +320,7 @@ describe("startPmWorker — complete: true (PM-F terminal)", () => {
       { type: "T", data: { tag: "b" } },
       { type: "T", data: { tag: "TERM" } },
     ]);
-    const def: PmDefinition<PmState, { tag: string }> = {
+    const def: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       handle: (_s, event) => {
         if ((event.data as { tag: string }).tag === "TERM") {
@@ -404,11 +404,11 @@ describe("startPmWorker — rebuild on missing snapshot", () => {
     // rebuild state by folding the two prior `done` events through
     // `apply` before staging the third claimed event.
     const more = await client.appendToStream(stream, expected.any, [
-      { event_type: "T", data: { tag: "c" } },
+      { type: "T", data: { tag: "c" } },
     ]);
     const e3 = more[0].event_number;
 
-    const def2: PmDefinition<PmState, { tag: string }> = {
+    const def2: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       apply: (s, ev) => ({
         applied: [...s.applied, ev.event_number.toString()],
@@ -451,7 +451,7 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
     ]);
 
     // Phase 1: writer tags snapshots with version "v1".
-    const defV1: PmDefinition<PmState, { tag: string }> = {
+    const defV1: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       snapshotModuleVersion: "v1",
     };
@@ -480,12 +480,12 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
     // "v2", which should cause it to rebuild via apply from origin
     // rather than trusting the v1 snapshot's data.
     const more = await client.appendToStream(stream, expected.any, [
-      { event_type: "T", data: { tag: "c" } },
+      { type: "T", data: { tag: "c" } },
     ]);
     const e3 = more[0].event_number;
 
     let loadedFromSnapshot = false;
-    const defV2: PmDefinition<PmState, { tag: string }> = {
+    const defV2: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       snapshotModuleVersion: "v2",
       apply: (s, ev) => ({
@@ -556,7 +556,7 @@ describe("startPmWorker — dispatch failure leaves work-item claimed", () => {
       },
       apply: (s) => s,
     };
-    const def: PmDefinition<PmState, { tag: string }> = {
+    const def: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       handle: (_state, event) => ({
         commands: [

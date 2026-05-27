@@ -94,8 +94,8 @@ describe("waitForProjection -- happy path", () => {
     );
     try {
       const appended = await client.appendToStream(stream, expected.noStream, [
-        { event_type: "A", data: {} },
-        { event_type: "B", data: {} },
+        { type: "A", data: {} },
+        { type: "B", data: {} },
       ]);
       const subs: SubscriptionRef[] = [{ stream: "$all", name }];
       const start = Date.now();
@@ -123,7 +123,7 @@ describe("waitForProjection -- happy path", () => {
     const name = `p-${randomUUID().slice(0, 8)}`;
 
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "X", data: {} },
+      { type: "X", data: {} },
     ]);
     const worker = startProjPair(
       client,
@@ -154,7 +154,7 @@ describe("waitForProjection -- happy path", () => {
     await waitForProjection(client, [], [{ stream: "$all", name: "irrelevant" }]);
     const stream = randomUUID();
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "A", data: {} },
+      { type: "A", data: {} },
     ]);
     // Empty subscription list returns immediately even if there's
     // appended events.
@@ -179,8 +179,8 @@ describe("waitForProjection — timeout", () => {
     );
 
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "A", data: {} },
-      { event_type: "B", data: {} },
+      { type: "A", data: {} },
+      { type: "B", data: {} },
     ]);
 
     const start = Date.now();
@@ -209,7 +209,7 @@ describe("waitForProjection — timeout", () => {
   test("non-existent subscription times out (treated as not caught up)", async () => {
     const stream = randomUUID();
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "A", data: {} },
+      { type: "A", data: {} },
     ]);
     await assert.rejects(
       () =>
@@ -248,8 +248,8 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
     const stream = randomUUID();
     const name = `subA-wait-${randomUUID().slice(0, 8)}`;
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "A", data: {} },
-      { event_type: "B", data: {} },
+      { type: "A", data: {} },
+      { type: "B", data: {} },
     ]);
 
     // Block the handler so work-items stay `claimed` and the
@@ -314,7 +314,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
     const stream = randomUUID();
     const name = `subA-fail-${randomUUID().slice(0, 8)}`;
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "A", data: {} },
+      { type: "A", data: {} },
     ]);
 
     // Just routing -- no processing worker; we'll set the work-item
@@ -416,7 +416,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
       // routing and processing actually happen; it must not see a
       // stale "caught up" from before the append.
       const appended = await client.appendToStream(stream, expected.noStream, [
-        { event_type: "R", data: {} },
+        { type: "R", data: {} },
       ]);
       await waitForProjection(
         client,
@@ -453,7 +453,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
     // claim_subscription (IS003), so append first, then start the
     // workers (mirrors the pattern used by the timeout tests).
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { event_type: "A", data: {} },
+      { type: "A", data: {} },
     ]);
     const worker = startProjPair(client, name, stream, async () => {});
     try {
@@ -481,7 +481,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
     const appended = await client.appendToStream(
       appendedStream,
       expected.noStream,
-      [{ event_type: "A", data: {} }],
+      [{ type: "A", data: {} }],
     );
 
     const start = Date.now();
@@ -521,7 +521,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
     const appended = await client.appendToStream(
       appendedStream,
       expected.noStream,
-      [{ event_type: "A", data: {} }],
+      [{ type: "A", data: {} }],
     );
     const worker = startProjPair(client, validName, appendedStream, async () => {});
     try {
@@ -551,7 +551,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
     const worker = startProjPair(client, name, "$all", async () => {});
     try {
       const appended = await client.appendToStream(stream, expected.noStream, [
-        { event_type: "A", data: {} },
+        { type: "A", data: {} },
       ]);
       // $all ref is always valid; guard must not fire.
       await waitForProjection(

@@ -88,7 +88,7 @@ export const Transfer: AggregateDefinition<
           throw new Error(`transfer already ${state.stage}`);
         }
         return {
-          event_type: "TransferRequested",
+          type: "TransferRequested",
           data: {
             from: command.from,
             to: command.to,
@@ -104,7 +104,7 @@ export const Transfer: AggregateDefinition<
           );
         }
         return {
-          event_type: "TransferCompleted",
+          type: "TransferCompleted",
           data: { transferId: command.transferId },
         };
       case "MarkFailed":
@@ -113,7 +113,7 @@ export const Transfer: AggregateDefinition<
           throw new Error(`cannot fail transfer in stage '${state.stage}'`);
         }
         return {
-          event_type: "TransferFailed",
+          type: "TransferFailed",
           data: { transferId: command.transferId, reason: command.reason },
         };
     }

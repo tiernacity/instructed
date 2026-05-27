@@ -54,7 +54,7 @@ async function appendN(
     stream,
     expected.any,
     Array.from({ length: n }, (_, i) => ({
-      event_type: `E${i}`,
+      type: `E${i}`,
       data: { i },
     })),
   );
@@ -120,7 +120,7 @@ describe("routing worker — happy path", () => {
     await appendN("h", 2);
     const w = startRoutingWorker(client, {
       name,
-      routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }),
+      routeFn: (e) => ({ partitionKey: `p-${e.type}` }),
     });
     try {
       await waitFor(async () => {
@@ -145,10 +145,10 @@ describe("routing worker — happy path", () => {
   test('"ignore" decisions produce no rows but cursor still advances', async () => {
     const name = `routing-ignore-${randomUUID().slice(0, 8)}`;
     const { ens } = await appendN("i", 3);
-    const w = startRoutingWorker<unknown>(client, {
+    const w = startRoutingWorker(client, {
       name,
       routeFn: (e): RoutingDecision =>
-        e.event_type === "E1" ? { partitionKey: "p" } : "ignore",
+        e.type === "E1" ? { partitionKey: "p" } : "ignore",
     });
     try {
       await waitFor(async () => {
@@ -198,7 +198,7 @@ describe("routing worker — determinism / idempotency", () => {
     await appendN("r", 3);
     const w1 = startRoutingWorker(client, {
       name,
-      routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }),
+      routeFn: (e) => ({ partitionKey: `p-${e.type}` }),
     });
     await waitFor(async () => {
       const items = await workItems(name);
@@ -211,7 +211,7 @@ describe("routing worker — determinism / idempotency", () => {
     // Second worker, same definition, same data — should be a no-op.
     const w2 = startRoutingWorker(client, {
       name,
-      routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }),
+      routeFn: (e) => ({ partitionKey: `p-${e.type}` }),
     });
     try {
       // Give it time to claim, poll once, and idle.
@@ -242,13 +242,13 @@ describe("routing worker — crash safety", () => {
     const block = new Promise<void>((r) => {
       release = r;
     });
-    const w = startRoutingWorker<unknown>(
+    const w = startRoutingWorker(
       client,
       {
         name,
         routeFn: async (e): Promise<RoutingDecision> => {
           routeFnCalls += 1;
-          if (e.event_type === `E${blockEvent}`) {
+          if (e.type === `E${blockEvent}`) {
             await block;
           }
           return { partitionKey: "p" };
@@ -381,7 +381,7 @@ describe("routing worker — race safety", () => {
         const s = `race-${i}-${randomUUID().slice(0, 8)}`;
         for (let k = 0; k < 30; k++) {
           await client.appendToStream(s, expected.any, [
-            { event_type: "X", data: { i, k } },
+            { type: "X", data: { i, k } },
           ]);
         }
       });
@@ -424,12 +424,12 @@ describe("routing worker — lifecycle", () => {
     const errorsB: Error[] = [];
     const wA = startRoutingWorker(
       client,
-      { name, routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }) },
+      { name, routeFn: (e) => ({ partitionKey: `p-${e.type}` }) },
       { workerId: "A", onError: (e) => errorsA.push(e) },
     );
     const wB = startRoutingWorker(
       client,
-      { name, routeFn: (e) => ({ partitionKey: `p-${e.event_type}` }) },
+      { name, routeFn: (e) => ({ partitionKey: `p-${e.type}` }) },
       { workerId: "B", onError: (e) => errorsB.push(e) },
     );
     try {
@@ -465,12 +465,12 @@ describe("routing worker — lifecycle", () => {
       release = r;
     });
     let blocked = false;
-    const w = startRoutingWorker<unknown>(
+    const w = startRoutingWorker(
       client,
       {
         name,
         routeFn: async (e): Promise<RoutingDecision> => {
-          if (e.event_type === "E0" && !blocked) {
+          if (e.type === "E0" && !blocked) {
             blocked = true;
             await block;
           }

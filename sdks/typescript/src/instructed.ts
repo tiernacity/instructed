@@ -44,6 +44,7 @@ import * as pg from "pg";
 import { Client } from "./client.ts";
 import {
   DEFAULT_RETRY_BUDGET,
+  prefixType,
   type AggregateDefinition,
   type DomainEvent,
   type RunCommandOptions,
@@ -68,6 +69,7 @@ import {
   startPmWorker,
   type PmDefinition,
 } from "./pm-worker.ts";
+import type { CommandRouter } from "./command-router.ts";
 import type { ErrorPolicy } from "./processing-worker.ts";
 import {
   waitForProjection,
@@ -75,6 +77,8 @@ import {
 } from "./consistency.ts";
 import { UnknownAggregateType } from "./errors.ts";
 import type {
+  Event,
+  Command,
   AppendedEvent,
   ExpectedVersion,
   Queryable,
@@ -126,14 +130,16 @@ export interface DispatchOptions {
 }
 
 /**
- * Projection registration shape (PRJ-A, SUB-A slice 9).
+ * Projection definition (PRJ-A, SUB-A slice 9). Identified by
+ * `type`, which doubles as the subscription name.
  *
  * `partitionBy` and `routeFn` are mutually exclusive. Default is
  * `{ kind: 'sequential' }`. A projection that needs routing-side
- * filtering (the legacy `selector` parameter's role) passes
- * `routeFn: (event) => 'ignore' | { partitionKey }`.
+ * filtering passes `routeFn: (event) => 'ignore' | { partitionKey }`.
  */
-export interface RegisterProjectionInput<E = unknown> {
+export interface ProjectionDefinition<E extends Event = Event> {
+  /** Projection type — doubles as the subscription name. */
+  type: string;
   /** Source stream; default `$all`. */
   stream?: string;
   /** Sugar over a `RoutingFn`. */
@@ -156,20 +162,20 @@ export interface RegisterProjectionInput<E = unknown> {
 }
 
 /**
- * Process-manager registration shape (PM-F + PM-C, SUB-A slice 9).
+ * Process-manager definition (PM-F + PM-C, SUB-A slice 9). Identified
+ * by `type`, which doubles as the subscription name and the snapshot
+ * source_type prefix — same role as `AggregateDefinition.type`.
  *
- * The legacy single-`handle` signature is removed. `routeFn` is the
- * PM-F routing primitive (`'ignore' | { partitionKey }`); `apply` is
- * the PM-C pure state fold; `handle` produces commands and/or signals
- * partition completion (`complete: true`).
- *
- * The `any` for `PmDefinition`'s `PolicyState` generic forfeits
- * state-slot type-safety at the facade so users may register
- * stateful policies; see `RegisterProjectionInput.errorPolicy`
- * note.
+ * `routeFn` is the PM-F routing primitive (`'ignore' | { partitionKey }`);
+ * `apply` is the PM-C pure state fold; `handle` produces commands
+ * and/or signals partition completion (`complete: true`).
  */
-export interface RegisterProcessManagerInput<S, E = unknown>
-  extends Omit<PmDefinition<S, E, any>, "name"> {
+export interface ProcessManagerDefinition<S, E extends Event = Event>
+  extends Omit<PmDefinition<S, E, any>, "type" | "streamName"> {
+  /** PM type — doubles as the subscription name. */
+  type: string;
+  /** Optional source_uuid encoding (see {@link PmDefinition.streamName}). */
+  streamName?(partitionKey: string): string;
   /** PM-F routing decision per event. */
   routeFn: RoutingFn<E>;
   /** Honoured only on the first claim that creates the subscription. */
@@ -177,16 +183,14 @@ export interface RegisterProcessManagerInput<S, E = unknown>
 }
 
 interface RegisteredProjection {
-  name: string;
   stream: string;
-  input: RegisterProjectionInput<any>;
+  def: ProjectionDefinition<any>;
   opts: RegistrationOptions;
 }
 
 interface RegisteredProcessManager {
-  name: string;
   stream: string;
-  input: RegisterProcessManagerInput<any, any>;
+  def: ProcessManagerDefinition<any, any>;
   opts: RegistrationOptions;
 }
 
@@ -208,6 +212,7 @@ export class Instructed {
   >();
   private readonly projections: RegisteredProjection[] = [];
   private readonly processManagers: RegisteredProcessManager[] = [];
+  private commandRouter_: CommandRouter | null = null;
 
   private worker: RunningWorker | null = null;
   private closed = false;
@@ -253,47 +258,117 @@ export class Instructed {
     this.aggregates.set(def.type, def);
   }
 
-  registerProjection<E = unknown>(
-    name: string,
-    input: RegisterProjectionInput<E>,
+  registerProjection<E extends Event = Event>(
+    def: ProjectionDefinition<E>,
     opts: RegistrationOptions = {},
   ): void {
-    if (input.partitionBy !== undefined && input.routeFn !== undefined) {
+    if (def.partitionBy !== undefined && def.routeFn !== undefined) {
       throw new Error(
-        `Instructed.registerProjection("${name}"): \`partitionBy\` and \`routeFn\` are mutually exclusive`,
+        `Instructed.registerProjection("${def.type}"): \`partitionBy\` and \`routeFn\` are mutually exclusive`,
       );
     }
     this.projections.push({
-      name,
-      stream: input.stream ?? "$all",
-      input,
+      stream: def.stream ?? "$all",
+      def,
       opts,
     });
   }
 
-  registerProcessManager<S, E = unknown>(
-    name: string,
-    input: RegisterProcessManagerInput<S, E>,
+  registerProcessManager<S, E extends Event = Event>(
+    def: ProcessManagerDefinition<S, E>,
     opts: RegistrationOptions = {},
   ): void {
     this.processManagers.push({
-      name,
-      stream: input.stream ?? "$all",
-      input,
+      stream: def.stream ?? "$all",
+      def,
       opts,
     });
+  }
+
+  /**
+   * Register the application's command router. The router resolves
+   * a {@link Command} to `(aggregateType, aggregateId)`; the facade
+   * uses it both for the lean `dispatch(command, opts)` overload
+   * and for the PM worker's lean {@link DispatchedCommand} shape
+   * (PM `handle` returning bare commands instead of the explicit
+   * `{ aggregate, streamUuid, command }`).
+   *
+   * Build a router via {@link commandRouter} (static map) or
+   * provide your own function.
+   */
+  registerCommandRouter(router: CommandRouter): void {
+    if (this.commandRouter_ !== null) {
+      throw new Error(
+        "Instructed.registerCommandRouter: a command router is already registered",
+      );
+    }
+    this.commandRouter_ = router;
   }
 
   // ---- dispatch ----
 
-  async dispatch<C>(
-    aggregateType: string,
-    streamUuid: string,
+  /**
+   * Dispatch a command. Two overloads:
+   *
+   *   - **Lean:** `dispatch(command, opts?)` — the registered
+   *     command router resolves the command to
+   *     `(aggregateType, aggregateId)`. Recommended.
+   *   - **Explicit:** `dispatch(aggregateType, id, command, opts?)`
+   *     — caller names the aggregate and id directly; bypasses
+   *     the router.
+   *
+   * In both cases the underlying stream name is derived from the
+   * aggregate definition (`def.streamName(id)`, defaulting to
+   * {@link prefixType}). Application code identifies aggregates
+   * by `(type, id)`; stream names are a storage-layer concern.
+   */
+  dispatch<C extends Command>(
     command: C,
-    opts: DispatchOptions = {},
+    opts?: DispatchOptions,
+  ): Promise<AppendedEvent[]>;
+  dispatch<C>(
+    aggregateType: string,
+    id: string,
+    command: C,
+    opts?: DispatchOptions,
+  ): Promise<AppendedEvent[]>;
+  async dispatch(
+    a: unknown,
+    b?: unknown,
+    c?: unknown,
+    d?: unknown,
   ): Promise<AppendedEvent[]> {
+    let aggregateType: string;
+    let id: string;
+    let command: unknown;
+    let opts: DispatchOptions;
+
+    if (typeof a === "string") {
+      // Explicit overload: dispatch(type, id, command, opts?)
+      aggregateType = a;
+      id = b as string;
+      command = c;
+      opts = (d as DispatchOptions | undefined) ?? {};
+    } else {
+      // Lean overload: dispatch(command, opts?). Route via router.
+      if (!this.commandRouter_) {
+        throw new Error(
+          "Instructed.dispatch: no command router registered. Call " +
+            "`registerCommandRouter()` first, or use the explicit " +
+            "`dispatch(aggregateType, id, command, opts?)` overload.",
+        );
+      }
+      const route = this.commandRouter_(a as Command);
+      aggregateType = route.aggregateType;
+      id = route.aggregateId;
+      command = a;
+      opts = (b as DispatchOptions | undefined) ?? {};
+    }
+
     const def = this.aggregates.get(aggregateType);
     if (!def) throw new UnknownAggregateType(aggregateType);
+
+    const streamUuid = (def.streamName ?? prefixType(def.type))(id);
 
     const runOpts: RunCommandOptions = {
       retryBudget: opts.retryBudget ?? this.defaults.retryBudget,
@@ -339,19 +414,19 @@ export class Instructed {
       const routingOpts = this.routingOpts(p.opts, opts.workerId);
       const processingOpts = this.processingOpts(p.opts, opts.workerId);
       const routing = startRoutingWorker(this.persistClient_, {
-        name: p.name,
+        name: p.def.type,
         stream: p.stream,
         routeFn,
-        ...(p.input.startFrom !== undefined
-          ? { startFrom: p.input.startFrom }
+        ...(p.def.startFrom !== undefined
+          ? { startFrom: p.def.startFrom }
           : {}),
       }, routingOpts);
       const processing = startProjectionWorker(this.persistClient_, {
-        name: p.name,
+        name: p.def.type,
         stream: p.stream,
-        handler: p.input.handler,
-        ...(p.input.errorPolicy !== undefined
-          ? { errorPolicy: p.input.errorPolicy }
+        handler: p.def.handler,
+        ...(p.def.errorPolicy !== undefined
+          ? { errorPolicy: p.def.errorPolicy }
           : {}),
       }, processingOpts);
       workers.push(routing, processing);
@@ -363,30 +438,43 @@ export class Instructed {
       const routingOpts = this.routingOpts(pm.opts, opts.workerId);
       const processingOpts = this.processingOpts(pm.opts, opts.workerId);
       const routing = startRoutingWorker(this.persistClient_, {
-        name: pm.name,
+        name: pm.def.type,
         stream: pm.stream,
-        routeFn: pm.input.routeFn,
-        ...(pm.input.startFrom !== undefined
-          ? { startFrom: pm.input.startFrom }
+        routeFn: pm.def.routeFn,
+        ...(pm.def.startFrom !== undefined
+          ? { startFrom: pm.def.startFrom }
           : {}),
       }, routingOpts);
       const pmDef: PmDefinition<any, any> = {
-        name: pm.name,
+        type: pm.def.type,
         stream: pm.stream,
-        initialState: pm.input.initialState,
-        apply: pm.input.apply,
-        handle: pm.input.handle,
-        ...(pm.input.snapshotModuleVersion !== undefined
-          ? { snapshotModuleVersion: pm.input.snapshotModuleVersion }
+        initialState: pm.def.initialState,
+        apply: pm.def.apply,
+        handle: pm.def.handle,
+        ...(pm.def.streamName !== undefined
+          ? { streamName: pm.def.streamName }
           : {}),
-        ...(pm.input.errorPolicy !== undefined
-          ? { errorPolicy: pm.input.errorPolicy }
+        ...(pm.def.snapshotModuleVersion !== undefined
+          ? { snapshotModuleVersion: pm.def.snapshotModuleVersion }
           : {}),
+        ...(pm.def.errorPolicy !== undefined
+          ? { errorPolicy: pm.def.errorPolicy }
+          : {}),
+      };
+      // Wire the L3 routing helpers in so PM `handle` can return
+      // lean commands (bare `Command`s) that the worker resolves
+      // via the registered router + aggregate registry.
+      const pmOpts = {
+        ...processingOpts,
+        ...(this.commandRouter_ !== null
+          ? { router: this.commandRouter_ }
+          : {}),
+        aggregates: this.aggregates,
       };
       const processing = startPmWorker(
         this.persistClient_,
         pmDef,
-        processingOpts,
+        pmOpts,
       );
       workers.push(routing, processing);
     }
@@ -431,10 +519,10 @@ export class Instructed {
 
   private resolveProjectionRouteFn(
     p: RegisteredProjection,
-  ): RoutingFn<unknown> {
-    if (p.input.routeFn) return p.input.routeFn;
-    const pb: PartitionBy<unknown> =
-      p.input.partitionBy ?? { kind: "sequential" };
+  ): RoutingFn {
+    if (p.def.routeFn) return p.def.routeFn;
+    const pb: PartitionBy =
+      p.def.partitionBy ?? { kind: "sequential" };
     return routingFnForPartitionBy(pb);
   }
 

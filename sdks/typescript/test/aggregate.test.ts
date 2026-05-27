@@ -61,7 +61,7 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
     execute(state, command) {
       if (command.kind === "noop") return [];
       return {
-        event_type: "Added",
+        type: "Added",
         data: { n: command.n },
       };
     },
@@ -79,7 +79,7 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
 // the stream so the OCC tests don't race the no-stream/create path.
 async function seed(streamUuid: string): Promise<void> {
   await client.appendToStream(streamUuid, expected.noStream, [
-    { event_type: "Seed", data: {} },
+    { type: "Seed", data: {} },
   ]);
 }
 
@@ -139,7 +139,7 @@ describe("runCommand — happy path", () => {
         ...counter(),
         execute(_state, _cmd) {
           return {
-            event_type: "Added",
+            type: "Added",
             data: { n: 1 },
             causation_id: explicitCausation,
             correlation_id: explicitCorrelation,
@@ -204,10 +204,10 @@ describe("runCommand — OCC retry (D-0005 / AGG-010)", () => {
     // The stream now has Seed (v1) + two Added events (v2, v3).
     const events = await client.readStream(s, 0n, 10);
     assert.equal(events.length, 3);
-    assert.equal(events[0].event_type, "Seed");
-    assert.equal(events[1].event_type, "Added");
+    assert.equal(events[0].type, "Seed");
+    assert.equal(events[1].type, "Added");
     assert.equal(events[1].stream_version, 2n);
-    assert.equal(events[2].event_type, "Added");
+    assert.equal(events[2].type, "Added");
     assert.equal(events[2].stream_version, 3n);
 
     // Aggregate state derived by re-loading is the sum, regardless of
@@ -517,7 +517,7 @@ async function loadFresh(streamUuid: string): Promise<CounterState> {
   const events = await client.readStream(streamUuid, 0n, 1000);
   for (const e of events) {
     state = def.apply(state, {
-      type: e.event_type as CounterEvent["type"],
+      type: e.type as CounterEvent["type"],
       data: e.data as CounterEvent["data"],
       metadata: e.metadata,
     });

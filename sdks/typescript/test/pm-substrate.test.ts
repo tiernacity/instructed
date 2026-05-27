@@ -51,10 +51,10 @@ interface CounterState {
   value: number;
 }
 
-/** Data shape of the Tick events; `E` in `PmSubstrateDefinition<S, E>`. */
-interface CounterEvent extends Record<string, unknown> {
-  by: number;
-}
+/** Event union; `E` in `PmSubstrateDefinition<S, E>`. The substrate's
+ *  generic is the event union (each member compatible with `Event`),
+ *  not the data shape alone — see `RecordedEvent<E>` in src/types.ts. */
+type CounterEvent = { type: "Tick"; data: { by: number } };
 
 async function appendN(
   events: Array<{ type: string; data: unknown }>,
@@ -63,7 +63,7 @@ async function appendN(
   const rows = await client.appendToStream(
     stream,
     expected.any,
-    events.map((e) => ({ event_type: e.type, data: e.data })),
+    events.map((e) => ({ type: e.type, data: e.data })),
   );
   return { stream, ens: rows.map((r) => r.event_number) };
 }
@@ -110,7 +110,7 @@ describe("startPmSubstrate — L2 contract", () => {
     await appendN([{ type: "Tick", data: { by: 1 } }]);
 
     const def: PmSubstrateDefinition<CounterState, CounterEvent> = {
-      name,
+      type: name,
       initialState: () => ({ value: 0 }),
       apply: (s, e) => ({ value: s.value + e.data.by }),
       // The substrate's handle signature: returns only { complete? }.
@@ -150,7 +150,7 @@ describe("startPmSubstrate — L2 contract", () => {
     await appendN([{ type: "Tick", data: { by: 7 } }]);
 
     const def: PmSubstrateDefinition<CounterState, CounterEvent> = {
-      name,
+      type: name,
       initialState: () => ({ value: 0 }),
       apply: (s, e) => ({ value: s.value + e.data.by }),
       handle: () => ({ complete: true }),
@@ -194,7 +194,7 @@ describe("startPmSubstrate — L2 contract", () => {
     let sideEffectRan = false;
 
     const def: PmSubstrateDefinition<CounterState, CounterEvent> = {
-      name,
+      type: name,
       initialState: () => ({ value: 0 }),
       apply: (s, e) => ({ value: s.value + e.data.by }),
       handle: async () => {

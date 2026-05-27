@@ -42,11 +42,11 @@ beforeEach(async () => {
 });
 
 function ev(
-  event_type: string,
+  type: string,
   data: Record<string, unknown> = {},
   extra: Record<string, unknown> = {},
 ) {
-  return { event_type, data, ...extra };
+  return { type, data, ...extra };
 }
 
 describe("Client.appendToStream", () => {
@@ -106,13 +106,13 @@ describe("Client.appendToStream", () => {
     const s = randomUUID();
     const id = randomUUID();
     await client.appendToStream(s, expected.noStream, [
-      { event_id: id, event_type: "A", data: {} },
+      { event_id: id, type: "A", data: {} },
     ]);
     const s2 = randomUUID();
     await assert.rejects(
       () =>
         client.appendToStream(s2, expected.noStream, [
-          { event_id: id, event_type: "B", data: {} },
+          { event_id: id, type: "B", data: {} },
         ]),
       (err) => err instanceof DuplicateEvent && err.code === "IS004",
     );
@@ -136,7 +136,7 @@ describe("Client.appendToStream", () => {
   test("fills event_id when omitted (§11.2)", async () => {
     const s = randomUUID();
     const rows = await client.appendToStream(s, expected.noStream, [
-      { event_type: "A", data: {} },
+      { type: "A", data: {} },
     ]);
     assert.ok(rows[0].event_id);
     assert.match(rows[0].event_id, /^[0-9a-f-]{36}$/);
@@ -148,7 +148,7 @@ describe("Client.appendToStream", () => {
     const corr = randomUUID();
     await client.appendToStream(s, expected.noStream, [
       {
-        event_type: "A",
+        type: "A",
         data: {},
         causation_id: cid,
         correlation_id: corr,
@@ -170,9 +170,9 @@ describe("Client.readStream / readAll", () => {
     ]);
     const rows = await client.readStream(s, 2n, 10);
     assert.equal(rows.length, 2);
-    assert.equal(rows[0].event_type, "B");
+    assert.equal(rows[0].type, "B");
     assert.equal(rows[0].stream_version, 2n);
-    assert.equal(rows[1].event_type, "C");
+    assert.equal(rows[1].type, "C");
   });
 
   test("readStream on missing stream raises StreamNotFound (IS003)", async () => {
@@ -400,7 +400,7 @@ describe("Client.subscriptions", () => {
     await client.claimSubscription(s, "sub", "w1", 30, { startFrom: "origin" });
     const batch = await client.readSubscriptionBatch(s, "sub", "w1", 50);
     assert.equal(batch.length, 3);
-    assert.equal(batch[0].event_type, "A");
+    assert.equal(batch[0].type, "A");
     assert.equal(batch[2].stream_version, 3n);
   });
 

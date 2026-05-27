@@ -57,7 +57,7 @@ import {
   SubscriptionNotFound,
   WorkItemLeaseLost,
 } from "./errors.ts";
-import type { RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 export type { RunningWorker };
 import { defaultWorkerId } from "./internal/worker-id.ts";
@@ -77,7 +77,7 @@ export interface ProcessingHandlerContext {
   signal: AbortSignal;
 }
 
-export type ProcessingHandler<E = unknown> = (
+export type ProcessingHandler<E extends Event = Event> = (
   event: RecordedEvent<E>,
   ctx: ProcessingHandlerContext,
 ) => Promise<void>;
@@ -86,7 +86,7 @@ export type ProcessingHandler<E = unknown> = (
  * Kind-specific terminal-success step (slice 6: projection DELETE;
  * slice 7: PM update-to-done + snapshot upsert).
  */
-export type ProcessingCompleter<E = unknown> = (
+export type ProcessingCompleter<E extends Event = Event> = (
   event: RecordedEvent<E>,
   ctx: ProcessingHandlerContext,
 ) => Promise<void>;
@@ -151,7 +151,7 @@ export type ErrorPolicy<PolicyState = undefined> = (
 ) => ErrorPolicyResult<PolicyState> | Promise<ErrorPolicyResult<PolicyState>>;
 
 export interface ProcessingWorkerDefinition<
-  E = unknown,
+  E extends Event = Event,
   PolicyState = undefined,
 > {
   /** Subscription name (must match the routing worker for the same sub). */
@@ -214,7 +214,7 @@ export const DEFAULT_ERROR_POLICY: ErrorPolicy = (_err, ctx, _state) => {
 /** Single retry delay on a transient non-IS030 heartbeat error. */
 const HEARTBEAT_RETRY_DELAY_MS = 100;
 
-export function startProcessingWorker<E = unknown, PolicyState = undefined>(
+export function startProcessingWorker<E extends Event = Event, PolicyState = undefined>(
   client: Client,
   def: ProcessingWorkerDefinition<E, PolicyState>,
   opts: ProcessingWorkerOptions = {},

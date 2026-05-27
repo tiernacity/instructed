@@ -51,8 +51,10 @@
  */
 
 import type { Client } from "./client.ts";
-import { type AggregateDefinition } from "./aggregate.ts";
+import { prefixType, type AggregateDefinition } from "./aggregate.ts";
 import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
+import type { CommandRouter } from "./command-router.ts";
+import type { Command } from "./types.ts";
 import {
   startPmSubstrate,
   type PmSubstrateDefinition,
@@ -62,7 +64,7 @@ import type {
   ErrorPolicy,
   ProcessingHandlerContext,
 } from "./processing-worker.ts";
-import type { RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 
 // ============================================================================
@@ -70,14 +72,45 @@ import type { RunningWorker } from "./internal/running-worker.ts";
 // ============================================================================
 
 /**
- * A command emitted by a PM `handle`. By-value form only; the
- * by-name form is a candidate convenience that would live in the
- * `Instructed` facade if introduced.
+ * A command emitted by a PM `handle`. Two shapes:
+ *
+ *   - **Lean (recommended).** A bare {@link Command} (object with a
+ *     `type` discriminator and per-command payload fields). The PM
+ *     worker resolves the command through the configured
+ *     {@link CommandRouter} to `(aggregateType, aggregateId)`,
+ *     looks up the {@link AggregateDefinition}, and derives the
+ *     underlying stream name via `def.streamName(id)`. The PM
+ *     author writes plain commands and never constructs stream
+ *     names. Requires a router; see
+ *     {@link PmWorkerOptions.router}.
+ *
+ *   - **Explicit (legacy/escape hatch).** Carry the resolved
+ *     `aggregate` + `streamUuid` directly. Used when no router is
+ *     wired in, or for one-off dispatches that don't fit the
+ *     router's static map.
+ *
+ * The two shapes are discriminated structurally by the presence
+ * of `aggregate` and `streamUuid`.
  */
-export interface DispatchedCommand {
+export type DispatchedCommand =
+  | Command
+  | DispatchedCommandExplicit;
+
+export interface DispatchedCommandExplicit {
   streamUuid: string;
   aggregate: AggregateDefinition<any, any, any>;
   command: unknown;
+}
+
+function isExplicitDispatch(
+  c: DispatchedCommand,
+): c is DispatchedCommandExplicit {
+  return (
+    typeof (c as DispatchedCommandExplicit).streamUuid === "string" &&
+    typeof (c as DispatchedCommandExplicit).aggregate === "object" &&
+    (c as DispatchedCommandExplicit).aggregate !== null &&
+    typeof (c as DispatchedCommandExplicit).aggregate.type === "string"
+  );
 }
 
 /**
@@ -113,8 +146,13 @@ export interface PmHandlerContext extends ProcessingHandlerContext {
  *     snapshot's `metadata.snapshot_module_version` key on
  *     write; compared on read.
  */
-export interface PmDefinition<S, E = unknown, PolicyState = undefined> {
-  name: string;
+export interface PmDefinition<S, E extends Event = Event, PolicyState = undefined> {
+  /** PM type — doubles as the subscription name and the snapshot
+   *  source_type prefix. Same role as `AggregateDefinition.type`. */
+  type: string;
+  /** Optional source_uuid encoding from partition key. Default
+   *  `${type}-${partitionKey}`. See {@link PmSubstrateDefinition}. */
+  streamName?(partitionKey: string): string;
   /** Default `$all`. */
   stream?: string;
   initialState(): S;
@@ -135,7 +173,22 @@ export interface PmDefinition<S, E = unknown, PolicyState = undefined> {
   errorPolicy?: ErrorPolicy<PolicyState>;
 }
 
-export type PmWorkerOptions = PmSubstrateOptions;
+/**
+ * PM-worker options. Extends the L2 substrate options with the
+ * L3 routing wiring needed for the lean {@link DispatchedCommand}
+ * shape: a {@link CommandRouter} plus the aggregate registry the
+ * router resolves into.
+ *
+ * Both `router` and `aggregates` are optional. If absent, the PM
+ * worker can still dispatch via the explicit form; emitting a
+ * lean command without a router throws at dispatch time.
+ */
+export interface PmWorkerOptions extends PmSubstrateOptions {
+  /** Resolves lean commands to `(aggregateType, aggregateId)`. */
+  router?: CommandRouter;
+  /** Registry consulted by the router's `aggregateType` result. */
+  aggregates?: ReadonlyMap<string, AggregateDefinition<any, any, any>>;
+}
 
 // ============================================================================
 // Implementation
@@ -153,7 +206,7 @@ export type PmWorkerOptions = PmSubstrateOptions;
  * `commands` and dispatches each via `runCommandWithSnapshots`
  * before returning `{ complete }` to the substrate.
  */
-export function startPmWorker<S, E = unknown, PolicyState = undefined>(
+export function startPmWorker<S, E extends Event = Event, PolicyState = undefined>(
   client: Client,
   def: PmDefinition<S, E, PolicyState>,
   opts: PmWorkerOptions = {},
@@ -164,7 +217,8 @@ export function startPmWorker<S, E = unknown, PolicyState = undefined>(
   // commands in declaration order between the user's `handle` and
   // the substrate's snapshot+ack tx.
   const substrateDef: PmSubstrateDefinition<S, E, PolicyState> = {
-    name: def.name,
+    type: def.type,
+    ...(def.streamName !== undefined ? { streamName: def.streamName } : {}),
     stream: def.stream,
     initialState: def.initialState,
     apply: def.apply,
@@ -184,11 +238,12 @@ export function startPmWorker<S, E = unknown, PolicyState = undefined>(
       // duplicates at the aggregate; no IS004 protection without
       // deterministic event IDs.
       for (const c of commands) {
+        const resolved = resolveDispatch(c, opts);
         await runCommandWithSnapshots(
           client,
-          c.aggregate,
-          c.streamUuid,
-          c.command,
+          resolved.def,
+          resolved.streamUuid,
+          resolved.command,
           {
             causationId: event.event_id,
             correlationId: event.correlation_id ?? undefined,
@@ -200,4 +255,45 @@ export function startPmWorker<S, E = unknown, PolicyState = undefined>(
   };
 
   return startPmSubstrate<S, E, PolicyState>(client, substrateDef, opts);
+}
+
+/**
+ * Resolve a {@link DispatchedCommand} (either shape) to the
+ * triple needed by `runCommandWithSnapshots`. Throws on the lean
+ * shape when no router/aggregates are configured, or when the
+ * router names an unknown aggregate.
+ */
+function resolveDispatch(
+  c: DispatchedCommand,
+  opts: PmWorkerOptions,
+): {
+  def: AggregateDefinition<any, any, any>;
+  streamUuid: string;
+  command: unknown;
+} {
+  if (isExplicitDispatch(c)) {
+    return { def: c.aggregate, streamUuid: c.streamUuid, command: c.command };
+  }
+  // Lean form: resolve through the router.
+  if (!opts.router || !opts.aggregates) {
+    throw new Error(
+      "startPmWorker: handle returned a lean command (no `aggregate`/" +
+        "`streamUuid`) but no `router`/`aggregates` were supplied. " +
+        "Configure a CommandRouter (see `commandRouter()`) and pass it " +
+        "via PmWorkerOptions, or emit the explicit " +
+        "{ aggregate, streamUuid, command } shape.",
+    );
+  }
+  const route = opts.router(c);
+  const def = opts.aggregates.get(route.aggregateType);
+  if (!def) {
+    throw new Error(
+      `startPmWorker: command router resolved "${c.type}" to ` +
+        `aggregate type "${route.aggregateType}", which is not registered.`,
+    );
+  }
+  const streamUuid = (def.streamName ?? prefixType(def.type))(
+    route.aggregateId,
+  );
+  return { def, streamUuid, command: c };
 }

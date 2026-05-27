@@ -5,7 +5,7 @@
  */
 
 import { Instructed } from "instructed-sdk";
-import { PG_URL, accountStream, requireArg } from "../src/common.ts";
+import { PG_URL, requireArg } from "../src/common.ts";
 import { Account } from "../src/account.ts";
 
 async function main(): Promise<void> {
@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   const app = new Instructed({ db: PG_URL });
   app.registerAggregate(Account);
   try {
-    await app.dispatch("Account", accountStream(name), {
+    await app.dispatch("Account", name, {
       kind: "Deposit",
       amount,
     });

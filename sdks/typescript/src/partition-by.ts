@@ -22,7 +22,7 @@
  * reviewed against potential additions — `per-event-type`,
  * `hash-modulo-N`, routing-time filter — and none meet the bar to
  * ship. `per-event-type` is `per-key` with
- * `event => event.event_type`; `hash-modulo-N` is `per-key` with
+ * `event => event.type`; `hash-modulo-N` is `per-key` with
  * `event => String(hash(key(event)) % n)`; routing-time filtering
  * requires `"ignore"`, which `PartitionBy` deliberately can't
  * produce (escape hatch instead). The standard library stays at
@@ -43,14 +43,14 @@
  */
 
 import type { RoutingFn } from "./routing-worker.ts";
-import type { RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types.ts";
 
 /**
  * Three-mode partitioning sugar over a routing-layer `RoutingFn`. None
  * of the modes can emit `"ignore"`; if you need to filter at routing
  * time, pass a raw `RoutingFn` instead. PRJ-A.
  */
-export type PartitionBy<E = unknown> =
+export type PartitionBy<E extends Event = Event> =
   | { kind: "sequential" }
   | { kind: "per-event" }
   | { kind: "per-key"; key: (event: RecordedEvent<E>) => string };
@@ -71,7 +71,7 @@ export const SEQUENTIAL_PARTITION_KEY = "_default";
  * via `onError` and stalls (SUB-A "no silent skip"). No clever
  * recovery here.
  */
-export function routingFnForPartitionBy<E>(pb: PartitionBy<E>): RoutingFn<E> {
+export function routingFnForPartitionBy<E extends Event>(pb: PartitionBy<E>): RoutingFn<E> {
   switch (pb.kind) {
     case "sequential":
       return () => ({ partitionKey: SEQUENTIAL_PARTITION_KEY });

@@ -88,6 +88,7 @@ export {
   runCommand,
   runCommandAndApply,
   everyN,
+  prefixType,
   DEFAULT_RETRY_BUDGET,
   type AggregateDefinition,
   type RanCommand,
@@ -142,7 +143,7 @@ export {
   startProjectionWorker,
   type ProjectionHandler,
   type ProjectionHandlerContext,
-  type ProjectionDefinition,
+  type ProjectionWorkerDefinition,
   type ProjectionWorkerOptions,
 } from "./projection-worker.ts";
 

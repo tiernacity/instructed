@@ -61,7 +61,7 @@ export function counter(): AggregateDefinition<
     type: "Counter",
     initialState: () => ({ value: 0 }),
     execute(_state, command) {
-      return { event_type: "Added", data: { n: command.n } };
+      return { type: "Added", data: { n: command.n } };
     },
     apply(state, event) {
       if (event.type === "Added") {
@@ -116,7 +116,7 @@ export interface TriggeredData {
  * single SDK code path.
  */
 export interface ForwarderCounters {
-  /** Times the SDK invoked our routeFn, by event_type. */
+  /** Times the SDK invoked our routeFn, by type. */
   readonly routeCalls: Map<string, number>;
   /** Times the processing worker entered handle. */
   handleCalls: number;
@@ -147,8 +147,8 @@ export function forwarderRouteFn(
   counters?: ForwarderCounters,
 ): RoutingFn {
   return (event: RecordedEvent) => {
-    if (event.event_type !== "Triggered") return "ignore";
-    if (counters) bump(counters.routeCalls, event.event_type);
+    if (event.type !== "Triggered") return "ignore";
+    if (counters) bump(counters.routeCalls, event.type);
     const data = event.data as TriggeredData;
     return { partitionKey: data.target };
   };
@@ -172,14 +172,14 @@ export function forwarderPmDefinition(
 ): PmDefinition<ForwarderState> {
   const Counter = counter();
   return {
-    name,
+    type: name,
     stream: "$all",
     initialState: () => ({ forwarded: 0 }),
     apply(state, event) {
       // PM-C: pure fold. Only Triggered events touch our state; the
       // routing fn ignores everything else, so in practice this only
       // sees Triggered, but defend in depth.
-      if (event.event_type !== "Triggered") return state;
+      if (event.type !== "Triggered") return state;
       return { forwarded: state.forwarded + 1 };
     },
     async handle(_state, event) {

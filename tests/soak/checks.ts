@@ -494,7 +494,7 @@ export function makeBalanceProjector(): {
     async handle(event) {
       if (seenEventIds.has(event.event_id)) return;
       seenEventIds.add(event.event_id);
-      if (event.event_type !== "Added") return;
+      if (event.type !== "Added") return;
       const n = (event.data as { n: number }).n;
       const cur = balances.get(event.stream_uuid) ?? 0;
       balances.set(event.stream_uuid, cur + n);

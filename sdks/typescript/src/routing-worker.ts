@@ -79,6 +79,7 @@
 import type { Client } from "./client.ts";
 import { SubscriptionLeaseLost, SubscriptionNotFound } from "./errors.ts";
 import type {
+  Event,
   RecordedEvent,
   RouteDecision,
   StartFrom,
@@ -105,11 +106,11 @@ export type RoutingDecision = { partitionKey: string } | "ignore";
  * See `partition-by.ts` for the shipped standard-library
  * implementations (`PartitionBy` / `routingFnForPartitionBy`).
  */
-export type RoutingFn<E = unknown> = (
+export type RoutingFn<E extends Event = Event> = (
   event: RecordedEvent<E>,
 ) => RoutingDecision | Promise<RoutingDecision>;
 
-export interface RoutingDefinition<E = unknown> {
+export interface RoutingDefinition<E extends Event = Event> {
   /** Subscription name. */
   name: string;
   /** Source stream; default `$all`. */
@@ -141,7 +142,7 @@ export const DEFAULT_ROUTING_BATCH_SIZE = 100;
 export const DEFAULT_ROUTING_LEASE_SECONDS = 30;
 export const DEFAULT_ROUTING_POLL_INTERVAL_MS = 200;
 
-export function startRoutingWorker<E = unknown>(
+export function startRoutingWorker<E extends Event = Event>(
   client: Client,
   def: RoutingDefinition<E>,
   opts: RoutingWorkerOptions = {},

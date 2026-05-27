@@ -95,6 +95,21 @@ export function everyN<S>(n: number): SnapshotPolicy<S> {
 }
 
 /**
+ * Default {@link AggregateDefinition.streamName} implementation: prefix
+ * the aggregate's `type` to the caller-supplied id, joined by `-`.
+ *
+ * Example: an aggregate with `type: "Account"` and id `"alice"` yields
+ * the stream `"Account-alice"`. Applications that want a different
+ * encoding (UUIDs, slashes, namespacing across systems) override
+ * `streamName` on the definition.
+ *
+ * Exposed so apps can build their own factory functions on top.
+ */
+export function prefixType(type: string): (id: string) => string {
+  return (id) => `${type}-${id}`;
+}
+
+/**
  * A user-defined aggregate. `execute` is pure and produces events; `apply`
  * is pure and folds them into state. The SDK owns version tracking; user
  * code never reads or writes the per-stream version (§3 layer 1 note).
@@ -102,6 +117,19 @@ export function everyN<S>(n: number): SnapshotPolicy<S> {
 export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> {
   /** Used as `source_type` for snapshots; also a registry key in the facade. */
   type: string;
+
+  /**
+   * Optional encoding from an aggregate id (e.g. `"alice"`) to the
+   * underlying stream name (e.g. `"Account-alice"`). Default:
+   * {@link prefixType}(`type`). Applications that want UUIDs, custom
+   * separators, or cross-system namespacing override this; nothing in
+   * the SDK or storage layer cares what the stream string looks like.
+   *
+   * Application code is encouraged to identify aggregates by
+   * `(type, id)` and let the SDK / definition derive the stream name;
+   * stream names are storage-layer concerns.
+   */
+  streamName?(id: string): string;
 
   initialState(): S;
 
@@ -408,7 +436,7 @@ export async function runCommandAndApply<
   let stagedState = r.loadedState;
   for (const e of r.filled) {
     stagedState = def.apply(stagedState, {
-      type: e.event_type,
+      type: e.type,
       data: e.data,
       metadata: e.metadata,
     } as E);
@@ -481,9 +509,9 @@ async function loadAggregate<S, C, E extends DomainEvent>(
   // (no snapshot, no events yet) raises IS003 here; treat that as an
   // empty stream so runCommand can be the first writer.
   while (true) {
-    let page: RecordedEvent<unknown>[];
+    let page: RecordedEvent[];
     try {
-      page = await client.readStream<unknown>(
+      page = await client.readStream(
         streamUuid,
         version + 1n,
         LOAD_PAGE_SIZE,
@@ -506,7 +534,7 @@ async function loadAggregate<S, C, E extends DomainEvent>(
 
 function recordedToDomain<E extends DomainEvent>(row: RecordedEvent): E {
   return {
-    type: row.event_type,
+    type: row.type,
     data: row.data,
     metadata: row.metadata,
   } as E;

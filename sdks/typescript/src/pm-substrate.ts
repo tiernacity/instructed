@@ -65,6 +65,7 @@
  */
 
 import type { Client } from "./client.ts";
+import { prefixType } from "./aggregate.ts";
 import { SnapshotNotFound } from "./errors.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import {
@@ -73,7 +74,7 @@ import {
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
 } from "./processing-worker.ts";
-import type { RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 
 // ============================================================================
@@ -115,8 +116,18 @@ export type PmSubstrateHandlerContext = ProcessingHandlerContext;
  *     snapshot's `metadata.snapshot_module_version` key on
  *     write; compared on read.
  */
-export interface PmSubstrateDefinition<S, E = unknown, PolicyState = undefined> {
-  name: string;
+export interface PmSubstrateDefinition<S, E extends Event = Event, PolicyState = undefined> {
+  /** PM type — doubles as the subscription name and the snapshot
+   *  source_type prefix. Same role as `AggregateDefinition.type`. */
+  type: string;
+  /**
+   * Optional encoding from a PM partition key to the snapshot
+   * source_uuid. Default: `${type}-${partitionKey}` (see
+   * {@link prefixType}). Rarely overridden — the source_uuid is
+   * an internal storage concern; applications identify PM
+   * instances by `(type, partitionKey)`.
+   */
+  streamName?(partitionKey: string): string;
   /** Default `$all`. */
   stream?: string;
   initialState(): S;
@@ -161,7 +172,7 @@ interface StagedWork<S> {
  * lock-acquisition orders and the pairwise disjoint lock sets are
  * what prevent deadlock, not client / pool separation.
  */
-export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
+export function startPmSubstrate<S, E extends Event = Event, PolicyState = undefined>(
   client: Client,
   def: PmSubstrateDefinition<S, E, PolicyState>,
   opts: PmSubstrateOptions = {},
@@ -218,7 +229,7 @@ export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
     // the caller folds it after.
     const priorEvents = await client.listPmRebuildEvents<E>(
       stream,
-      def.name,
+      def.type,
       claimedPartitionKey,
       claimedEventNumber,
     );
@@ -227,12 +238,13 @@ export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
     return state;
   }
 
+  const sourceUuidOf = def.streamName ?? prefixType(def.type);
   const adapted = {
-    name: def.name,
+    name: def.type,
     stream,
     errorPolicy: def.errorPolicy,
     handle: async (event: RecordedEvent<E>, ctx: ProcessingHandlerContext) => {
-      const sourceUuid = `${def.name}-${ctx.partitionKey}`;
+      const sourceUuid = sourceUuidOf(ctx.partitionKey);
       const baseState = await loadState(
         sourceUuid,
         ctx.partitionKey,
@@ -271,7 +283,7 @@ export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
         // partition in one tx.
         await client.completePmInstance(
           stream,
-          def.name,
+          def.type,
           ctx.partitionKey,
           entry.sourceUuid,
         );
@@ -286,13 +298,13 @@ export function startPmSubstrate<S, E = unknown, PolicyState = undefined>(
       }
       await client.completeWorkItemPm<S>(
         stream,
-        def.name,
+        def.type,
         ctx.workerId,
         ctx.partitionKey,
         ctx.eventNumber,
         {
           sourceUuid: entry.sourceUuid,
-          sourceType: def.name,
+          sourceType: def.type,
           sourceVersion: event.event_number,
           data: entry.stagedState,
           metadata: Object.keys(metadata).length > 0 ? metadata : undefined,

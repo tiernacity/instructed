@@ -15,6 +15,7 @@ import {
   type MapPgErrorContext,
 } from "./errors.ts";
 import type {
+  Event,
   AppendOptions,
   AppendedEvent,
   ClaimResult,
@@ -58,10 +59,13 @@ function toDate(v: unknown): Date {
   throw new Error(`expected Date, got ${typeof v}`);
 }
 
-function packEvent<E>(e: NewEvent<E>): Record<string, unknown> {
+function packEvent<E = unknown>(e: NewEvent<E>): Record<string, unknown> {
+  // L2 → L1 boundary: the TypeScript surface uses `type`; the SQL
+  // column is `event_type`. The rename is purely TS-facing; the L1
+  // wire contract (and any deployed database schema) is unchanged.
   const out: Record<string, unknown> = {
     event_id: e.event_id,
-    event_type: e.event_type,
+    event_type: e.type,
     data: e.data ?? null,
   };
   if (e.metadata !== undefined) out.metadata = e.metadata;
@@ -98,19 +102,28 @@ interface RawEventRow {
   created_at: Date | string;
 }
 
-function mapRecordedEvent<E>(row: RawEventRow): RecordedEvent<E> {
+function mapRecordedEvent<E extends Event>(row: RawEventRow): RecordedEvent<E> {
+  // L1 → L2 boundary: SQL `event_type` becomes TS `type`. See
+  // {@link packEvent} for the inverse direction.
+  //
+  // The cast at the return is unavoidable: `RecordedEvent<E>` is a
+  // distributive conditional over the user's event union, so TS
+  // cannot prove that the runtime shape (built from an opaque SQL
+  // row whose `event_type` is just `string`) matches the specific
+  // union member. The constructed shape IS structurally compatible;
+  // the caller's `E` selects which branch the consumer sees.
   return {
     event_id: row.event_id,
     event_number: toBigInt(row.event_number),
     stream_uuid: row.stream_uuid,
     stream_version: toBigInt(row.stream_version),
-    event_type: row.event_type,
+    type: row.event_type,
     causation_id: row.causation_id,
     correlation_id: row.correlation_id,
-    data: row.data as E,
+    data: row.data,
     metadata: row.metadata,
     created_at: toDate(row.created_at),
-  };
+  } as RecordedEvent<E>;
 }
 
 /** Layer 0: a thin wrapper over the Postgres procedures. */
@@ -188,7 +201,7 @@ export class Client {
     }));
   }
 
-  async readStream<E = unknown>(
+  async readStream<E extends Event = Event>(
     streamUuid: string,
     fromVersion: bigint,
     qty: number,
@@ -203,7 +216,7 @@ export class Client {
     return res.rows.map((r) => mapRecordedEvent<E>(r));
   }
 
-  async readAll<E = unknown>(
+  async readAll<E extends Event = Event>(
     fromEventNumber: bigint,
     qty: number,
   ): Promise<RecordedEvent<E>[]> {
@@ -394,7 +407,7 @@ export class Client {
    * `extendSubscriptionClaim` for heartbeating). New code should
    * prefer the routing-worker substrate.
    */
-  async readSubscriptionBatch<E = unknown>(
+  async readSubscriptionBatch<E extends Event = Event>(
     streamUuid: string,
     subscriptionName: string,
     workerId: string,
@@ -840,7 +853,7 @@ export class Client {
    * Raises `SubscriptionNotFound` (IS020) if the subscription does not
    * exist.
    */
-  async listPmRebuildEvents<E = unknown>(
+  async listPmRebuildEvents<E extends Event = Event>(
     streamUuid: string,
     subscriptionName: string,
     partitionKey: string,

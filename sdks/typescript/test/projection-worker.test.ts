@@ -28,7 +28,7 @@ import { Client, expected } from "../src/index.ts";
 import { startRoutingWorker } from "../src/routing-worker.ts";
 import {
   startProjectionWorker,
-  type ProjectionDefinition,
+  type ProjectionWorkerDefinition,
   type ProjectionHandlerContext,
 } from "../src/projection-worker.ts";
 import {
@@ -37,7 +37,7 @@ import {
 } from "../src/partition-by.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
-import type { RecordedEvent } from "../src/types.ts";
+import type { Event, RecordedEvent } from "../src/types.ts";
 
 const ALL = "$all";
 
@@ -68,7 +68,7 @@ async function append(
     stream,
     expected.any,
     Array.from({ length: n }, (_, i) => ({
-      event_type: `E${i}`,
+      type: `E${i}`,
       data: { i },
     })),
   );
@@ -134,9 +134,9 @@ interface WiredWorkers {
  * worker for the same subscription, against the given source stream.
  * Returned `closeAll` is idempotent.
  */
-function startPair<E>(
+function startPair<E extends Event>(
   source: string,
-  def: ProjectionDefinition<E>,
+  def: ProjectionWorkerDefinition<E>,
   routeFn: Parameters<typeof startRoutingWorker<E>>[1]["routeFn"],
   opts: { processingCount?: number } = {},
 ): WiredWorkers & { processingWorkers: RunningWorker[] } {
@@ -168,19 +168,19 @@ function startPair<E>(
 // ============================================================================
 
 describe("routingFnForPartitionBy", () => {
-  function fakeEvent<E = unknown>(en: bigint, data: E = {} as E): RecordedEvent<E> {
+  function fakeEvent<E extends Event = Event>(en: bigint, data: unknown = {}): RecordedEvent<E> {
     return {
       event_id: "id-" + en,
       event_number: en,
       stream_uuid: "s",
       stream_version: en,
-      event_type: "T",
+      type: "T",
       causation_id: null,
       correlation_id: null,
       data,
       metadata: null,
       created_at: new Date(0),
-    };
+    } as RecordedEvent<E>;
   }
 
   test("sequential: every event routes to '_default'", async () => {
@@ -200,11 +200,11 @@ describe("routingFnForPartitionBy", () => {
   });
 
   test("per-key: calls the user key function", async () => {
-    const fn = routingFnForPartitionBy<{ k: string }>({
+    const fn = routingFnForPartitionBy<{ type: string; data: { k: string } }>({
       kind: "per-key",
       key: (e) => e.data.k,
     });
-    const d = await fn(fakeEvent<{ k: string }>(1n, { k: "alice" }));
+    const d = await fn(fakeEvent<{ type: string; data: { k: string } }>(1n, { k: "alice" }));
     assert.deepEqual(d, { partitionKey: "alice" });
   });
 
@@ -217,10 +217,10 @@ describe("routingFnForPartitionBy", () => {
     const pe = await routingFnForPartitionBy({ kind: "per-event" })(
       fakeEvent(1n),
     );
-    const pk = await routingFnForPartitionBy<{ k: string }>({
+    const pk = await routingFnForPartitionBy<{ type: string; data: { k: string } }>({
       kind: "per-key",
       key: () => "x",
-    })(fakeEvent<{ k: string }>(1n, { k: "x" }));
+    })(fakeEvent<{ type: string; data: { k: string } }>(1n, { k: "x" }));
     assert.notEqual(seq, "ignore");
     assert.notEqual(pe, "ignore");
     assert.notEqual(pk, "ignore");
@@ -237,7 +237,7 @@ describe("projection worker — sequential mode", () => {
     const { stream, ens } = await append("seq", 5);
 
     const handled: bigint[] = [];
-    const def: ProjectionDefinition = {
+    const def: ProjectionWorkerDefinition = {
       name,
       handler: async (event) => {
         handled.push(event.event_number);
@@ -274,7 +274,7 @@ describe("projection worker — sequential mode", () => {
     const block = new Promise<void>((r) => {
       release = r;
     });
-    const def: ProjectionDefinition = {
+    const def: ProjectionWorkerDefinition = {
       name,
       handler: async () => {
         await block;
@@ -311,7 +311,7 @@ describe("projection worker — per-event mode", () => {
 
     const starts = new Map<bigint, number>();
     const finishes = new Map<bigint, number>();
-    const def: ProjectionDefinition = {
+    const def: ProjectionWorkerDefinition = {
       name,
       handler: async (event) => {
         starts.set(event.event_number, Date.now());
@@ -371,17 +371,17 @@ describe("projection worker — per-key mode", () => {
       stream,
       expected.any,
       [
-        { event_type: "E", data: { k: "a", i: 0 } },
-        { event_type: "E", data: { k: "b", i: 0 } },
-        { event_type: "E", data: { k: "a", i: 1 } },
-        { event_type: "E", data: { k: "b", i: 1 } },
+        { type: "E", data: { k: "a", i: 0 } },
+        { type: "E", data: { k: "b", i: 0 } },
+        { type: "E", data: { k: "a", i: 1 } },
+        { type: "E", data: { k: "b", i: 1 } },
       ],
     );
     const ens = rows.map((r) => r.event_number);
 
     const events: Array<{ k: string; en: bigint; t0: number; t1: number }> =
       [];
-    const def: ProjectionDefinition<{ k: string; i: number }> = {
+    const def: ProjectionWorkerDefinition<{ type: string; data: { k: string; i: number } }> = {
       name,
       handler: async (event, ctx: ProjectionHandlerContext) => {
         const t0 = Date.now();
@@ -394,10 +394,10 @@ describe("projection worker — per-key mode", () => {
         });
       },
     };
-    const wired = startPair<{ k: string; i: number }>(
+    const wired = startPair<{ type: string; data: { k: string; i: number } }>(
       stream,
       def,
-      routingFnForPartitionBy<{ k: string; i: number }>({
+      routingFnForPartitionBy<{ type: string; data: { k: string; i: number } }>({
         kind: "per-key",
         key: (e) => e.data.k,
       }),
@@ -453,7 +453,7 @@ describe("projection worker — PRJ-E immediate-delete", () => {
     const { stream } = await append("del", 4);
 
     const seenStatesDuringHandle: string[] = [];
-    const def: ProjectionDefinition = {
+    const def: ProjectionWorkerDefinition = {
       name,
       handler: async (_event, ctx) => {
         // Snapshot all rows for this subscription so we can prove no
@@ -496,7 +496,7 @@ describe("projection worker — PRJ-E immediate-delete", () => {
     const [e1] = ens;
 
     let attempts = 0;
-    const def: ProjectionDefinition = {
+    const def: ProjectionWorkerDefinition = {
       name,
       handler: async () => {
         attempts += 1;
@@ -537,7 +537,7 @@ describe("projection worker — D-0016 handler opacity", () => {
     const { stream } = await append("ctx", 1);
 
     let captured: ProjectionHandlerContext | null = null;
-    const def: ProjectionDefinition = {
+    const def: ProjectionWorkerDefinition = {
       name,
       handler: async (_event, ctx) => {
         captured = ctx;

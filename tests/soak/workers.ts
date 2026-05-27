@@ -57,7 +57,7 @@ import {
   startProjectionWorker,
   startRoutingWorker,
   type PmDefinition,
-  type ProjectionDefinition,
+  type ProjectionWorkerDefinition,
   type RoutingDefinition,
   type RunningWorker,
 } from "../../sdks/typescript/src/index.ts";
@@ -206,7 +206,7 @@ export interface ProjectorSlotOptions {
   /** Routing-worker side of the projection. */
   routingDef: RoutingDefinition;
   /** Processing-worker side of the projection. */
-  projectionDef: ProjectionDefinition;
+  projectionDef: ProjectionWorkerDefinition;
   slotLabel: string;
   leaseSeconds: number;
   pollInterval: number;

@@ -10,7 +10,7 @@
 
 import { randomUUID } from "node:crypto";
 import { Instructed } from "instructed-sdk";
-import { PG_URL, requireArg, transferStream } from "../src/common.ts";
+import { PG_URL, requireArg } from "../src/common.ts";
 import { Transfer } from "../src/transfer.ts";
 
 async function main(): Promise<void> {
@@ -25,7 +25,7 @@ async function main(): Promise<void> {
   const app = new Instructed({ db: PG_URL });
   app.registerAggregate(Transfer);
   try {
-    await app.dispatch("Transfer", transferStream(transferId), {
+    await app.dispatch("Transfer", transferId, {
       kind: "Request",
       from,
       to,

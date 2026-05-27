@@ -19,12 +19,15 @@ import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import pg from "pg";
 import {
+  commandRouter,
   expected,
   Instructed,
   UnknownAggregateType,
 } from "../src/index.ts";
 import type {
   AggregateDefinition,
+  Command,
+  CommandRouter,
   DispatchedCommand,
   DomainEvent,
   RecordedEvent,
@@ -70,7 +73,7 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
     type: "Counter",
     initialState: () => ({ value: 0 }),
     execute(_s, c) {
-      return { event_type: "Added", data: { n: c.n } };
+      return { type: "Added", data: { n: c.n } };
     },
     apply(state, event) {
       if (event.type === "Added") return { value: state.value + event.data.n };
@@ -126,7 +129,8 @@ describe("Instructed -- registerProjection validation", () => {
     try {
       assert.throws(
         () =>
-          app.registerProjection("p", {
+          app.registerProjection({
+            type: "p",
             partitionBy: { kind: "sequential" },
             routeFn: () => ({ partitionKey: "k" }),
             async handler() {},
@@ -154,10 +158,10 @@ describe("Instructed -- startWorker fan-out", () => {
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let projSeen = 0;
     app.registerProjection(
-      projName,
       {
+        type: projName,
         routeFn: (e) =>
-          e.event_type === "Triggered"
+          e.type === "Triggered"
             ? { partitionKey: "_default" }
             : "ignore",
         async handler() {
@@ -173,10 +177,10 @@ describe("Instructed -- startWorker fan-out", () => {
     const pmName = `pm-${randomUUID().slice(0, 8)}`;
     const targetStream = randomUUID();
     app.registerProcessManager<{ done: boolean }>(
-      pmName,
       {
+        type: pmName,
         routeFn: (e) =>
-          e.event_type === "Triggered"
+          e.type === "Triggered"
             ? {
                 partitionKey:
                   (e.data as { processId: string }).processId,
@@ -202,8 +206,8 @@ describe("Instructed -- startWorker fan-out", () => {
     try {
       const trigger = randomUUID();
       await app.client().appendToStream(trigger, expected.noStream, [
-        { event_type: "Triggered", data: { processId: randomUUID() } },
-        { event_type: "Triggered", data: { processId: randomUUID() } },
+        { type: "Triggered", data: { processId: randomUUID() } },
+        { type: "Triggered", data: { processId: randomUUID() } },
       ]);
 
       // Both the projection and the PM observe both events.
@@ -242,10 +246,10 @@ describe("Instructed -- dispatch consistency wait", () => {
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let seen = 0;
     app.registerProjection(
-      projName,
       {
+        type: projName,
         routeFn: (e: RecordedEvent) =>
-          e.event_type === "Added" ? { partitionKey: "_default" } : "ignore",
+          e.type === "Added" ? { partitionKey: "_default" } : "ignore",
         async handler() {
           seen++;
         },
@@ -266,6 +270,67 @@ describe("Instructed -- dispatch consistency wait", () => {
     } finally {
       await handle.close();
       await app.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe("Instructed -- command router", () => {
+  test("dispatch(command) routes via the registered router", async () => {
+    const app = new Instructed({ db: pool });
+    const Counter = counter();
+    app.registerAggregate(Counter);
+
+    type AddN = Command<"AddN"> & { counterId: string; n: number };
+    const router = commandRouter<AddN>({
+      AddN: { aggregate: Counter, id: (c) => c.counterId },
+    });
+    app.registerCommandRouter(router);
+
+    try {
+      const id = randomUUID();
+      // Lean overload: no aggregateType, no streamUuid -- the router
+      // resolves AddN to (Counter, id).
+      await app.dispatch<AddN>({ type: "AddN", counterId: id, n: 7 });
+      // Verify the event landed on the derived stream "Counter-<id>".
+      const rows = await app.client().readStream(`Counter-${id}`, 1n, 10);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].type, "Added");
+      assert.deepEqual(rows[0].data, { n: 7 });
+    } finally {
+      await app.close();
+    }
+  });
+
+  test("dispatch(command) without a registered router throws", async () => {
+    const app = new Instructed({ db: pool });
+    app.registerAggregate(counter());
+    try {
+      await assert.rejects(
+        () =>
+          app.dispatch<Command<"Whatever">>({ type: "Whatever" } as never),
+        /no command router registered/,
+      );
+    } finally {
+      await app.close();
+    }
+  });
+
+  test("registerCommandRouter rejects a second registration", () => {
+    const app = new Instructed({ db: pool });
+    const router: CommandRouter = () => ({
+      aggregateType: "X",
+      aggregateId: "y",
+    });
+    app.registerCommandRouter(router);
+    try {
+      assert.throws(
+        () => app.registerCommandRouter(router),
+        /already registered/,
+      );
+    } finally {
+      void app.close();
     }
   });
 });

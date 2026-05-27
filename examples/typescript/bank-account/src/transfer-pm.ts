@@ -14,8 +14,8 @@
 
 import type {
   DispatchedCommand,
+  ProcessManagerDefinition,
   RecordedEvent,
-  RegisterProcessManagerInput,
   RoutingFn,
 } from "instructed-sdk";
 import { Account, type AccountCommand } from "./account.ts";
@@ -27,8 +27,13 @@ export type TransferPmStage =
   | { stage: "completed" }
   | { stage: "failed"; reason: string };
 
-const ACCOUNT_STREAM_PREFIX = "account-";
-const TRANSFER_STREAM_PREFIX = "transfer-";
+// Stream-name prefixes match each aggregate's default `streamName`
+// (`${type}-${id}`). Step 4 of the SDK refactor will replace these
+// PM-emitted `streamUuid`s with a command router so the PM only
+// names a target by `(aggregateType, id)` and the SDK derives the
+// stream; for now these literals make the PM's plumbing visible.
+const ACCOUNT_STREAM_PREFIX = "Account-";
+const TRANSFER_STREAM_PREFIX = "Transfer-";
 
 export const TRANSFER_PM_NAME = "TransferProcessManager";
 
@@ -38,7 +43,7 @@ function transferIdOf(event: { data: unknown }): string | null {
 }
 
 const transferRouteFn: RoutingFn = (event) => {
-  switch (event.event_type) {
+  switch (event.type) {
     case "TransferRequested":
     case "Withdrawn":
     case "Deposited":
@@ -55,7 +60,7 @@ function transferApply(
   state: TransferPmStage,
   event: RecordedEvent,
 ): TransferPmStage {
-  switch (event.event_type) {
+  switch (event.type) {
     case "Withdrawn": {
       const d = event.data as { transferId?: string };
       if (!d.transferId) return state;
@@ -76,7 +81,7 @@ async function transferHandle(
   _state: TransferPmStage,
   event: RecordedEvent,
 ): Promise<{ commands?: DispatchedCommand[]; complete?: boolean }> {
-  switch (event.event_type) {
+  switch (event.type) {
     case "TransferRequested": {
       const d = event.data as {
         from: string;
@@ -160,8 +165,9 @@ async function transferHandle(
   }
 }
 
-export function transferProcessManager(): RegisterProcessManagerInput<TransferPmStage> {
+export function transferProcessManager(): ProcessManagerDefinition<TransferPmStage> {
   return {
+    type: TRANSFER_PM_NAME,
     stream: "$all",
     routeFn: transferRouteFn,
     initialState: () => ({ stage: "starting" }),

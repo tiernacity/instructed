@@ -56,7 +56,7 @@ export async function dispatcherLoop(opts: DispatcherOptions): Promise<void> {
         // still reconcile because `Added` events accumulate
         // commutatively.
         await opts.client.appendToStream(stream, expected.any, [
-          { event_type: "Added", data: { n } },
+          { type: "Added", data: { n } },
         ]);
       } else {
         await runCommand(
@@ -95,7 +95,7 @@ export async function triggerAppenderLoop(
     try {
       await opts.client.appendToStream(triggerStream, expected.any, [
         {
-          event_type: "Triggered",
+          type: "Triggered",
           data: { n, target } as TriggeredData,
         },
       ]);

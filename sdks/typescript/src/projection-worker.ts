@@ -24,7 +24,7 @@
  */
 
 import type { Client } from "./client.ts";
-import type { RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
@@ -45,12 +45,12 @@ import type { RunningWorker } from "./internal/running-worker.ts";
  */
 export type ProjectionHandlerContext = ProcessingHandlerContext;
 
-export type ProjectionHandler<E = unknown> = (
+export type ProjectionHandler<E extends Event = Event> = (
   event: RecordedEvent<E>,
   ctx: ProjectionHandlerContext,
 ) => Promise<void>;
 
-export interface ProjectionDefinition<E = unknown, PolicyState = undefined> {
+export interface ProjectionWorkerDefinition<E extends Event = Event, PolicyState = undefined> {
   /** Subscription name (must match the routing worker for the same sub). */
   name: string;
   /** Source stream; default `$all`. */
@@ -77,9 +77,9 @@ export type ProjectionWorkerOptions = ProcessingWorkerOptions;
  * `startRoutingWorker` per subscription); the slice-9 facade glues
  * the two together at registration time.
  */
-export function startProjectionWorker<E = unknown, PolicyState = undefined>(
+export function startProjectionWorker<E extends Event = Event, PolicyState = undefined>(
   client: Client,
-  def: ProjectionDefinition<E, PolicyState>,
+  def: ProjectionWorkerDefinition<E, PolicyState>,
   opts: ProjectionWorkerOptions = {},
 ): RunningWorker {
   const stream = def.stream ?? "$all";

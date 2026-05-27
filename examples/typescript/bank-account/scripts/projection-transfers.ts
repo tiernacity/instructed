@@ -24,16 +24,12 @@ async function main(): Promise<void> {
   const pool = new pg.Pool({ connectionString: PG_URL });
 
   const app = new Instructed({ db: PG_URL });
-  app.registerProjection(
-    TRANSFERS_SUBSCRIPTION_NAME,
-    transfersProjection(pool),
-    {
-      pollInterval: 50,
-      heartbeatInterval: 1_000,
-      onError: (err) =>
-        process.stderr.write(`  [Transfers error] ${err.message}\n`),
-    },
-  );
+  app.registerProjection(transfersProjection(pool), {
+    pollInterval: 50,
+    heartbeatInterval: 1_000,
+    onError: (err: Error) =>
+      process.stderr.write(`  [Transfers error] ${err.message}\n`),
+  });
 
   const worker = await app.startWorker();
   process.stdout.write(

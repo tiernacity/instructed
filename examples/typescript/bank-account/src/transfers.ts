@@ -12,8 +12,8 @@
 
 import type pg from "pg";
 import type {
+  ProjectionDefinition,
   RecordedEvent,
-  RegisterProjectionInput,
   RoutingFn,
 } from "instructed-sdk";
 
@@ -26,15 +26,16 @@ const TRANSFER_EVENT_TYPES = new Set([
 ]);
 
 const transfersRouteFn: RoutingFn = (event) => {
-  if (!TRANSFER_EVENT_TYPES.has(event.event_type)) return "ignore";
+  if (!TRANSFER_EVENT_TYPES.has(event.type)) return "ignore";
   const id = (event.data as { transferId?: string }).transferId;
   return id ? { partitionKey: id } : "ignore";
 };
 
 export function transfersProjection(
   pool: pg.Pool,
-): RegisterProjectionInput {
+): ProjectionDefinition {
   return {
+    type: TRANSFERS_SUBSCRIPTION_NAME,
     stream: "$all",
     routeFn: transfersRouteFn,
     async handler(event: RecordedEvent) {
@@ -42,7 +43,7 @@ export function transfersProjection(
       const data = event.data as Record<string, unknown>;
       const transferId = data.transferId as string;
 
-      switch (event.event_type) {
+      switch (event.type) {
         case "TransferRequested": {
           const from = data.from as string;
           const to = data.to as string;

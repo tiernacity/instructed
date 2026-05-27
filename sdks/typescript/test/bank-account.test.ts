@@ -102,18 +102,18 @@ const Account: AggregateDefinition<AccountState, AccountCommand, AccountEvent> =
     switch (command.kind) {
       case "Open":
         if (state.opened) throw new Error("account already open");
-        return { event_type: "AccountOpened", data: { owner: command.owner } };
+        return { type: "AccountOpened", data: { owner: command.owner } };
       case "Deposit":
         if (!state.opened) throw new Error("account not open");
         return {
-          event_type: "Deposited",
+          type: "Deposited",
           data: { amount: command.amount, transferId: command.transferId },
         };
       case "Withdraw":
         if (!state.opened) throw new Error("account not open");
         if (state.balance < command.amount) {
           return {
-            event_type: "WithdrawalRefused",
+            type: "WithdrawalRefused",
             data: {
               reason: "insufficient funds",
               amount: command.amount,
@@ -122,7 +122,7 @@ const Account: AggregateDefinition<AccountState, AccountCommand, AccountEvent> =
           };
         }
         return {
-          event_type: "Withdrawn",
+          type: "Withdrawn",
           data: {
             amount: command.amount,
             transferId: command.transferId,
@@ -163,7 +163,7 @@ const Transfer: AggregateDefinition<TransferState, TransferCommand, TransferEven
   execute(state, command) {
     if (state.requested) throw new Error("transfer already requested");
     return {
-      event_type: "TransferRequested",
+      type: "TransferRequested",
       data: {
         from: command.from,
         to: command.to,
@@ -192,14 +192,14 @@ const BALANCES_TYPES = new Set([
 ]);
 
 const balancesRouteFn: RoutingFn = (e) =>
-  BALANCES_TYPES.has(e.event_type) ? { partitionKey: "_default" } : "ignore";
+  BALANCES_TYPES.has(e.type) ? { partitionKey: "_default" } : "ignore";
 
 function balancesHandler(view: BalancesView) {
   return async (event: RecordedEvent) => {
     const last = view.lastEventByAccount.get(event.stream_uuid) ?? -1n;
     if (event.event_number <= last) return; // idempotent
     const data = event.data as { amount?: number };
-    switch (event.event_type) {
+    switch (event.type) {
       case "AccountOpened":
         if (!view.balance.has(event.stream_uuid)) {
           view.balance.set(event.stream_uuid, 0);
@@ -222,7 +222,11 @@ function balancesHandler(view: BalancesView) {
 
 // ---- TransferProcessManager (PM-F + PM-C shape) --------------------------
 
-const ACCOUNT_STREAM_PREFIX = "account-";
+// Stream-name prefix is derived from the aggregate definition's
+// `streamName(id)` (default `${type}-${id}`); kept here purely for
+// the PM's reverse-lookup of `from` out of the source stream's name
+// when the event payload doesn't carry it.
+const ACCOUNT_STREAM_PREFIX = "Account-";
 
 type TransferStage =
   | { stage: "starting" }
@@ -238,7 +242,7 @@ function transferIdOf(event: { data: unknown }): string | null {
 }
 
 const transferRouteFn: RoutingFn = (e) => {
-  switch (e.event_type) {
+  switch (e.type) {
     case "TransferRequested": {
       const id = (e.data as { transferId?: string }).transferId;
       return id ? { partitionKey: id } : "ignore";
@@ -255,7 +259,7 @@ const transferRouteFn: RoutingFn = (e) => {
 };
 
 function transferApply(state: TransferStage, event: RecordedEvent): TransferStage {
-  switch (event.event_type) {
+  switch (event.type) {
     case "Withdrawn": {
       const d = event.data as { amount: number; transferId?: string; to?: string };
       if (!d.to || !d.transferId) return state;
@@ -282,13 +286,13 @@ async function transferHandle(
   _state: TransferStage,
   event: RecordedEvent,
 ): Promise<{ commands?: DispatchedCommand[]; complete?: boolean }> {
-  switch (event.event_type) {
+  switch (event.type) {
     case "TransferRequested": {
       const d = event.data as TransferRequestedData;
       return {
         commands: [
           {
-            streamUuid: `${ACCOUNT_STREAM_PREFIX}${d.from}`,
+            streamUuid: `Account-${d.from}`,
             aggregate: Account,
             command: {
               kind: "Withdraw",
@@ -306,7 +310,7 @@ async function transferHandle(
       return {
         commands: [
           {
-            streamUuid: `${ACCOUNT_STREAM_PREFIX}${d.to}`,
+            streamUuid: `Account-${d.to}`,
             aggregate: Account,
             command: {
               kind: "Deposit",
@@ -341,16 +345,16 @@ describe("bank-account end-to-end (standalone)", () => {
     app.registerAggregate(Account);
     app.registerAggregate(Transfer);
     app.registerProjection(
-      "Balances",
       {
+        type: "Balances",
         routeFn: balancesRouteFn,
         handler: balancesHandler(view),
       },
       { pollInterval: 25, heartbeatInterval: 1_000 },
     );
     app.registerProcessManager<TransferStage>(
-      TRANSFER_PM_NAME,
       {
+        type: TRANSFER_PM_NAME,
         routeFn: transferRouteFn,
         initialState: () => ({ stage: "starting" }),
         apply: transferApply,
@@ -363,14 +367,17 @@ describe("bank-account end-to-end (standalone)", () => {
     try {
       const alice = randomUUID();
       const bob = randomUUID();
-      const aliceStream = `account-${alice}`;
-      const bobStream = `account-${bob}`;
+      // Stream names are derived from the aggregate definition's
+      // `streamName(id)` (defaulting to `${type}-${id}`); tests only
+      // ever pass the bare id.
+      const aliceStream = `Account-${alice}`;
+      const bobStream = `Account-${bob}`;
 
-      await app.dispatch("Account", aliceStream, { kind: "Open", owner: "alice" });
-      await app.dispatch("Account", bobStream, { kind: "Open", owner: "bob" });
+      await app.dispatch("Account", alice, { kind: "Open", owner: "alice" });
+      await app.dispatch("Account", bob, { kind: "Open", owner: "bob" });
       await app.dispatch(
         "Account",
-        aliceStream,
+        alice,
         { kind: "Deposit", amount: 1_000 },
         { consistency: ["Balances"], consistencyTimeout: 10_000 },
       );
@@ -379,7 +386,7 @@ describe("bank-account end-to-end (standalone)", () => {
 
       // ---- successful transfer ----
       const transferOk = randomUUID();
-      await app.dispatch("Transfer", `transfer-${transferOk}`, {
+      await app.dispatch("Transfer", transferOk, {
         kind: "Request",
         from: alice,
         to: bob,
@@ -413,7 +420,7 @@ describe("bank-account end-to-end (standalone)", () => {
 
       // ---- refused transfer ----
       const transferKo = randomUUID();
-      await app.dispatch("Transfer", `transfer-${transferKo}`, {
+      await app.dispatch("Transfer", transferKo, {
         kind: "Request",
         from: bob,
         to: alice,
@@ -423,7 +430,7 @@ describe("bank-account end-to-end (standalone)", () => {
       await waitFor(
         async () => {
           const ev = await app.client().readStream(bobStream, 1n, 50);
-          return ev.some((e) => e.event_type === "WithdrawalRefused");
+          return ev.some((e) => e.type === "WithdrawalRefused");
         },
         10_000,
         "WithdrawalRefused on bob's stream",
@@ -445,7 +452,7 @@ describe("bank-account end-to-end (standalone)", () => {
       assert.equal(view.balance.get(bobStream), 300);
 
       const bobEvents = await app.client().readStream(bobStream, 1n, 50);
-      const types = bobEvents.map((e) => e.event_type);
+      const types = bobEvents.map((e) => e.type);
       assert.deepEqual(types, ["AccountOpened", "Deposited", "WithdrawalRefused"]);
     } finally {
       await worker.close();

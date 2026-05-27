@@ -64,7 +64,7 @@ async function append(streamPrefix: string, n: number): Promise<bigint[]> {
     stream,
     expected.any,
     Array.from({ length: n }, (_, i) => ({
-      event_type: `E${i}`,
+      type: `E${i}`,
       data: { i },
     })),
   );
