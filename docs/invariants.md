@@ -256,7 +256,7 @@ extension.
   INSERTs the new work-item rows in **one transaction**. A
   reader observing `last_seen >= N` MUST also see the
   corresponding work-item rows for every routed event up to N
-  (load-bearing for the SUB-A catch-up predicate; see
+  (load-bearing for the catch-up predicate; see
   [INV-SUB-CATCHUP-001]).
 - **INV-SUB-P-033** — The routing cursor MAY advance past
   events that route to `"ignore"` (no work item written for
@@ -481,9 +481,9 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
 
 ### Process manager (PM-\*)
 
-PM-F + PM-C shape: the routing function decides which partition
-an event belongs to; the processing layer's `apply` + `handle`
-split decides what to do with it.
+The routing function decides which partition an event belongs
+to; the processing layer's `apply` + `handle` split decides
+what to do with it.
 
 - **PM-001** — The router callback is
   `(event) -> { partitionKey: string } | "ignore"`. It is a
@@ -571,14 +571,14 @@ gaps don't get lost.
 
 1. **PM-E — deterministic event IDs for PM-dispatched
    commands.** When a PM `handle` is re-invoked for the same
-   claimed event (SUB-B `retry-in` after a post-dispatch
-   failure, or a lease-takeover redelivery), commands
-   dispatched in the prior attempt that already committed at
-   the aggregate will be re-dispatched and may produce
-   duplicate events at the aggregate (no `IS004
-   duplicate_event` protection without deterministic event
-   IDs). Closing this gap is a separate slice of work (PM-E);
-   the PM-024 snapshot atomicity guarantee still holds (the
+   claimed event (a `retry-in` after a post-dispatch failure,
+   or a lease-takeover redelivery), commands dispatched in the
+   prior attempt that already committed at the aggregate will
+   be re-dispatched and may produce duplicate events at the
+   aggregate (no `IS004 duplicate_event` protection without
+   deterministic event IDs). Closing this gap is a separate
+   slice of work (PM-E); the PM-024 snapshot atomicity
+   guarantee still holds (the
    PM's `forwarded` counter is incremented exactly once per
    triggering event regardless of redelivery count -- see
    `tests/soak/` for the verification under churn).

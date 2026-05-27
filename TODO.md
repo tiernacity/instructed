@@ -1,15 +1,14 @@
 # TODO
 
-Follow-up tasks parked during the 2026-05-23 doc-tidy conversation.
-Each item is its own piece of work, separate from the doc tidy that
-prompted the list. Pick them up one at a time.
+Outstanding follow-up tasks. Each item is its own piece of work;
+pick them up one at a time.
 
 ---
 
 ## 2. SDK restructuring — core vs. idiomatic-convenience split
 
-**Why this exists.** Conversation on 2026-05-23 settled a framing:
-each SDK should have a small **core** that drives the SQL contract, plus
+**Why this exists.** Each SDK should have a small **core** that
+drives the SQL contract, plus
 one or more **convenience packages** that offer idiomatic APIs over that
 core. The split lets us be clear-eyed about what a new-language SDK port
 must reproduce (the core) vs. what can be idiomatic per language (the
@@ -94,24 +93,6 @@ the former, but worth a deliberate re-read.
 
 ---
 
-## 5. SNAP-002 — snapshot module versioning in the SDK
-
-**Done (2026-05-27).** Landed as part of the TODO #2 step-5
-follow-on. Aggregate snapshots now carry and check
-`snapshot_module_version` metadata, generalising the PM
-substrate's existing mechanism. Shared metadata-key constant
-(`SNAPSHOT_MODULE_VERSION_KEY`) lives in
-`sdks/typescript/src/snapshot-version.ts` and is named on
-`docs/porting-checklist.md` §4.2 as required-core (every
-conformant port reproduces the same key string). Comparison is
-strict; fall-back is silent (no warning). See `docs/invariants.md`
-SNAP-002 / AGG-003 for the canonical statement and
-`sdks/typescript/test/aggregate.test.ts` for the four
-locked-in behaviours (matching version, mismatched version,
-strict semantics on absence either side).
-
----
-
 ## 6. Additional language SDKs
 
 **Why this exists.** The TypeScript SDK is the reference. The
@@ -169,8 +150,8 @@ provides the analogous surface for absurd.
 - **Subscription lifecycle:** `release` a stuck claim (where the
   worker is known dead but lease hasn't expired); `delete` a
   subscription by name; `claim` for diagnostic purposes.
-- **Projection rebuild (was PRJ-D in the SUB-A working files).**
-  Reset a projection by name: `delete_subscription` cascades the
+- **Projection rebuild.** Reset a projection by name:
+  `delete_subscription` cascades the
   work-queue rows, then a fresh claim from `start_from = 'origin'`
   re-routes the whole history. The read-store wipe (truncate the
   projection's tables, flush its Redis namespace, drop its
@@ -180,15 +161,15 @@ provides the analogous surface for absurd.
   provides the framework-side half: a one-shot "forget this
   subscription's state" that's safe to run while the worker is
   stopped.
-- **Work-item operator surface.** Inspect the SUB-A work queue
-  per subscription (counts by state; oldest in-flight item;
-  list `failed` rows with their `error_text`). One
+- **Work-item operator surface.** Inspect the work queue per
+  subscription (counts by state; oldest in-flight item; list
+  `failed` rows with their `error_text`). One
   `skip_work_item_with_audit` command that moves a stuck
   `failed` row to a terminal state with an operator-supplied
   audit note. The default error policy never produces `failed`
-  rows, so this surface is the dedicated escape hatch for the
-  future `quarantineAfter` convenience wrapper (SUB-B) and for
-  manual operator action on poison events. Per
+  rows, so this surface is the dedicated escape hatch for a
+  future `quarantineAfter` convenience wrapper and for manual
+  operator action on poison events. Per
   [INV-SUB-W-013](docs/invariants.md), `failed` rows are
   operator-only; this is the operator's tool.
 - **Snapshot inspection:** show a snapshot by `source_uuid`.
@@ -253,10 +234,9 @@ import without relative paths.
 
 ## 9. Documentation — next pass
 
-**Why this exists.** The 2026-05-23 tidy collapsed work-in-
-progress framing and got the doc set down to a workable size,
-but a serious next pass is warranted on writing quality, depth,
-and worked content.
+**Why this exists.** The doc set is at a workable size but a
+serious pass is warranted on writing quality, depth, and worked
+content.
 
 **What to do:**
 
@@ -305,34 +285,22 @@ harness".
 writing will need to stop using TypeScript as the default
 example language in every code snippet.
 
-**Smaller follow-ups carried over from the 2026-05-23
-concurrent-tests work** (do alongside the broader pass, or
-opportunistically):
+**Smaller opportunistic follow-ups:**
 
-- PM-024 was reworded in `invariants.md`, `architecture.md`, and
-  `sql-contract.md` during the 3a work to fix the "doubles as
-  last_seen" misstatement. A short *worked example* in
-  `architecture.md` or `concepts.md` showing the two markers
-  (`last_seen`, `source_version`) diverging across a couple of
-  ignored events would help the reader internalise the new
-  wording. Currently the new wording is correct but abstract.
-- `architecture.md` now mentions that a PM's subscription is
-  shared across all its process instances and a poison event
-  stalls the whole PM type. This is a one-paragraph callout; if
-  it gets reader feedback as surprising, promote it to a sized
-  section with a recovery-pattern recipe ("how to skip a poison
-  event in practice").
+- A short *worked example* in `architecture.md` or `concepts.md`
+  showing the two PM markers (`last_seen`, `source_version`)
+  diverging across a couple of ignored events would help the
+  reader internalise PM-024. The current wording is correct but
+  abstract.
+- The callout that a PM's subscription is shared across all its
+  process instances and that a poison event stalls only its own
+  partition could be promoted to a sized section with a
+  recovery-pattern recipe ("how to skip a poison event in
+  practice") if reader feedback flags it as surprising.
 
 ---
 
-## 15. ~~`claim_subscription` returns nullable diagnostic fields the SDK mistypes~~ — LANDED 2026-05-27
-
-**Done.** See "Done items" entry at the bottom; the body below is
-retained for cross-references that point at TODO #15.
-
----
-
-## 15 (original). `claim_subscription` returns nullable diagnostic fields the SDK mistypes
+## 15. `claim_subscription` returns nullable diagnostic fields the SDK mistypes [SUPERSEDED]
 
 **Why this exists.** Surfaced during the 2026-05-26 bank-account
 multi-process work. Starting a second `pm:transfer` worker against
@@ -403,8 +371,15 @@ should get right once.
   `claim_subscription` calling out the nullable diagnostic
   fields in the `'already_claimed'` outcome.
 
-**Output.** SDK type fix + tests + small contract-doc clarification.
-No SQL change; the SQL is correct as written.
+**Status.** Landed: `ClaimResult` is now a discriminated union
+in `sdks/typescript/src/types.ts` (`'claimed'` arm carries
+populated fields; `'already_claimed'` arm widens to nullable);
+`Client.claimSubscription` branches on `result` and guards the
+`toDate()` call; conformance test in
+`tests/conformance/test/subscription-persistent.test.ts`;
+`docs/sql-contract.md` notes the nullable diagnostic fields.
+No SQL change. Section retained because TODO #15 is referenced
+from in-tree code comments.
 
 ---
 
@@ -461,185 +436,58 @@ about why we left it as-is.
 
 ---
 
-## 12. Apply re-review outcomes
+## 12. `exclude` mechanism for `dispatch(..., { consistency: [...] })`
 
-**Status: SUB-A / PM-F / PM-C / PRJ-A landed. Re-review outcomes
-broken out into the open items below.**
+**Why.** A PM dispatching a command with
+`consistency: [...own_subscription_name...]` self-deadlocks:
+the wait needs the PM's subscription cursor to advance past the
+dispatched events, but the cursor cannot advance until the PM's
+`handle` returns, which cannot happen until the wait returns.
+Hard self-deadlock until `consistencyTimeout` fires.
 
-The 2026-05-23 re-review of the invariant catalogue produced
-a body of follow-up work originally tracked across working
-files under `docs/todo/`. The four SUB-A-adjacent working
-files (`subscriptions.md`, `process-manager.md`,
-`projections.md`, `sub-a-implementation.md`) closed when SUB-A
-landed across SDK slices 1-12; their decided content migrated
-into `docs/architecture.md`, `docs/concepts.md`,
-`docs/decisions.md`, `docs/invariants.md`, and
-`docs/sql-contract.md`. Pre-release migration guidance for the
-breaking-change-at-the-SDK-surface bits lives in
-`docs/upgrade-notes/pm-f.md`.
+**What lands.**
 
-What's still open from the re-review:
+1. **Public API.** `Instructed.dispatch` accepts an optional
+   `exclude?: string[] | SubscriptionRef[]`, normalised the
+   same way `consistency` is normalised (`string[]` defaults to
+   `{ stream: "$all", name }`). References in `exclude` are
+   removed from the resolved consistency wait set before
+   `waitForProjection` is called.
+2. **Default behaviour when dispatching from inside a PM.** The
+   PM worker's internal `runCommand` call passes
+   `exclude: [{ stream: <pm subscription stream>, name: <pm
+   name> }]` automatically.
+3. **Warning log on auto-exclusion.** When the PM worker
+   auto-excludes its own subscription, emit a warning via the
+   configured logger describing what was excluded and why.
+   Include the PM name so the application can identify and
+   remove the self-reference. **Do not silently drop** — that
+   teaches bad habits.
+4. **Explicit `exclude` from the application.** Honoured
+   without warning — it's an explicit caller decision.
+5. **Tests.** PM concurrent-tests cases: (a) PM dispatching
+   with `consistency: [own_name]` does not deadlock and the
+   operation completes; (b) the warning fires once per dispatch
+   that triggered auto-exclusion; (c) explicit `exclude`
+   suppresses the warning.
+6. **Docs.** Short paragraph in `docs/architecture.md` "Strong
+   consistency on dispatch" describing the `exclude` option and
+   the PM auto-exclusion. Frame the constraint as "a
+   subscription cannot wait for itself to make progress while
+   it is the active processor".
 
-- `docs/todo/doc-patches.md` — three small wording patches
-  (DOC-A handler purity, DOC-B D-0004 one-liner, DOC-C D-0010
-  "Why" tighten). Independent of SUB-A; pick up when convenient.
-- `docs/todo/consistency.md` — CON-A (`exclude` mechanism for
-  `dispatch`). CON-B (`waitForProjection` cross-stream guard)
-  landed as part of TODO #11.
-- The follow-on items still hanging off this index entry
-  (`ML-0006..0012` in `docs/maybe-later.md`, the SDK-level
-  PM-fan-out non-goal, PM-E for deterministic event IDs on
-  PM-dispatched commands).
+**Related open items.** Follow-ons referenced from this index
+entry: `ML-0006..0012` in `docs/maybe-later.md`, the SDK-level
+PM-fan-out non-goal, and PM-E (deterministic event IDs on
+PM-dispatched commands; see `docs/invariants.md` "Honest gaps
+in v1").
 
 ---
 
-Item numbers are stable: closed items are removed from the body and
-recorded below rather than renumbered, so existing in-tree references
-(e.g. `TODO #3a`, `TODO #10` in code comments and docs) keep their
+Item numbers are stable: closed items are removed from the body
+rather than renumbered, so existing in-tree references (e.g.
+`TODO #3a`, `TODO #10` in code comments and docs) keep their
 meaning. Gaps in the numbering are expected.
-
-## Done items (delete on confirmation)
-
-- **#15 `claim_subscription` returns nullable diagnostic fields the
-  SDK mistypes.** Pure SDK type fix + conformance test + SQL-contract
-  doc clarification; no SQL change. `ClaimResult` in
-  `sdks/typescript/src/types.ts` split into a discriminated union:
-  the `'claimed'` arm carries `claimedBy: string` /
-  `claimExpiresAt: Date` (always populated); the `'already_claimed'`
-  arm widens both to nullable to admit the SUB-A contention race
-  documented inline on the SQL function. `Client.claimSubscription`
-  in `sdks/typescript/src/client.ts` now branches on `result` and
-  guards the `toDate()` call. SQL-side audit confirmed no other
-  wrapper has the same off-by-one: `extend_subscription_claim` /
-  `extend_work_item_claim` raise on lease loss (never return NULL);
-  `claim_work_item` returns zero rows (already handled as `null`).
-  Deterministic conformance test added in
-  `tests/conformance/test/subscription-persistent.test.ts` using two
-  dedicated `pg.Client` connections: the blocker holds a SELECT FOR
-  UPDATE on the subscriptions row while the claimant calls
-  `claim_subscription` -- the SKIP LOCKED step finds zero rows, the
-  diagnostic unlocked re-read sees the released `(NULL, NULL)` state
-  from D-0025, and the procedure must return `'already_claimed'`
-  with NULL fields. `docs/sql-contract.md` updated to call out the
-  nullable diagnostic fields. Full conformance suite (169/169, +1
-  new) and full TS SDK suite (131/131) green. First piece of the
-  TODO #2 SDK rework (now discharged).
-- **#13 `streams_stream_uuid_key` race in `append_to_stream`.**
-  Fixed by wrapping the `'exact'` V=0 missing-stream-create
-  INSERT in `sql/instructed.sql` with a `unique_violation`
-  handler that translates to `IS001`, parallel to the existing
-  `'no_stream'` → `IS002` translation and INV-APPEND-022's
-  `stream_events` translation. Audit of all four `streams`
-  INSERT sites confirmed the `'any'` (ON CONFLICT), `'no_stream'`
-  (already handled), and `$all` bootstrap paths were race-safe;
-  only the V=0 path was missing the handler. Deterministic
-  conformance test added in
-  `tests/conformance/test/append.test.ts` using two dedicated
-  `pg.Client` connections with explicit BEGIN to hold session
-  1's transaction open past session 2's SELECT FOR UPDATE —
-  verified to fail with `23505 !== IS001` without the fix and
-  pass with it. INV-APPEND-014 in `docs/invariants.md` updated
-  to call out the translation. Full conformance suite (164/164,
-  3 pre-existing D-0024 skips) and full TS SDK suite (129/129)
-  green.
-- **#1 Fresh re-review of the invariant catalogue against the
-  reference event-sourcing library.** Walked the catalogue
-  end-to-end on 2026-05-23. Headline outcomes:
-  - Two correctness-class findings: the `waitForProjection`
-    cross-stream silent wrong-answer bug (still tracked in
-    `docs/todo/consistency.md` CON-B; still open) and the PM
-    multi-command-on-redelivery duplicate-dispatch risk (PM-E;
-    open, no working file -- see `docs/invariants.md` "Honest
-    gaps in v1" entry 2).
-  - A larger architectural finding: the single-cursor subscription
-    model was insufficient for the PM-instance and
-    concurrent-projection cases. Resolved in SUB-A across SDK
-    slices 1–12; see `docs/decisions.md` D-0002 and
-    `docs/architecture.md` "How a worker runs". The original
-    ML-0001 partitioned-consumers entry has been removed
-    (capability now provided by SUB-A's partition shape).
-  - Several smaller items routed to `docs/maybe-later.md`
-    (ML-0006..0009) and `docs/non-goals.md` (SDK-level PM
-    fan-out).
-  - Conformance-test re-evaluation parked behind SUB-A; tracked
-    as item #11.
-  - Master index of the follow-up work: item #12 above.
-- **#3 Concurrent correctness + load/soak harness.**
-  - **#3a composed-concurrency correctness tests** — landed in
-    `sdks/typescript/test/concurrent.test.ts` (aggregate OCC ×
-    projector; two projectors / one subscription with lease theft;
-    PM × appender × projector). Also caught a PM-024 wording bug
-    that was fixed in the same commit.
-  - **#3b load / soak harness** — landed in `tests/soak/` with a
-    CLI workload generator, worker farm, failure injection, and
-    continuous + final invariant checks (INV-APPEND-003,
-    INV-APPEND-022, INV-SUB-P-008, INV-SUB-P-LEASE-UNIQ, PM-024,
-    PM-FORWARD-TOTAL, REFOLD-MATCH). Interpretation guide in
-    `tests/soak/README.md`. Deferred follow-ups (network partition
-    injection, OCC retry-count surfacing, multi-process
-    orchestration) are documented in that README's *Known gaps*.
-- **#10 PM ignored-event ack coalescing (ex-ML-0005)** — shipped
-  in `sdks/typescript/src/process-manager.ts`; new tests in
-  `sdks/typescript/test/pm-ack-coalescing.test.ts`; ML-0005 stub
-  removed from `docs/maybe-later.md`; architecture / soak docs
-  updated. Full TS SDK suite (84 tests) green. Soak re-baseline
-  deferred to next harness run.
-- **#11 Conformance criteria — revisit once the subscription
-  model stabilises.** Walked the 2026-05-23 §4 gap list and
-  TODO #11 step-2 SUB-A acceptance set against the landed
-  subscription model. Outcome:
-  - Four new tests landed:
-    `subscription-persistent.test.ts` gains scope isolation
-    (per-stream A doesn't deliver B) and the composed
-    lease-expiry → takeover → IS022 case for INV-SUB-P-011;
-    `subscription-work-items-procedures.test.ts` gains mixed
-    route_batch (cursor jumps past ignored event_numbers; no
-    work-item written) for INV-SUB-P-033 and the composed
-    delete-with-queued-items → re-claim from `:origin` →
-    re-route case for INV-SUB-P-061.
-  - One re-label (no behaviour change) on SP "redelivery:
-    crash-before-advance is recovered by re-claim" to clarify
-    it pins the routing-layer no-auto-ack contract; the
-    application-facing redelivery contract under SUB-A is the
-    work-item lease takeover already covered at SWP.
-  - Six §4 cases dropped as already covered: `:current`
-    start_from, `$all` original-identity echo (per
-    INV-READ-006/007), release-preserves-cursor,
-    monotone cumulative ack, plus the SUB-A step-2 items for
-    per-partition ordering, failed-row partition blocking,
-    atomic route_batch, work-item lease leasing/expiry/loss,
-    and `waitForProjection` end-to-end (the latter already
-    covered three ways at
-    `sdks/typescript/test/consistency.test.ts` "SUB-A
-    work-item conjunct").
-  - CON-B `waitForProjection` cross-stream guard landed
-    alongside: new `ConsistencyTargetError`, synchronous (fast
-    pre-await) rejection in `waitForProjection`, four tests in
-    `sdks/typescript/test/consistency.test.ts` (positive,
-    negative, mixed-list, `$all`-exempt). Required adding
-    `stream_uuid` to the SDK's `AppendedEvent` shape
-    (populated client-side; no SQL change). `docs/todo/
-    consistency.md` CON-B marked landed; CON-A still open.
-  - INV catalogue `[mechanism-only]` split deemed already
-    correct (INV-SUB-P-011, INV-SUB-W-003, INV-APPEND-022,
-    INV-STREAM-002 already carry the marker); the
-    application-facing vs routing-mechanism split is now
-    explicit in `tests/conformance/COVERAGE.md` under "TODO
-    #11 / SUB-A re-fit notes".
-  - ML-0001 (removed during the 2026-05-23 doc tidy) replaced
-    with ML-0013 (multi-routing-worker subscriptions /
-    `concurrency_limit > 1`) in `docs/maybe-later.md` to
-    capture the forward-looking work that the three skipped
-    INV-SUB-P-040/041/042 conformance tests are parked behind.
-    The 22 stale `ML-0001` references across
-    `sql/instructed.sql`, `sdks/typescript/src/types.ts`,
-    `sdks/typescript/README.md`, and `tests/conformance/
-    COVERAGE.md` updated to ML-0013.
-  - Architecture / guarantees docs gained the one-sentence
-    per-stream-target guard callout per CON-B step 5.
-  - Full conformance suite (171/171 active, +4 new; 3 skipped
-    as deferred per ML-0013) and full TS SDK suite (133/133,
-    +4 new CON-B tests) green.
 
 ---
 

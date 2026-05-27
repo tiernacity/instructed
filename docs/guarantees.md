@@ -36,6 +36,12 @@ for the mechanisms see [`architecture.md`](architecture.md).
   store is concerned (no append happens).
 - A command handler that throws or returns an error leaves
   the aggregate's state unchanged. No events are written.
+- Command handlers and event appliers must be pure functions.
+  Under contention the handler may be re-run from scratch on
+  each OCC retry; side effects in the handler body will fire
+  once per attempt, not once per command. Set deterministic
+  identifiers on the command before dispatch, not inside the
+  handler.
 
 ## What subscribers see
 

@@ -78,19 +78,19 @@ raises it. SDKs that see it have bypassed the contract.
 | `read_subscription_position`    | `(last_seen)`            | Read routing cursor |
 | `delete_subscription`           | `void`                   | Removes row + cascaded work items; raises `IS020` on missing ([D-0009](decisions.md#d-0009)) |
 
-### Routing-worker hot path (SUB-A)
+### Routing-worker hot path
 
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
 | `route_batch`                   | `void`                   | Atomic: INSERT N work items + advance `subscriptions.last_seen`. `ON CONFLICT DO NOTHING` on the work-items PK absorbs duplicate INSERTs on routing-worker re-run. Requires the caller's `worker_id` to match the current subscription `claimed_by` (raises `IS022` otherwise). |
 
-### Processing-worker hot path (SUB-A)
+### Processing-worker hot path
 
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
 | `claim_work_item`               | `nullable (partition_key, event_number, was_takeover, prior_claimed_by)` | `FOR UPDATE SKIP LOCKED` + per-partition predicate. Stamps the row with the caller's `worker_id` + lease expiry. Returns null when nothing eligible; non-null with `was_takeover=true` on the lease-takeover branch. Does NOT take a subscription lease. |
 | `extend_work_item_claim`        | `void`                   | Processing-worker heartbeat. Raises `IS030 work_item_lease_lost` on `claimed_by` mismatch. |
-| `complete_work_item_projection` | `void`                   | Projection-side terminal success: DELETEs the row. PRJ-E immediate-delete. Raises `IS030` on lease loss. |
+| `complete_work_item_projection` | `void`                   | Projection-side terminal success: DELETEs the row immediately (no `done` state persists for projections). Raises `IS030` on lease loss. |
 | `complete_work_item_pm`         | `void`                   | PM-side non-terminal success: UPDATE row to `done` + UPSERT the snapshot in one tx. Raises `IS030` on lease loss. |
 | `complete_pm_instance`          | `(snapshot_deleted, work_items_deleted)` | PM-side terminal success (`handle` returned `{ complete: true }`): DELETE the snapshot + every work item for the partition in one tx. Idempotent. |
 | `fail_work_item`                | `void`                   | UPDATE the row to `failed` with `error_text`. Operator-only resolution thereafter; the default error policy never calls this. Raises `IS030` on lease loss. |
@@ -99,7 +99,7 @@ raises it. SDKs that see it have bypassed the contract.
 
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
-| `is_subscription_caught_up`     | `(caught_up boolean)`    | Two-conjunct catch-up predicate (routing cursor at-or-past target AND no in-flight work items at-or-below target). Polled by `waitForProjection`. |
+| `is_subscription_caught_up`     | `(caught_up boolean)`    | Two-conjunct catch-up predicate (routing cursor at-or-past target AND no in-flight work items at-or-below target). Polled by `waitForProjection`. See [INV-SUB-CATCHUP-001]. |
 | `list_pm_rebuild_events`        | `setof recorded_event`   | Cold-path read: every `done` work-item event for `(subscription_name, partition_key)` with `event_number < exclusive_upper`, in event-number order. Used by PM-state rebuild after a snapshot miss / module-version mismatch. |
 
 `recorded_event` is shorthand for the eleven columns: `event_id`,
@@ -218,7 +218,7 @@ append:
 Per D-0005, retry on `IS001` is the per-aggregate serialisation
 mechanism; there is no advisory lock.
 
-### Routing worker (SUB-A, [D-0002](decisions.md#d-0002), [D-0025](decisions.md#d-0025))
+### Routing worker ([D-0002](decisions.md#d-0002), [D-0025](decisions.md#d-0025))
 
 One routing worker per subscription at any single instant,
 single-active via the subscription lease. The SDK's default loop
@@ -267,7 +267,7 @@ the lease covers one batch and is released explicitly. The
 procedure remains in the contract for callers implementing
 custom long-lease routing loops above the `Client` layer.
 
-### Processing worker (SUB-A, [D-0016](decisions.md#d-0016))
+### Processing worker ([D-0016](decisions.md#d-0016))
 
 N processing workers per subscription run concurrently. Each
 claims one item at a time, runs the handler, calls a
@@ -312,7 +312,7 @@ Elasticsearch, Redis, an external API, or anywhere else. The SDK
 does not pass it a connection. Idempotency on redelivery is the
 handler's concern.
 
-### PM-state load + dispatch (PM-C + PM-F, [D-0011](decisions.md#d-0011), [D-0017](decisions.md#d-0017))
+### PM-state load + dispatch ([D-0011](decisions.md#d-0011), [D-0017](decisions.md#d-0017))
 
 A PM processing worker adds a state-load step before `handle`
 and a dispatch step between `handle` and the terminal call:
@@ -321,7 +321,7 @@ and a dispatch step between `handle` and the terminal call:
 claim = claim_work_item(...)
 event = read_all(claim.event_number, 1)
 
--- State load (PM-C):
+-- State load:
 snap = read_snapshot("{pm_name}-{partition_key}")   -- IS010 = miss
 if snap exists AND snap.metadata.snapshot_module_version == def.version:
   state = snap.data
@@ -375,10 +375,10 @@ for sub in consistency_list:
 
 `consistency_list` is the explicit list per [D-0010](decisions.md#d-0010)
 (no `:strong` shorthand); polling cadence is the SDK's
-responsibility. The predicate has two conjuncts under SUB-A
-(routing cursor at-or-past target AND no in-flight work items
-at-or-below target); both are evaluated server-side in one
-round-trip per poll.
+responsibility. The predicate has two conjuncts (routing cursor
+at-or-past target AND no in-flight work items at-or-below
+target); both are evaluated server-side in one round-trip per
+poll.
 
 ## Implementation notes
 

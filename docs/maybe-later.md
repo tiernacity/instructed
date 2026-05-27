@@ -119,8 +119,7 @@ cases:
 The current consistency-wait primitive answers
 "has subscription S processed event_number T?" by comparing
 positions, and rejects cross-stream targets (a per-stream
-subscription can only wait on appends to its own stream — see
-`todo/consistency.md` CON-B).
+subscription can only wait on appends to its own stream).
 
 A more general predicate would answer:
 
@@ -136,9 +135,7 @@ which streams contributed.
 what callers intuitively mean. The general predicate is a real
 feature, not a workaround, and deserves its own design pass —
 likely an additional check inside the poll loop ("are there any
-events on S's scope with `s.last_seen < event_number <= N`?")
-that depends on the subscription substrate (SUB-A) being
-decided first.
+events on S's scope with `s.last_seen < event_number <= N`?").
 
 **Forward-compat constraints on v1:**
 
@@ -146,9 +143,9 @@ decided first.
   catches misuse of the simple predicate without preventing a
   future general predicate from being added under a different
   name or option flag.
-- Likely interacts with SUB-A's work-queue model: the predicate
+- Interacts naturally with the work-queue model: the predicate
   becomes "is there any pending or claimed work item on S with
-  `event_number <= N`?", which is naturally available there.
+  `event_number <= N`?".
 
 ---
 
@@ -236,8 +233,8 @@ case needs something the three modes can't express.
 
 ## ML-0010 — Configurable post-success retention for projection work-items
 
-Under SUB-A, projection work-items are DELETEd as the terminal
-step of a successful handler run. No `done` row is persisted for
+Projection work-items are DELETEd as the terminal step of a
+successful handler run. No `done` row is persisted for
 projections (the PM path differs: PMs UPDATE the row to `done`
 plus UPSERT a snapshot in one tx, because the `done` rows back
 PM-state rebuild).
@@ -289,8 +286,7 @@ primitives.
 
 ## ML-0012 — Routing-worker `close()` strategy: flush vs drop
 
-The SUB-A routing worker (slice 4 of the SUB-A
-implementation) drops the partial batch when `close()` or a
+The routing worker drops the partial batch when `close()` or a
 lease-loss abort fires mid-batch: no `route_batch` call, no
 cursor advance, no work-item INSERTs. The relaunched worker
 re-reads from `lastSeen` and the work-items PK (`ON CONFLICT
@@ -332,13 +328,13 @@ restart, or if a per-worker option `closeBehaviour: 'drop' |
 
 ## ML-0013 — Multi-routing-worker subscriptions (`concurrency_limit > 1`)
 
-The SUB-A routing worker is single-active per subscription:
-`claim_subscription` returns a non-error `'already_claimed'` row to
-any would-be second claimer, and `concurrency_limit` is effectively
-fixed at 1 in v1 (D-0002). Within-subscription parallelism is
-provided entirely on the processing side via the work queue
-(INV-SUB-W-010/011 — N processing workers, partitioned by
-`partition_key`).
+The routing worker is single-active per subscription:
+`claim_subscription` returns a non-error `'already_claimed'` row
+to any would-be second claimer, and `concurrency_limit` is
+effectively fixed at 1 in v1 (D-0002). Within-subscription
+parallelism is provided entirely on the processing side via the
+work queue (INV-SUB-W-010/011 — N processing workers,
+partitioned by `partition_key`).
 
 A future variant would let multiple routing workers share a
 subscription, each routing a disjoint shard of the source stream
@@ -350,8 +346,9 @@ selectors per ML-0003), or a workload where the routing worker is
 CPU-bound on `interested?` evaluation for a high-fanout PM.
 
 **Why deferred:** no observed need. The processing-side
-parallelism SUB-A ships handles every workload we've modelled.
-Adding a second axis of distribution before there's a concrete
+parallelism the work queue provides handles every workload
+we've modelled. Adding a second axis of distribution before
+there's a concrete
 pain point would complicate the lease model (per-shard leases on
 the subscriptions row), the cursor model (one `last_seen` per
 shard, or a merge function), and the conformance surface (three
@@ -380,12 +377,7 @@ holding live leases simultaneously.
   for stickiness across routing workers, not just within a
   single routing worker's work queue.
 
-**Conformance shapes to add when implemented.** These were
-previously stubbed as skipped tests in
-`tests/conformance/test/subscription-partitioned.test.ts`; that
-file has been removed (it referenced functionality we haven't
-built). The shapes are recorded here so they survive the file's
-deletion:
+**Conformance shapes to add when implemented.**
 
 - **INV-SUB-P-040 — multi-subscriber distribution under
   `concurrency_limit > 1`.** Every event MUST be delivered to
@@ -428,6 +420,6 @@ deletion:
   empty; NO assertion on stickiness, order across workers, or
   distribution fairness.
 
-When ML-0013 lands, these shapes get re-written against the
+When ML-0013 lands, these shapes get written against the
 chosen claim / shard / selector API and added as real tests
-(probably in a fresh `subscription-sharded.test.ts` or similar).
+(probably in `subscription-sharded.test.ts` or similar).

@@ -103,6 +103,16 @@ concurrency control**. It's how two concurrent commands on the
 same aggregate are serialised: at most one of them wins each round
 of the race; the loser re-reads and tries again.
 
+Command handlers and event appliers must be **pure functions** —
+no I/O, no metric emission, no UUID generation in the handler
+body, no clock reads whose value matters. Under contention a
+command handler may be invoked more than once per logical
+command: each OCC retry re-loads the aggregate and re-runs the
+handler against the fresh state. A handler that produces side
+effects in its body will surface them once per attempt, not once
+per command. If you need a deterministic identifier on the
+resulting event, set it on the command before dispatch.
+
 ## Projections
 
 A **projection** is a read model — typically a query-shaped view

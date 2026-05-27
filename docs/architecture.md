@@ -119,11 +119,10 @@ snapshot. A failed snapshot write does not fail the command.
 
 ## How a worker runs
 
-Under SUB-A a subscription is served by two cooperating worker
-kinds. Both are spun up automatically by
-`Instructed.startWorker()`; lower-level callers can compose
-them with `startRoutingWorker` + `startProjectionWorker` /
-`startPmWorker` directly.
+A subscription is served by two cooperating worker kinds. Both
+are spun up automatically by `Instructed.startWorker()`;
+lower-level callers can compose them with `startRoutingWorker`
++ `startProjectionWorker` / `startPmWorker` directly.
 
 ### Routing worker (single-active per subscription, per-batch claim)
 
@@ -217,7 +216,7 @@ loop while not stopped:
         complete_work_item_pm(...)           -- UPDATE-to-done + UPSERT snapshot, or
         complete_pm_instance(...)            -- terminal: DELETE snapshot + all items
     on handler throw:
-        SUB-B error policy decides retry-in / stop
+        error policy decides retry-in / stop
         -- 'retry-in' re-runs handler against the same claim;
         -- 'stop' exits the worker; the lease expires and another
         --   processing worker takes over.
@@ -233,9 +232,9 @@ Key points:
   step (DELETE for projections, UPDATE+UPSERT for PMs) runs as
   its own short SDK-owned transaction after the handler
   returns. If the handler throws, no terminal step fires; the
-  item stays `claimed` under the SUB-B retry-in loop and the
-  lease is held by the heartbeat.
-- If the worker crashes (or the SUB-B policy returns `stop`)
+  item stays `claimed` under the retry-in policy and the lease
+  is held by the heartbeat.
+- If the worker crashes (or the error policy returns `stop`)
   the lease expires and another processing worker takes the
   same item over. The original worker's next call to
   `extend_work_item_claim` / `complete_*` / `fail_work_item`
@@ -256,32 +255,27 @@ and a dispatch step after:
    Lock sets stay disjoint by virtue of the SQL contract's
    per-procedure lock-acquisition orders — the dispatch path
    locks `streams` + the events tables; the persist-and-ack path
-   locks `subscriptions` + `snapshots` + `subscription_work_items`.
-   See [D-0026](decisions.md#d-0026): pool / client separation
-   was retired (it never actually enforced disjointness; the
-   contract does).
+   locks `subscriptions` + `snapshots` + `subscription_work_items`
+   (see [D-0026](decisions.md#d-0026)).
 5. Terminal step: `complete_work_item_pm` (non-terminal,
    updates work item to `done` and upserts the snapshot in one
    tx) or `complete_pm_instance` (terminal, DELETEs the
    snapshot and every work item for the partition in one tx).
 
-Under SUB-A, a poison event stalls only its **own partition**:
-other partitions on the same PM type keep draining. (Under the
-pre-SUB-A single-cursor model, a poison event stalled the
-whole PM type.) This per-partition isolation is one of the
-largest behaviour wins of the substrate redesign.
+A poison event stalls only its **own partition**: other
+partitions on the same PM type keep draining. Per-partition
+isolation is a property of the work-queue substrate.
 
 ## How leases work
 
-There are two lease scopes under SUB-A: the subscription-level
-(routing) lease and the per-work-item (processing) lease.
+There are two lease scopes: the subscription-level (routing)
+lease and the per-work-item (processing) lease.
 
 ### Lock vs lease
 
 Two distinct mechanisms protect the routing surface, doing two
-different jobs. Earlier sketches of this document were loose
-about the distinction; getting it right matters for reasoning
-about the per-batch loop and ML-0013-style extensions.
+different jobs. Getting the distinction right matters for
+reasoning about the per-batch loop and ML-0013-style extensions.
 
 | | Postgres row lock | Application-level lease |
 |---|---|---|
@@ -391,8 +385,7 @@ configured timeout elapses, dispatch returns a
 `ConsistencyTimeoutError` — the events remain durably appended;
 only the wait failed.
 
-The SUB-A catch-up predicate has two conjuncts and both must
-hold:
+The catch-up predicate has two conjuncts and both must hold:
 
 1. The routing cursor has reached the target
    (`subscriptions.last_seen >= target`).
@@ -454,7 +447,7 @@ targets are exempt; they validly observe every append.
   and timeout.
 - **Dispatch wait orchestration, retries, backoff** — SDK
   concern.
-- **Error policy on handler throw** — SDK concern via the SUB-B
+- **Error policy on handler throw** — SDK concern via the
   `ErrorPolicy` hook (`retry-in` / `stop`). The default is
   exponential backoff capped at 30s, retry forever. The store
   contract does not specify retry behaviour.
@@ -475,7 +468,7 @@ APIs on top.
 - A **processing worker** loop (claim work item + run handler +
   terminal step) with per-item lease and heartbeat. PM
   processing additionally loads/rebuilds PM state and
-  dispatches commands on a separate session.
+  dispatches commands via the same client.
 - Snapshot read/write/delete primitives.
 - A catch-up-predicate poll (`is_subscription_caught_up`) for
   strong-consistency waits.

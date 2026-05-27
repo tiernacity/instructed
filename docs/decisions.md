@@ -88,6 +88,10 @@ mitigation — they don't need coherence across processes.
 
 - Aggregate load cost becomes the dominant per-command cost.
   Snapshot policy tuning matters.
+- Without an in-memory cache, no per-aggregate coherence
+  side-channel (subscription, broadcast, or other notification
+  path) is required: every command's load reads the canonical
+  sequence from the event log.
 - An opt-in SDK-level cache could be added later as pure
   performance optimisation; it must not become a correctness
   boundary.
@@ -177,12 +181,17 @@ subscription's cursor until it has caught up, or raises
 
 There is no "wait for everything" shorthand.
 
-**Why:** A "wait for everything" shorthand requires a registry
-of which subscriptions belong to which application, which is
-exactly the kind of cross-process coordinated state the design
-exists to avoid. The explicit list is also more honest: in
-practice the caller knows which projection(s) they want to read
-their own writes against.
+**Why:** A "wait for every handler that opted in" shorthand is
+well-defined at the SDK layer — handlers register their
+consistency mode when the worker starts, and an SDK-local
+registry could collect them. But the store has no such metadata,
+and any SDK-level shorthand would only cover subscriptions
+managed through the same SDK instance — it would silently miss
+subscriptions held by other processes. The explicit list is also
+more honest: in practice the caller knows which projection(s)
+they need to read their own writes against. A per-SDK-instance
+auto-collection convenience remains compatible with v1 and may
+be added later; the store primitive stays explicit.
 
 **Implications:**
 
@@ -300,9 +309,9 @@ The handler receives the event and an opaque context (`workerId`,
 `partitionKey`, `eventNumber`, `attempt`, `signal`); it does
 **not** receive a Postgres connection, an ORM handle, or any
 other SDK-owned resource. Handler returns successfully → SDK
-runs the terminal-success step. Handler throws → SUB-B error
-policy decides whether to retry against the same claim or stop;
-in neither case does the terminal step fire.
+runs the terminal-success step. Handler throws → the SDK's
+error policy decides whether to retry against the same claim or
+stop; in neither case does the terminal step fire.
 
 **Why:** A previous design ran the handler inside the SDK's
 transaction so projection writes and the work-item terminal
@@ -383,12 +392,9 @@ directives to advisory hints.
   `apply`'s state machine, or shape the routing function so it
   stops matching once the terminal upstream events have passed).
 - A widening to `RoutingFn -> { partitionKey }[]` for
-  one-event-many-partitions (`PM-A` fan-out) is
-  backwards-compatible at the call site and is reserved for a
-  later design pass; v1 ships with the singular return.
-- See [`upgrade-notes/pm-f.md`](upgrade-notes/pm-f.md) for the
-  pre-release migration matrix mapping each former directive to
-  its new shape.
+  one-event-many-partitions fan-out is backwards-compatible at
+  the call site and is reserved for a later design pass; v1
+  ships with the singular return.
 
 ---
 
@@ -446,22 +452,20 @@ schema is unchanged; the loop shape and `claim_subscription`'s
 internal locking are tightened to make work-stealing across
 processes the natural default.
 
-**Why:** v1's stated operational property is "any routing worker
-can pick up routing work" — spinning up a second process should
-immediately share routing load with the first, not idle waiting for
-the first to die. The earlier loop sketch in `architecture.md`
-(claim-once + heartbeat + poll + release-on-shutdown) gave one
-worker process *de facto* ownership of every subscription it
-touched at startup; a second process would observe `already_claimed`
-on every claim and never route until the first failed. That is
-the failover model, not the work-stealing model.
+**Why:** the operational property is "any routing worker can pick
+up routing work" — spinning up a second process should
+immediately share routing load with the first, not idle waiting
+for the first to die. A claim-once-and-heartbeat loop would give
+one worker process *de facto* ownership of every subscription it
+touched at startup; a second process would observe
+`already_claimed` on every claim and never route until the first
+failed. That is the failover model, not the work-stealing model.
 
-Reshaping the loop to claim-per-batch eliminates the monopoly
-without introducing a new axis of parallelism (no concurrent
-routing workers; ML-0013 stays deferred). At any instant there is
+Claim-per-batch eliminates the monopoly without introducing a
+new axis of parallelism (no concurrent routing workers per
+subscription; ML-0013 stays deferred). At any instant there is
 still exactly one routing worker per subscription; the active
-worker just rotates per batch across whichever processes are
-running.
+worker rotates per batch across whichever processes are running.
 
 **The loop shape:**
 
@@ -503,8 +507,7 @@ read (live lease held by someone else) or fall through to a 0-row
 the caller sees `'already_claimed'` without ever queueing on a
 lock.
 
-**Lock vs lease.** The schema distinguishes two mechanisms that
-the earlier sketch was loose about:
+**Lock vs lease.** The schema distinguishes two mechanisms:
 
 - **Postgres row lock** — held by `FOR UPDATE` inside one
   procedure call (claim / extend / route_batch / release).
@@ -512,8 +515,7 @@ the earlier sketch was loose about:
 - **Application-level lease** — the `claimed_by` /
   `claim_expires_at` columns. Consulted by `route_batch` etc.
   via column comparison, not via lock holding. Lives for the
-  duration the SDK chooses (per-batch under D-0025; per-worker-
-  lifetime under the old sketch).
+  duration the SDK chooses (per-batch in this loop).
 
 INV-SUB-P-010 ("at most one live routing worker holds the lease
 at any moment") is enforced by the application-level lease, not
@@ -545,10 +547,6 @@ duration; if you can't bound that, shrink `batch_size`.
   drops the partial batch and loops.
 - `release_subscription` is called per batch in the steady
   state, not only on shutdown.
-- No SQL contract change: `claim_subscription`'s input/output
-  shape and error set are unchanged. The internal locking is
-  tightened; the externally-observable behaviour envelope is
-  unchanged. All existing conformance tests pass unmodified.
 - ML-0013 (concurrent sharded routing) is **not** addressed by
   this decision and stays deferred. The work-stealing this
   decision enables is single-active-per-instant routing with
@@ -557,72 +555,50 @@ duration; if you can't bound that, shrink `batch_size`.
 
 ---
 
-## D-0026 — PM dispatch shares the single client; no separate dispatch pool
+## D-0026 — One `Client` per application; PM dispatch shares it
 
 The SDK exposes one `Client` (and one underlying `pg.Pool` /
 `Queryable`) for the entire application. PM workers dispatch
 commands via `runCommand` against the same client used for every
-other SDK call. There is no `dispatchDb` option, no separate
-dispatch pool, and no second `Client` parameter on
-`startPmWorker`. This supersedes the two-pool model that existed
-from slice 7 through D-0025.
+other SDK call. There is no separate dispatch pool and no second
+`Client` parameter on `startPmWorker`.
 
-**Why the old two-pool model was wrong.** The original framing
-claimed two pools were required "for lock-set disjointness so a
-dispatched aggregate's `appendToStream` cannot deadlock against
-the same worker's `complete_work_item_pm`". Re-walking the
-argument:
+**Why.** A separate dispatch pool would, on the face of it,
+isolate the PM's `appendToStream` from its own
+`complete_work_item_pm` — but the isolation it claims to provide
+is already provided by the SQL contract:
 
 - Postgres locks are scoped to **transactions**, not to clients
-  or pools. A `Client` is a `pg.Pool` wrapper; two `Client`
-  instances around the same pool are indistinguishable at the
-  lock-acquisition layer.
-- Every SDK procedure call is its own transaction. `runCommand`
-  in particular does **not** hold a transaction across the
-  user's `execute` (`aggregate.ts:144-145`). A PM worker's calls
-  — `claim_work_item`, the handler, `runCommand` →
-  `appendToStream`, `complete_work_item_pm` — are four sequential
-  transactions on (potentially) four different pooled
-  connections. There is never a moment where one worker holds
-  locks from two of these sets at once.
+  or pools. Two `Client` wrappers around the same pool are
+  indistinguishable at the lock-acquisition layer.
+- Every SDK procedure call is its own short transaction. A PM
+  worker's calls — `claim_work_item`, the handler, `runCommand`
+  → `appendToStream`, `complete_work_item_pm` — are sequential
+  transactions on (potentially) different pooled connections.
+  There is never a moment where one worker holds locks from two
+  of these sets at once.
 - Deadlock requires two transactions wanting two locks in
   opposite orders. The SQL contract documents lock-acquisition
-  order per procedure (see `sql/instructed.sql:447`) and the
-  three sets — dispatch (`streams`, `events`, `stream_events`),
-  routing (`subscriptions`, `subscription_work_items`),
-  processing-terminal (`subscription_work_items`, `snapshots`)
-  — are pairwise disjoint by construction. No cycle is possible
-  whether the SDK uses one pool or two.
-- The `client === dispatchClient` runtime guard the SDK enforced
-  was identity comparison on `Client` wrappers and did not
-  actually enforce session isolation. The slice-7 commit
-  message conceded this: "Two different Client wrappers around
-  the same pool is allowed."
-- The historical PM-dispatch deadlock concern (commit `eb4e66b`,
-  Feb 2026, pre-SUB-A, Gleam codebase) was at a different layer:
-  a strong-consistency handler dispatching a command whose own
-  consistency-wait list transitively included the handler, so
-  the handler waited for itself to ack. The fix was PID
-  auto-exclusion at the orchestration layer, not pool
-  separation. In the current TS SDK the PM hot path goes through
-  `runCommand` directly (no consistency wait), so the scenario
-  is structurally absent regardless of pool count.
+  order per procedure, and the three sets — dispatch (`streams`,
+  `events`, `stream_events`), routing (`subscriptions`,
+  `subscription_work_items`), processing-terminal
+  (`subscription_work_items`, `snapshots`) — are pairwise
+  disjoint by construction. No cycle is possible whether the
+  SDK uses one pool or two.
 
-**Why one pool is the right default under D-0025.** The two
-strategies users now have for handling load and contention are:
+The two strategies for handling load and contention under one
+pool are:
 
 1. Spin up more processes. Per D-0025, additional processes
    share routing work batch-by-batch; per the work-item claim
    model with `FOR UPDATE SKIP LOCKED`, additional processes
-   share processing work item-by-item. Aggregate dispatch and PM
-   dispatch are stateless from the SDK's perspective and need no
-   coordination at all. Adding processes evenly scales every
-   workload type.
+   share processing work item-by-item. Adding processes evenly
+   scales every workload type.
 2. Run processes specialised by workload (an API-facing
    dispatcher tier, a projection-processing tier, a PM tier) and
    scale each independently. Per-process selection of which
-   workers to start is already a feature of
-   `Instructed.startWorker`'s registration model.
+   workers to start is a feature of `Instructed.startWorker`'s
+   registration model.
 
 Neither strategy requires multiple pools inside one process.
 Connection-budget isolation between PM dispatch and the rest of
@@ -631,21 +607,12 @@ separation when it actually arises.
 
 **Implications:**
 
-- `InstructedOptions.dispatchDb` is removed. Callers that were
-  passing it can simply drop the option; the persist `db` is now
-  used for everything.
-- The `Instructed.dispatchClient()` accessor is removed.
-- `startPmWorker(client, dispatchClient, def, opts)` becomes
-  `startPmWorker(client, def, opts)`. The runtime check
-  enforcing `client !== dispatchClient` is deleted.
-- No SQL contract change: lock-set disjointness, per-procedure
-  lock-acquisition orders, and the procedure error sets are all
-  unchanged. The disjointness statement in `sql-contract.md`
-  stays — it is a true property of the SQL contract — but the
-  consequence "so you need two pools" was always a non-sequitur
-  and is removed from the docs.
-- All 168 conformance tests pass unmodified. The change is
-  entirely in the SDK and its documentation.
+- `Instructed` takes a single `db` option. There is no
+  `dispatchDb`, no `dispatchClient()` accessor.
+- `startPmWorker(client, def, opts)` takes one client.
+- The lock-set disjointness statement in `sql-contract.md` is a
+  property of the SQL contract; it does not require pool or
+  client separation in the SDK.
 
 ---
 
@@ -661,60 +628,40 @@ The TypeScript SDK is published as a single npm package,
     SDK port must reproduce per the porting checklist. For
     consumers who want to build their own L3 facade.
 
-A two-package split (`@instructed/core` + `@instructed/runtime`
-or similar) was considered and rejected for v1.
+**Why one package, not two.**
 
-**Why one package.**
-
-- The layer model that needs to be conveyed to porters (TODO #2,
-  TODO #6) is conveyed by the porting checklist doc and by the
-  re-export grouping inside `src/index.ts`. The package-manager
-  layer is not the right enforcement mechanism for a contract
-  whose audience is "people writing the SDK in another
-  language" — they read the checklist, not our `package.json`.
+- The layer model that needs to be conveyed to porters is
+  conveyed by the porting checklist doc and by the re-export
+  grouping inside `src/index.ts`. The package-manager layer is
+  not the right enforcement mechanism for a contract whose
+  audience is "people writing the SDK in another language" —
+  they read the checklist, not our `package.json`.
 - The natural use-shape for application code is one import
-  (`import { Instructed } from "instructed-sdk"`), and the
-  bank-account example confirms this is the ergonomic default.
-  Two packages would force every application to declare both
-  in `package.json` for no application-visible benefit.
-- Version-skew between a hypothetical `@instructed/core` and
-  `@instructed/runtime` is a real cost users would have to pay
-  attention to (pinning, peer-dep matching, npm resolution
-  surprises). Inside one package the layers move in lockstep,
-  one changelog, one release.
+  (`import { Instructed } from "instructed-sdk"`). Two packages
+  would force every application to declare both for no
+  application-visible benefit.
+- Inside one package the layers move in lockstep, one changelog,
+  one release. Two packages introduce version-skew costs
+  (pinning, peer-dep matching) for no semantic gain.
 - The L2/L3 split is "same node process, same DB, same audience"
   — closer to the `zod` / `drizzle-orm` / `kysely` shape (one
   package, multiple sub-paths) than the `@trpc/server` +
   `@trpc/client` shape (two packages because two ecosystems).
-- Pre-1.0, the multi-package overhead (two publishes, two
-  changelogs, two version cuts, peer-dep declarations between
-  them) outweighs the legibility benefit.
 
-**Why the `core` sub-path is still worth having.**
-
-- A consumer who wants to write their own L3 facade (custom
-  routing surface, alternative `dispatch` shape, different
-  consistency mechanism) can import from `instructed-sdk/core`
-  and be guaranteed the import doesn't pull `Instructed`,
-  `waitForProjection`, or the partition-by sugar — none of
-  which they want.
-- The sub-path is the package-level analogue of the porting
-  checklist: "this is what every SDK reproduces". A TS author
-  reading the SDK source can follow the sub-path entry into
-  the L1+L2 surface and see exactly the inventory the
-  checklist names.
-- The L1-only sub-path proposed in an earlier draft is
-  dropped. L1-only (`Client` + error classes + types) without
-  L2 (the aggregate loop, the routing worker, the processing
-  worker) is not a viable build target — anyone holding just
-  L1 ends up re-implementing L2 from scratch, which is the
-  bug class TODO #2 is designed to prevent. The sub-path that
-  is useful is the L1+L2 one.
+**Why the `core` sub-path is worth having.** A consumer who
+wants to write their own L3 facade (custom routing surface,
+alternative `dispatch` shape, different consistency mechanism)
+can import from `instructed-sdk/core` and be guaranteed the
+import doesn't pull `Instructed`, `waitForProjection`, or the
+partition-by sugar. The sub-path is the package-level analogue
+of the porting checklist: "this is what every SDK reproduces".
+An L1-only sub-path is not offered — L1 without L2 (the
+aggregate loop, the routing worker, the processing worker) is
+not a viable build target.
 
 **Reversibility.** Splitting into two packages later is
 mechanical: the sub-path becomes the second package's name; the
-re-export grouping stays. Going from two packages back to one is
-also fine. The cost of getting this wrong at v1 is low.
+re-export grouping stays.
 
 **Implications.**
 
