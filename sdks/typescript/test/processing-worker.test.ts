@@ -169,7 +169,7 @@ describe("processing worker — per-partition ordering", () => {
       // Must be in event_number order regardless of which worker handled which.
       assert.deepEqual(seen, [e1, e2, e3]);
     } finally {
-      await Promise.all([w1.close(), w2.close()]);
+      await Promise.all([w1.stop(), w2.stop()]);
     }
   });
 });
@@ -236,7 +236,7 @@ describe("processing worker — parallel across partitions", () => {
         }ms`,
       );
     } finally {
-      await Promise.all(workers.map((w) => w.close()));
+      await Promise.all(workers.map((w) => w.stop()));
     }
   });
 });
@@ -308,8 +308,8 @@ describe("processing worker — lease takeover", () => {
       assert.ok(takeoverEvents.length >= 1, "expected a takeover surface");
     } finally {
       release();
-      await wA.close();
-      await wB.close();
+      await wA.stop();
+      await wB.stop();
     }
   });
 
@@ -347,7 +347,7 @@ describe("processing worker — lease takeover", () => {
       await waitFor(async () => (completedCount > 0 ? true : null), 4000);
       assert.equal(completedCount, 1);
     } finally {
-      await w.close();
+      await w.stop();
     }
   });
 });
@@ -393,7 +393,7 @@ describe("processing worker — `failed` blocks the partition only", () => {
       // e3 (p2) must have been processed.
       assert.ok(seen.some((s) => s.en === e3));
     } finally {
-      await w.close();
+      await w.stop();
     }
   });
 });
@@ -425,7 +425,7 @@ describe("processing worker — default error policy back-off", () => {
       });
       assert.equal(attempts, 3, `expected 3 attempts; got ${attempts}`);
     } finally {
-      await w.close();
+      await w.stop();
     }
   });
 

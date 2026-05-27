@@ -138,7 +138,7 @@ describe("routing worker — happy path", () => {
         ls !== null && ls >= BigInt(items[items.length - 1].event_number),
       );
     } finally {
-      await w.close();
+      await w.stop();
     }
   });
 
@@ -162,7 +162,7 @@ describe("routing worker — happy path", () => {
       const ls = await lastSeen(name);
       assert.equal(ls, ens[2]);
     } finally {
-      await w.close();
+      await w.stop();
     }
   });
 
@@ -187,7 +187,7 @@ describe("routing worker — happy path", () => {
         ens.map((e) => e.toString()),
       );
     } finally {
-      await w.close();
+      await w.stop();
     }
   });
 });
@@ -206,7 +206,7 @@ describe("routing worker — determinism / idempotency", () => {
     });
     const itemsBefore = await workItems(name);
     const lsBefore = await lastSeen(name);
-    await w1.close();
+    await w1.stop();
 
     // Second worker, same definition, same data — should be a no-op.
     const w2 = startRoutingWorker(client, {
@@ -221,7 +221,7 @@ describe("routing worker — determinism / idempotency", () => {
       assert.deepEqual(itemsAfter, itemsBefore);
       assert.equal(lsAfter, lsBefore);
     } finally {
-      await w2.close();
+      await w2.stop();
     }
   });
 });
@@ -262,7 +262,7 @@ describe("routing worker — crash safety", () => {
       // Now close while we're stuck inside routeFn for event #5.
       // close() aborts the signal; the in-flight batch is dropped
       // without route_batch being called.
-      const closing = w.close();
+      const closing = w.stop();
       release();
       await closing;
 
@@ -295,7 +295,7 @@ describe("routing worker — crash safety", () => {
       name,
       routeFn: () => ({ partitionKey: "p" }),
     });
-    await w1.close();
+    await w1.stop();
 
     // Fresh worker resumes from cursor=0 and routes all 3.
     const w2 = startRoutingWorker(client, {
@@ -314,7 +314,7 @@ describe("routing worker — crash safety", () => {
         ens.map((e) => e.toString()),
       );
     } finally {
-      await w2.close();
+      await w2.stop();
     }
   });
 });
@@ -400,7 +400,7 @@ describe("routing worker — race safety", () => {
     } finally {
       polling = false;
       await poller;
-      await w.close();
+      await w.stop();
     }
 
     assert.deepEqual(
@@ -447,7 +447,7 @@ describe("routing worker — lifecycle", () => {
       const items = await workItems(name);
       assert.equal(items.length, 20);
     } finally {
-      await Promise.all([wA.close(), wB.close()]);
+      await Promise.all([wA.stop(), wB.stop()]);
     }
   });
 
@@ -524,7 +524,7 @@ describe("routing worker — lifecycle", () => {
       } catch {
         /* ignore */
       }
-      await w.close();
+      await w.stop();
     }
   });
 
@@ -545,7 +545,7 @@ describe("routing worker — lifecycle", () => {
       const ls = await lastSeen(name);
       return ls !== null && ls > 0n ? true : null;
     });
-    await w1.close();
+    await w1.stop();
     const r = await pool.query<{ claimed_by: string | null }>(
       `SELECT claimed_by FROM instructed.subscriptions
         WHERE subscription_name = $1`,

@@ -55,8 +55,8 @@ function startProjPair(
   );
   return {
     stopped: Promise.all([router.stopped, proc.stopped]).then(() => {}),
-    close: async () => {
-      await Promise.all([router.close(), proc.close()]);
+    stop: async () => {
+      await Promise.all([router.stop(), proc.stop()]);
     },
   };
 }
@@ -109,7 +109,7 @@ describe("waitForProjection -- happy path", () => {
       const pos = await client.readSubscriptionPosition("$all", name);
       assert.ok(pos.lastSeen >= appended[appended.length - 1].event_number);
     } finally {
-      await worker.close();
+      await worker.stop();
     }
   });
 
@@ -146,7 +146,7 @@ describe("waitForProjection -- happy path", () => {
       const pos = await client.readSubscriptionPosition(stream, name);
       assert.ok(pos.lastSeen >= appended[0].event_number);
     } finally {
-      await worker.close();
+      await worker.stop();
     }
   });
 
@@ -305,7 +305,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
       await racer;
     } finally {
       release();
-      await Promise.all([router.close(), proj.close()]);
+      await Promise.all([router.stop(), proj.stop()]);
     }
   });
 
@@ -371,7 +371,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
           (err as ConsistencyTimeout).missing.includes(`$all::${name}`),
       );
     } finally {
-      await router.close();
+      await router.stop();
     }
   });
 
@@ -426,7 +426,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
       );
       assert.ok(handled >= 1, "handler must have run before wait returned");
     } finally {
-      await Promise.all([router.close(), proj.close()]);
+      await Promise.all([router.stop(), proj.stop()]);
     }
   });
 });
@@ -466,7 +466,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
         { timeout: 5_000, pollInterval: 10 },
       );
     } finally {
-      await worker.close();
+      await worker.stop();
     }
   });
 
@@ -541,7 +541,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
           (err as ConsistencyTargetError).subscriptionStream === otherStream,
       );
     } finally {
-      await worker.close();
+      await worker.stop();
     }
   });
 
@@ -561,7 +561,7 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
         { timeout: 5_000, pollInterval: 10 },
       );
     } finally {
-      await worker.close();
+      await worker.stop();
     }
   });
 });

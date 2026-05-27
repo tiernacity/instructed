@@ -90,8 +90,8 @@ interface SpawnArgs {
 function compose(a: RunningWorker, b: RunningWorker): RunningWorker {
   return {
     stopped: Promise.all([a.stopped, b.stopped]).then(() => {}),
-    close: async () => {
-      await Promise.all([a.close(), b.close()]);
+    stop: async () => {
+      await Promise.all([a.stop(), b.stop()]);
     },
   };
 }
@@ -155,12 +155,12 @@ function keepAlive(
         return;
       }
       stopping = true;
-      await current.close();
+      await current.stop();
       await loop;
     },
     async bounce() {
-      // Closing the current pair triggers the keep-alive to respawn.
-      await current.close();
+      // Stopping the current pair triggers the keep-alive to respawn.
+      await current.stop();
     },
   };
 }

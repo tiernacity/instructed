@@ -363,7 +363,7 @@ export function startRoutingWorker<E extends Event = Event>(
 
   return {
     stopped,
-    close(): Promise<void> {
+    stop(): Promise<void> {
       if (closePromise) return closePromise;
       closing = true;
       try {

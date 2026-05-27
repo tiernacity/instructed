@@ -11,21 +11,25 @@ export const PG_URL =
   process.env.INSTRUCTED_DATABASE_URL ??
   "postgresql://postgres:postgres@127.0.0.1:5433/bank_account";
 
-export function installSignalHandlers(onStop: () => Promise<void> | void): void {
-  let stopping = false;
-  const stop = async (sig: NodeJS.Signals) => {
-    if (stopping) return;
-    stopping = true;
-    process.stderr.write(`\n[${sig}] shutting down…\n`);
-    try {
-      await onStop();
-    } catch (err) {
-      process.stderr.write(`shutdown error: ${(err as Error).message}\n`);
-    }
-    process.exit(0);
-  };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
+/**
+ * Resolves on the first SIGINT or SIGTERM. Callers race this against
+ * `worker.stopped` and clean up in a `finally`; no `process.exit()`
+ * is needed — letting `main()` return cleanly is preferable because
+ * it lets `finally` clauses (pool close, file flush, etc.) complete
+ * without the brutal short-circuit `process.exit()` imposes.
+ *
+ * Listeners are registered with `process.once` so the handler is
+ * idempotent across spurious double-signals.
+ */
+export function waitForShutdown(): Promise<NodeJS.Signals> {
+  return new Promise((resolve) => {
+    const stop = (sig: NodeJS.Signals): void => {
+      process.stderr.write(`\n[${sig}] shutting down…\n`);
+      resolve(sig);
+    };
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+  });
 }
 
 export function requireArg(argv: string[], index: number, name: string): string {

@@ -156,8 +156,8 @@ function startPair<E extends Event>(
     processingWorkers,
     async closeAll() {
       await Promise.all([
-        routing.close(),
-        ...processingWorkers.map((w) => w.close()),
+        routing.stop(),
+        ...processingWorkers.map((w) => w.stop()),
       ]);
     },
   };

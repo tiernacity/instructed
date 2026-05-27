@@ -240,7 +240,7 @@ describe("startPmWorker — non-terminal complete", () => {
       // sourceVersion = the most recently processed event's number.
       assert.equal(snap.source_version, ens[1].toString());
     } finally {
-      await Promise.all([router.close(), worker.close()]);
+      await Promise.all([router.stop(), worker.stop()]);
     }
   });
 });
@@ -303,7 +303,7 @@ describe("startPmWorker — multi-command dispatch", () => {
         assert.equal(row.causation_id, triggeringEventId);
       }
     } finally {
-      await Promise.all([router.close(), worker.close()]);
+      await Promise.all([router.stop(), worker.stop()]);
     }
   });
 });
@@ -358,7 +358,7 @@ describe("startPmWorker — complete: true (PM-F terminal)", () => {
       assert.equal(await snapshotRow(`${name}-p1`), null);
       assert.deepEqual(await listWorkItems(name), []);
     } finally {
-      await Promise.all([router.close(), worker.close()]);
+      await Promise.all([router.stop(), worker.stop()]);
     }
   });
 });
@@ -385,8 +385,8 @@ describe("startPmWorker — rebuild on missing snapshot", () => {
         return rows.filter((x) => x.state === "done").length >= 2 ? true : null;
       });
     } finally {
-      await w1.close();
-      await r1.close();
+      await w1.stop();
+      await r1.stop();
     }
 
     // Phase 2: simulate a snapshot loss (operator drop, or first
@@ -422,8 +422,8 @@ describe("startPmWorker — rebuild on missing snapshot", () => {
         return rows.filter((x) => x.state === "done").length >= 3 ? true : null;
       });
     } finally {
-      await w2.close();
-      await r2.close();
+      await w2.stop();
+      await r2.stop();
     }
 
     // The third event's stage state should reflect ALL three event
@@ -463,8 +463,8 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
         return rows.filter((x) => x.state === "done").length >= 2 ? true : null;
       });
     } finally {
-      await w1.close();
-      await r1.close();
+      await w1.stop();
+      await r1.stop();
     }
 
     const v1Snap = await snapshotRow(`${name}-p1`);
@@ -512,8 +512,8 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
         return rows.filter((x) => x.state === "done").length >= 3 ? true : null;
       });
     } finally {
-      await w2.close();
-      await r2.close();
+      await w2.stop();
+      await r2.stop();
     }
     assert.equal(
       loadedFromSnapshot,
@@ -590,7 +590,7 @@ describe("startPmWorker — dispatch failure leaves work-item claimed", () => {
       assert.equal(rows[0].state, "claimed");
       assert.equal(await snapshotRow(`${name}-p1`), null);
     } finally {
-      await Promise.all([router.close(), worker.close()]);
+      await Promise.all([router.stop(), worker.stop()]);
     }
   });
 });
@@ -615,7 +615,7 @@ describe("startPmWorker — empty handle result", () => {
       });
       assert.ok(await snapshotRow(`${name}-p1`));
     } finally {
-      await Promise.all([router.close(), worker.close()]);
+      await Promise.all([router.stop(), worker.stop()]);
     }
   });
 });

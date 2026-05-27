@@ -31,7 +31,7 @@ function isExplicit(c: DispatchedCommand): c is DispatchedCommandExplicit {
   );
 }
 
-import { PG_URL, installSignalHandlers } from "../src/common.ts";
+import { PG_URL, waitForShutdown } from "../src/common.ts";
 import { Account } from "../src/aggregates/account.ts";
 import { Transfer } from "../src/aggregates/transfer.ts";
 import { appCommandRouter } from "../src/command-router.ts";
@@ -82,26 +82,26 @@ function withTrace<E extends import("instructed-sdk").Event>(
 
 async function main(): Promise<void> {
   const pool = new pg.Pool({ connectionString: PG_URL });
-  const app = new Instructed({ db: pool })
-    .register(Account)
-    .register(Transfer)
-    .register(appCommandRouter)
-    .register(withTrace(transferProcessManager()), {
-      pollInterval: 50,
-      heartbeatInterval: 1_000,
-      onError: (err: Error) =>
-        process.stderr.write(`  [PM error] ${err.message}\n`),
-    });
+  try {
+    const app = new Instructed({ db: pool })
+      .register(Account)
+      .register(Transfer)
+      .register(appCommandRouter)
+      .register(withTrace(transferProcessManager()), {
+        pollInterval: 50,
+        heartbeatInterval: 1_000,
+        onError: (err: Error) =>
+          process.stderr.write(`  [PM error] ${err.message}\n`),
+      });
 
-  const worker = await app.poll();
-  process.stdout.write(`[${TransferProcessManager}] worker started\n`);
+    const worker = await app.poll();
+    process.stdout.write(`[${TransferProcessManager}] worker started\n`);
 
-  installSignalHandlers(async () => {
-    await worker.close();
+    await Promise.race([waitForShutdown(), worker.stopped]);
+    await worker.stop();
+  } finally {
     await pool.end();
-  });
-
-  await worker.stopped;
+  }
 }
 
 main().catch((err) => {

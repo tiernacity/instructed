@@ -469,7 +469,7 @@ export class Instructed {
    * manager and returns a composite handle covering all of them.
    *
    * The application owns the returned `RunningWorker`: it must
-   * call `.close()` to stop, and may keep a reference to
+   * call `.stop()` to stop, and may keep a reference to
    * `.stopped` for a clean shutdown wait. The facade does *not*
    * track or auto-stop returned workers.
    *
@@ -562,12 +562,12 @@ export class Instructed {
 
     return {
       stopped: Promise.all(workers.map((w) => w.stopped)).then(() => {}),
-      close: async () => {
-        // Parallel close: routing-worker dropping mid-batch is the
+      stop: async () => {
+        // Parallel stop: routing-worker dropping mid-batch is the
         // same observable behaviour as a crash (ML-0012); processing
         // workers honour the AbortSignal and finish their in-flight
         // item before exiting.
-        await Promise.all(workers.map((w) => w.close()));
+        await Promise.all(workers.map((w) => w.stop()));
       },
     };
   }

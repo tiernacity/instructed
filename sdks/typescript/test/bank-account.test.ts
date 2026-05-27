@@ -454,7 +454,7 @@ describe("bank-account end-to-end (standalone)", () => {
       const types = bobEvents.map((e) => e.type);
       assert.deepEqual(types, ["AccountOpened", "Deposited", "WithdrawalRefused"]);
     } finally {
-      await worker.close();
+      await worker.stop();
     }
   });
 });

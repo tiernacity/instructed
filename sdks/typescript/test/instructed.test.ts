@@ -212,7 +212,7 @@ describe("Instructed -- poll fan-out", () => {
         }
       }, 5_000, "PM-dispatched events to land");
     } finally {
-      await handle.close();
+      await handle.stop();
     }
   });
 
@@ -254,7 +254,7 @@ describe("Instructed -- dispatch consistency wait", () => {
       // past the appended event -- its handler ran.
       assert.ok(seen >= 1, `expected handler to have run, got ${seen}`);
     } finally {
-      await handle.close();
+      await handle.stop();
     }
   });
 });

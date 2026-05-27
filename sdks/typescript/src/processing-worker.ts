@@ -515,7 +515,7 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
 
   return {
     stopped,
-    close(): Promise<void> {
+    stop(): Promise<void> {
       if (closePromise) return closePromise;
       closing = true;
       try {

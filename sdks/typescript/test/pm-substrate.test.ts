@@ -140,8 +140,8 @@ describe("startPmSubstrate — L2 contract", () => {
       assert.equal(snap.data.value, 1);
       assert.equal(snap.sourceType, name);
     } finally {
-      await worker.close();
-      await router.close();
+      await worker.stop();
+      await router.stop();
     }
   });
 
@@ -177,8 +177,8 @@ describe("startPmSubstrate — L2 contract", () => {
         (err: Error) => err.name === "SnapshotNotFound",
       );
     } finally {
-      await worker.close();
-      await router.close();
+      await worker.stop();
+      await router.stop();
     }
   });
 
@@ -217,8 +217,8 @@ describe("startPmSubstrate — L2 contract", () => {
       });
       assert.equal(sideEffectRan, true);
     } finally {
-      await worker.close();
-      await router.close();
+      await worker.stop();
+      await router.stop();
     }
   });
 });
