@@ -88,13 +88,13 @@ async function main(): Promise<void> {
       .register(Transfer)
       .register(appCommandRouter)
       .register(withTrace(transferProcessManager()), {
-        pollInterval: 50,
-        heartbeatInterval: 1_000,
         onError: (err: Error) =>
           process.stderr.write(`  [PM error] ${err.message}\n`),
       });
 
-    const worker = await app.poll();
+    const worker = await app.poll({
+      defaults: { pollInterval: 50, heartbeatInterval: 1_000 },
+    });
     process.stdout.write(`[${TransferProcessManager}] worker started\n`);
 
     await Promise.race([waitForShutdown(), worker.stopped]);

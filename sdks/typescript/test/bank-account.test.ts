@@ -343,26 +343,22 @@ describe("bank-account end-to-end (standalone)", () => {
     const app = new Instructed({ db: pool })
       .register(Account)
       .register(Transfer)
-      .register(
-        {
-          type: "Balances",
-          routeFn: balancesRouteFn,
-          handler: balancesHandler(view),
-        },
-        { pollInterval: 25, heartbeatInterval: 1_000 },
-      )
-      .register(
-        {
-          type: TRANSFER_PM_NAME,
-          routeFn: transferRouteFn,
-          initialState: () => ({ stage: "starting" }),
-          apply: transferApply,
-          handle: transferHandle,
-        },
-        { pollInterval: 25, heartbeatInterval: 1_000 },
-      );
+      .register({
+        type: "Balances",
+        routeFn: balancesRouteFn,
+        handler: balancesHandler(view),
+      })
+      .register({
+        type: TRANSFER_PM_NAME,
+        routeFn: transferRouteFn,
+        initialState: () => ({ stage: "starting" }),
+        apply: transferApply,
+        handle: transferHandle,
+      });
 
-    const worker = await app.poll();
+    const worker = await app.poll({
+      defaults: { pollInterval: 25, heartbeatInterval: 1_000 },
+    });
     try {
       const alice = randomUUID();
       const bob = randomUUID();

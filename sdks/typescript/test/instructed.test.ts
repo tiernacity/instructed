@@ -148,52 +148,48 @@ describe("Instructed -- poll fan-out", () => {
     // returns `"ignore"` for the would-be-skipped events.
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let projSeen = 0;
-    app.register(
-      {
-        type: projName,
-        routeFn: (e) =>
-          e.type === "Triggered"
-            ? { partitionKey: "_default" }
-            : "ignore",
-        async handler() {
-          projSeen++;
-        },
+    app.register({
+      type: projName,
+      routeFn: (e) =>
+        e.type === "Triggered"
+          ? { partitionKey: "_default" }
+          : "ignore",
+      async handler() {
+        projSeen++;
       },
-      { pollInterval: 25, heartbeatInterval: 1_000 },
-    );
+    });
 
     // A PM on $all that forwards each Triggered event into Counter.
     // PM-F routing: every "Triggered" event spins its own partition
     // (so the PM stops after one event per partition).
     const pmName = `pm-${randomUUID().slice(0, 8)}`;
     const targetStream = randomUUID();
-    app.register(
-      {
-        type: pmName,
-        routeFn: (e) =>
-          e.type === "Triggered"
-            ? {
-                partitionKey:
-                  (e.data as { processId: string }).processId,
-              }
-            : "ignore",
-        initialState: () => ({ done: false }),
-        apply: (state) => state,
-        async handle() {
-          const commands: DispatchedCommand[] = [
-            {
-              streamUuid: targetStream,
-              aggregate: Counter,
-              command: { kind: "add", n: 1 } as CounterCommand,
-            },
-          ];
-          return { commands, complete: true };
-        },
+    app.register({
+      type: pmName,
+      routeFn: (e) =>
+        e.type === "Triggered"
+          ? {
+              partitionKey:
+                (e.data as { processId: string }).processId,
+            }
+          : "ignore",
+      initialState: () => ({ done: false }),
+      apply: (state) => state,
+      async handle() {
+        const commands: DispatchedCommand[] = [
+          {
+            streamUuid: targetStream,
+            aggregate: Counter,
+            command: { kind: "add", n: 1 } as CounterCommand,
+          },
+        ];
+        return { commands, complete: true };
       },
-      { pollInterval: 25, heartbeatInterval: 1_000 },
-    );
+    });
 
-    const handle = await app.poll();
+    const handle = await app.poll({
+      defaults: { pollInterval: 25, heartbeatInterval: 1_000 },
+    });
     try {
       const trigger = randomUUID();
       await app.client().appendToStream(trigger, expected.noStream, [
@@ -231,18 +227,17 @@ describe("Instructed -- dispatch consistency wait", () => {
 
     const projName = `proj-${randomUUID().slice(0, 8)}`;
     let seen = 0;
-    app.register(
-      {
-        type: projName,
-        routeFn: (e: RecordedEvent) =>
-          e.type === "Added" ? { partitionKey: "_default" } : "ignore",
-        async handler() {
-          seen++;
-        },
+    app.register({
+      type: projName,
+      routeFn: (e: RecordedEvent) =>
+        e.type === "Added" ? { partitionKey: "_default" } : "ignore",
+      async handler() {
+        seen++;
       },
-      { pollInterval: 25, heartbeatInterval: 1_000 },
-    );
-    const handle = await app.poll();
+    });
+    const handle = await app.poll({
+      defaults: { pollInterval: 25, heartbeatInterval: 1_000 },
+    });
     try {
       await app.dispatch<CounterCommand>(
         "Counter",

@@ -128,9 +128,11 @@ export {
 // registration, single `startWorker()`, single `close()`.
 export {
   Instructed,
+  DEFAULT_WORKER_OPTIONS,
   type InstructedOptions,
-  type InstructedDefaults,
   type RegistrationOptions,
+  type WorkerOptions,
+  type PollOptions,
   type ProjectionDefinition,
   type ProcessManagerDefinition,
   type DispatchOptions,

@@ -26,13 +26,13 @@ async function main(): Promise<void> {
   const pool = new pg.Pool({ connectionString: PG_URL });
   try {
     const app = new Instructed({ db: pool }).register(balancesProjection(pool), {
-      pollInterval: 50,
-      heartbeatInterval: 1_000,
       onError: (err: Error) =>
         process.stderr.write(`  [Balances error] ${err.message}\n`),
     });
 
-    const worker = await app.poll();
+    const worker = await app.poll({
+      defaults: { pollInterval: 50, heartbeatInterval: 1_000 },
+    });
     process.stdout.write(
       `[Balances] worker started; refreshing every ${PRINT_INTERVAL_MS}ms\n`,
     );

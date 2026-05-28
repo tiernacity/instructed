@@ -18,9 +18,12 @@
  *
  *   - `AggregateDefinition` (has `execute`): no `opts`.
  *   - `CommandRouter` (a function): no `opts`; at most one.
- *   - `ProjectionDefinition` (has `handler`): `opts` for
- *     lease/poll/heartbeat/onError. `partitionBy` and `routeFn`
- *     are mutually exclusive; default `{ kind: 'sequential' }`.
+ *   - `ProjectionDefinition` (has `handler`): `opts` is just
+ *     `{ onError? }`. Runtime tuning (lease / poll / heartbeat /
+ *     batch size) is supplied to `poll()` instead, where it can
+ *     be set per-process and per-worker; see {@link WorkerOptions}
+ *     and {@link PollOptions}. `partitionBy` and `routeFn` are
+ *     mutually exclusive; default `{ kind: 'sequential' }`.
  *   - `ProcessManagerDefinition` (has `handle` + `routeFn`): same
  *     `opts` shape as projections.
  *
@@ -85,17 +88,6 @@ import type { RunningWorker } from "./internal/running-worker.ts";
 // Public surface
 // ============================================================================
 
-export interface InstructedDefaults {
-  /** Lease (seconds) for both the routing and processing workers. */
-  leaseSeconds?: number;
-  /** Routing-worker batch size (events per `route_batch` call). */
-  batchSize?: number;
-  /** Poll interval (ms) used by both worker kinds. */
-  pollInterval?: number;
-  /** Aggregate retry budget on conflict. */
-  retryBudget?: number;
-}
-
 export interface InstructedOptions {
   /**
    * The database handle. A `pg.Pool` (typical), a `pg.PoolClient`,
@@ -110,16 +102,69 @@ export interface InstructedOptions {
    * as it wants.
    */
   db: pg.Pool | Queryable;
-  defaults?: InstructedDefaults;
 }
 
-/** Per-registration knobs (applied to both routing and processing). */
+/**
+ * Per-registration knobs that belong with the *domain* registration
+ * rather than with the runtime worker. Currently just `onError`,
+ * which is a worker-lifecycle observability hook. All other knobs
+ * (batchSize / leaseSeconds / heartbeatInterval / pollInterval)
+ * have moved to {@link PollOptions} — see the docstring on
+ * {@link Instructed.poll}.
+ */
 export interface RegistrationOptions {
+  onError?: (err: Error) => void;
+}
+
+/**
+ * Runtime tuning for a worker (routing + processing). Supplied to
+ * {@link Instructed.poll} as either `defaults` (apply to every
+ * worker this process runs) or `workers[name]` (per-worker overrides
+ * keyed by the projection / PM `type`). Resolution order is
+ * `workers[name]` ▶ `defaults` ▶ {@link DEFAULT_WORKER_OPTIONS}
+ * ▶ each worker module's built-in fallback.
+ *
+ * - `batchSize` is consumed by the routing worker only; processing
+ *   workers claim one item at a time and ignore it.
+ * - `heartbeatInterval` is consumed by the processing worker only;
+ *   under D-0025 the routing worker takes per-batch claims and has
+ *   no heartbeat. If omitted, processing workers derive a default
+ *   from `leaseSeconds`.
+ */
+export interface WorkerOptions {
   batchSize?: number;
   leaseSeconds?: number;
   heartbeatInterval?: number;
   pollInterval?: number;
-  onError?: (err: Error) => void;
+}
+
+/**
+ * Documentary defaults for {@link WorkerOptions}, sourced from the
+ * underlying worker modules' constants. Exported so applications
+ * can inspect / extend the defaults without re-deriving them.
+ *
+ * `heartbeatInterval` is intentionally omitted so that processing
+ * workers can derive it from `leaseSeconds` (`max(1s, lease/3)`).
+ */
+export const DEFAULT_WORKER_OPTIONS: WorkerOptions = {
+  batchSize: DEFAULT_ROUTING_BATCH_SIZE,
+  leaseSeconds: DEFAULT_ROUTING_LEASE_SECONDS,
+  pollInterval: DEFAULT_ROUTING_POLL_INTERVAL_MS,
+};
+
+/**
+ * Options for {@link Instructed.poll}.
+ *
+ * - `defaults` applies to every worker started by this `poll()`
+ *   call.
+ * - `workers` overrides defaults per worker, keyed by the
+ *   projection / PM `type`. Unknown keys are rejected at
+ *   `poll()` time so typos fail loudly.
+ */
+export interface PollOptions {
+  workerId?: string;
+  defaults?: WorkerOptions;
+  workers?: Record<string, WorkerOptions>;
 }
 
 export interface DispatchOptions {
@@ -207,8 +252,6 @@ interface RegisteredProcessManager {
 export class Instructed {
   private readonly persistClient_: Client;
 
-  private readonly defaults: Required<InstructedDefaults>;
-
   private readonly aggregates = new Map<
     string,
     AggregateDefinition<unknown, unknown, DomainEvent>
@@ -220,14 +263,6 @@ export class Instructed {
   constructor(opts: InstructedOptions) {
     // The application owns the pool. The facade just wraps it.
     this.persistClient_ = new Client(opts.db);
-
-    this.defaults = {
-      leaseSeconds: opts.defaults?.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS,
-      batchSize: opts.defaults?.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE,
-      pollInterval:
-        opts.defaults?.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS,
-      retryBudget: opts.defaults?.retryBudget ?? DEFAULT_RETRY_BUDGET,
-    };
   }
 
   // ---- registry ----
@@ -439,7 +474,7 @@ export class Instructed {
     const streamUuid = (def.streamName ?? prefixType(def.type))(id);
 
     const runOpts: RunCommandOptions = {
-      retryBudget: opts.retryBudget ?? this.defaults.retryBudget,
+      retryBudget: opts.retryBudget ?? DEFAULT_RETRY_BUDGET,
     };
     if (opts.expectedVersion !== undefined) {
       runOpts.expectedVersion = opts.expectedVersion;
@@ -479,21 +514,42 @@ export class Instructed {
    * same database is the normal HA story; multiple `poll()`s
    * inside one process is mostly useful for tests.
    */
-  async poll(opts: { workerId?: string } = {}): Promise<RunningWorker> {
+  async poll(opts: PollOptions = {}): Promise<RunningWorker> {
     if (this.projections.length === 0 && this.processManagers.length === 0) {
       throw new Error(
         "Instructed.poll: no projections or process managers registered",
       );
     }
 
+    // Validate `workers` keys against registered types so typos
+    // fail loudly instead of silently falling back to defaults.
+    if (opts.workers !== undefined) {
+      const known = new Set<string>([
+        ...this.projections.map((p) => p.def.type),
+        ...this.processManagers.map((pm) => pm.def.type),
+      ]);
+      for (const name of Object.keys(opts.workers)) {
+        if (!known.has(name)) {
+          throw new Error(
+            `Instructed.poll: workers["${name}"] does not match any registered projection or process manager`,
+          );
+        }
+      }
+    }
+
     const workers: RunningWorker[] = [];
 
     // Projections: one routing worker + one processing worker per
-    // registration. Both honour the same per-registration knobs.
+    // registration. Both honour the same resolved per-worker tuning.
     for (const p of this.projections) {
       const routeFn = this.resolveProjectionRouteFn(p);
-      const routingOpts = this.routingOpts(p.opts, opts.workerId);
-      const processingOpts = this.processingOpts(p.opts, opts.workerId);
+      const tuning = this.resolveWorkerOptions(p.def.type, opts);
+      const routingOpts = this.routingOpts(tuning, p.opts, opts.workerId);
+      const processingOpts = this.processingOpts(
+        tuning,
+        p.opts,
+        opts.workerId,
+      );
       const routing = startRoutingWorker(this.persistClient_, {
         name: p.def.type,
         stream: p.stream,
@@ -516,8 +572,13 @@ export class Instructed {
     // PMs: one routing worker + one processing worker per registration.
     // The processing worker takes the dispatch client too (D-0011).
     for (const pm of this.processManagers) {
-      const routingOpts = this.routingOpts(pm.opts, opts.workerId);
-      const processingOpts = this.processingOpts(pm.opts, opts.workerId);
+      const tuning = this.resolveWorkerOptions(pm.def.type, opts);
+      const routingOpts = this.routingOpts(tuning, pm.opts, opts.workerId);
+      const processingOpts = this.processingOpts(
+        tuning,
+        pm.opts,
+        opts.workerId,
+      );
       const routing = startRoutingWorker(this.persistClient_, {
         name: pm.def.type,
         stream: pm.stream,
@@ -589,36 +650,55 @@ export class Instructed {
     return routingFnForPartitionBy(pb);
   }
 
+  /**
+   * Resolve the effective {@link WorkerOptions} for a given
+   * registered worker, in precedence order
+   * `workers[name]` ▶ `defaults` ▶ {@link DEFAULT_WORKER_OPTIONS}.
+   * Worker modules then apply their own fallbacks for any field
+   * still absent (notably `heartbeatInterval`, which derives from
+   * `leaseSeconds`).
+   */
+  private resolveWorkerOptions(
+    name: string,
+    opts: PollOptions,
+  ): WorkerOptions {
+    return {
+      ...DEFAULT_WORKER_OPTIONS,
+      ...(opts.defaults ?? {}),
+      ...(opts.workers?.[name] ?? {}),
+    };
+  }
+
   private routingOpts(
-    o: RegistrationOptions,
+    tuning: WorkerOptions,
+    reg: RegistrationOptions,
     workerId: string | undefined,
   ) {
-    const out: Parameters<typeof startRoutingWorker>[2] = {
-      batchSize: o.batchSize ?? this.defaults.batchSize,
-      leaseSeconds: o.leaseSeconds ?? this.defaults.leaseSeconds,
-      pollInterval: o.pollInterval ?? this.defaults.pollInterval,
-    };
+    const out: Parameters<typeof startRoutingWorker>[2] = {};
+    if (tuning.batchSize !== undefined) out.batchSize = tuning.batchSize;
+    if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds;
+    if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval;
     // Note: `heartbeatInterval` is intentionally ignored for routing
     // workers under D-0025 (per-batch claim/release; no heartbeat).
-    // The option is preserved on `RegistrationOptions` because
-    // processing workers still use it.
-    if (o.onError !== undefined) out.onError = o.onError;
+    if (reg.onError !== undefined) out.onError = reg.onError;
     if (workerId !== undefined) out.workerId = workerId;
     return out;
   }
 
   private processingOpts(
-    o: RegistrationOptions,
+    tuning: WorkerOptions,
+    reg: RegistrationOptions,
     workerId: string | undefined,
   ) {
     // The processing worker has no `batchSize` knob (it claims one
     // item at a time); the other knobs map 1:1.
-    const out: Parameters<typeof startProjectionWorker>[2] = {
-      leaseSeconds: o.leaseSeconds ?? this.defaults.leaseSeconds,
-      pollInterval: o.pollInterval ?? this.defaults.pollInterval,
-    };
-    if (o.heartbeatInterval !== undefined) out.heartbeatInterval = o.heartbeatInterval;
-    if (o.onError !== undefined) out.onError = o.onError;
+    const out: Parameters<typeof startProjectionWorker>[2] = {};
+    if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds;
+    if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval;
+    if (tuning.heartbeatInterval !== undefined) {
+      out.heartbeatInterval = tuning.heartbeatInterval;
+    }
+    if (reg.onError !== undefined) out.onError = reg.onError;
     if (workerId !== undefined) out.workerId = workerId;
     return out;
   }
