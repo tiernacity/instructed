@@ -1,16 +1,17 @@
 /**
- * `npm start` — bring up the isolated docker-compose Postgres in
- * the foreground, apply `sql/instructed.sql` once it's ready, and
- * stay attached. Ctrl-C tears everything down (container, volume,
- * network) and exits.
+ * `npm run db` — bring up the isolated docker-compose Postgres in
+ * the foreground, apply `sql/instructed.sql` and the read-store
+ * schema once it's ready, and stay attached. Ctrl-C tears
+ * everything down (container, volume, network) and exits.
  *
  * Usage:
  *
- *   npm start
+ *   npm run db
  *
- * Once you see "READY", run projection/PM/command scripts in other
- * terminals (npm run projection:balances, npm run open-account
- * alice, …).
+ * Once you see "READY", run `npm run workers` in another terminal
+ * to start the projection / PM workers, `npm run monitor` to watch
+ * the read store, and the `npm run open-account|deposit|transfer`
+ * commands to drive the system.
  */
 
 import { spawn, spawnSync } from "node:child_process";
@@ -160,6 +161,7 @@ async function main(): Promise<void> {
 
   process.stdout.write("READY -- press Ctrl-C to stop and clean up\n");
   process.stdout.write(`  DATABASE_URL = ${PG_URL}\n`);
+  process.stdout.write("  next: npm run workers   (then npm run monitor)\n");
 
   // Wait for compose to exit on its own (e.g. the container
   // dies); the signal handlers cover Ctrl-C.

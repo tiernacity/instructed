@@ -55,10 +55,9 @@ src/
 sql/
   read-store.sql                        bank_account.{balances,transfers}
 scripts/
-  start.ts                  docker compose up + apply both schemas
-  projection-balances.ts    workers + periodic SELECT printout
-  projection-transfers.ts   workers + periodic SELECT printout
-  pm-transfer.ts            saga worker; commands + traced handle
+  db.ts                     docker compose up + apply both schemas
+  workers.ts                both projections + the PM in one process
+  monitor.ts                read-only terminal view over the read store
   open-account.ts           short-lived: dispatch OpenAccount
   deposit.ts                short-lived: dispatch DepositToAccount
   transfer.ts               short-lived: dispatch RequestTransfer
@@ -102,33 +101,30 @@ PM is multi-process-safe with no extra work.
 
 ## Running
 
-Each command goes in its own terminal. The first one stays in the
-foreground — Ctrl-C tears down the docker container, its volume,
-and the bank_account read-store along with it.
+Three long-lived processes, each in its own terminal: the
+database, the workers, and the read-store monitor. The fourth
+terminal is for ad-hoc commands.
 
-Projections and the PM can each be run in multiple processes
-for scale and HA -- per-stream partitioning on the Balances
-projection and per-transfer partitioning on Transfers and the
-PM mean the SDK's work-queue substrate divides events across
-workers. The read tables converge regardless of which process
-handles which partition.
+`npm run workers` can be launched in multiple processes for
+scale / HA -- per-stream partitioning on the Balances projection
+and per-transfer partitioning on Transfers and the PM mean the
+SDK's work-queue substrate divides events across the running
+worker processes automatically. The read tables converge
+regardless of which process handles which partition.
 
 ```sh
 # Terminal 1 -- bring up Postgres and apply the schema. Stay here.
 cd examples/typescript/bank-account
 npm install            # one-off
-npm start
+npm run db
 
-# Terminal 2 -- the Balances projection
-npm run projection:balances
+# Terminal 2 -- the workers (both projections + the PM)
+npm run workers
 
-# Terminal 3 -- the Transfers projection
-npm run projection:transfers
+# Terminal 3 -- live view over the read store
+npm run monitor
 
-# Terminal 4 -- the TransferProcessManager
-npm run pm:transfer
-
-# Terminal 5 -- send commands
+# Terminal 4 -- send commands
 npm run open-account alice
 npm run open-account bob
 npm run deposit alice 1000
@@ -136,10 +132,12 @@ npm run transfer alice bob 300       # succeeds
 npm run transfer bob alice 5000      # fails -- bob has 300
 ```
 
-Watch the projection terminals: balances update after each
-successful command; the transfer rows flip from `requested` to
-`completed` (or `failed (insufficient funds)`) as the PM
-dispatches its terminating mark-command.
+The `monitor` terminal redraws every second and shows the
+current balances and the ten most recent transfers; the
+`workers` terminal logs a line per unit of work done (PM event
+handled, PM command dispatched). Transfer rows flip from
+`requested` to `completed` (or `failed (insufficient funds)`)
+as the PM dispatches its terminating mark-command.
 
 ## What the example demonstrates
 
@@ -148,11 +146,13 @@ dispatches its terminating mark-command.
   `poll()` returns a worker the application stops itself. The
   pool is supplied by the application and the application closes
   it — the facade does not own or close DB resources.
-- **Multi-process scaling.** Each projection and the PM run in
-  their own process. Adding a second `projection:balances`
-  process while the first is running shows lease takeover and
-  partition-level fan-out — there's no shared in-memory state
-  to coordinate.
+- **Multi-process scaling.** All workers live in one process by
+  default for simplicity, but `npm run workers` is safe to run
+  in parallel: adding a second worker process while the first is
+  running shows lease takeover and partition-level fan-out --
+  there's no shared in-memory state to coordinate. A real
+  deployment would split projections / PMs across processes
+  along whatever boundary suits the operational shape.
 - **Real success/failure on the Transfer aggregate.**
   `TransferRequested` carries the request; the PM dispatches
   `MarkTransferCompleted` once the destination `AccountDepositedTo`
@@ -182,7 +182,7 @@ dispatches its terminating mark-command.
 - `INSTRUCTED_DATABASE_URL` overrides the default
   `postgresql://postgres:postgres@127.0.0.1:5433/bank_account`.
   If you set this, you're responsible for ensuring the database
-  exists and the schema has been applied — `npm start` does both
+  exists and the schema has been applied — `npm run db` does both
   for the default URL.
 - Node 22.18+ is required (default-on type stripping for `.ts`
   plus the `--conditions=development` exports lookup that lets
