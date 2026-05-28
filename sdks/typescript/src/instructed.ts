@@ -44,6 +44,7 @@ import {
   DEFAULT_RETRY_BUDGET,
   prefixType,
   type AggregateDefinition,
+  type DispatchContext,
   type DomainEvent,
   type RunCommandOptions,
 } from "./aggregate.ts";
@@ -74,6 +75,12 @@ import {
   type SubscriptionRef,
 } from "./consistency.ts";
 import { UnknownAggregateType } from "./errors.ts";
+import {
+  DEFAULT_LOGGER_IMPL,
+  Logger,
+  type ILoggerImpl,
+} from "./logger.ts";
+import { defaultWorkerId } from "./internal/worker-id.ts";
 import type {
   Event,
   Command,
@@ -102,6 +109,16 @@ export interface InstructedOptions {
    * as it wants.
    */
   db: pg.Pool | Queryable;
+  /**
+   * Application-supplied logger. Any subset of `info` / `warn` /
+   * `error` / `trace`; unwired levels are silent (and, for `trace`,
+   * the lazy-thunk form means the message is never built).
+   *
+   * Default: {@link DEFAULT_LOGGER_IMPL} — `info` / `warn` /
+   * `error` to `console`, `trace` silent. Pass `logger: {}` for a
+   * fully-silent app.
+   */
+  logger?: ILoggerImpl;
 }
 
 /**
@@ -252,6 +269,8 @@ interface RegisteredProcessManager {
 export class Instructed {
   private readonly persistClient_: Client;
 
+  private readonly logger_: Logger;
+
   private readonly aggregates = new Map<
     string,
     AggregateDefinition<unknown, unknown, DomainEvent>
@@ -263,6 +282,20 @@ export class Instructed {
   constructor(opts: InstructedOptions) {
     // The application owns the pool. The facade just wraps it.
     this.persistClient_ = new Client(opts.db);
+    // Wire the logger. Explicit `undefined` -> default (console for
+    // info/warn/error, silent for trace). Explicit empty object
+    // `{}` -> fully silent. Anything else -> wired as supplied.
+    this.logger_ = Logger.fromImpl(opts.logger ?? DEFAULT_LOGGER_IMPL);
+  }
+
+  /**
+   * The app's root {@link Logger}. Use this from code that has the
+   * `Instructed` instance but no `ctx` (startup, ad-hoc routers,
+   * outside-handler diagnostics). Worker-internal code receives a
+   * prefixed child via `ctx.logger`.
+   */
+  get logger(): Logger {
+    return this.logger_;
   }
 
   // ---- registry ----
@@ -366,6 +399,7 @@ export class Instructed {
       );
     }
     this.aggregates.set(def.type, def);
+    this.logger_.info(`registered aggregate "${def.type}"`);
     return this;
   }
 
@@ -383,6 +417,7 @@ export class Instructed {
       def,
       opts,
     });
+    this.logger_.info(`registered projection "${def.type}"`);
     return this;
   }
 
@@ -395,6 +430,7 @@ export class Instructed {
       def,
       opts,
     });
+    this.logger_.info(`registered process manager "${def.type}"`);
     return this;
   }
 
@@ -405,6 +441,7 @@ export class Instructed {
       );
     }
     this.commandRouter_ = router;
+    this.logger_.info("registered command router");
     return this;
   }
 
@@ -461,7 +498,8 @@ export class Instructed {
             "`dispatch(aggregateType, id, command, opts?)` overload.",
         );
       }
-      const route = this.commandRouter_(a as Command);
+      const dispatchCtx: DispatchContext = { logger: this.logger_ };
+      const route = this.commandRouter_(a as Command, dispatchCtx);
       aggregateType = route.aggregateType;
       id = route.aggregateId;
       command = a;
@@ -475,6 +513,7 @@ export class Instructed {
 
     const runOpts: RunCommandOptions = {
       retryBudget: opts.retryBudget ?? DEFAULT_RETRY_BUDGET,
+      ctx: { logger: this.logger_ },
     };
     if (opts.expectedVersion !== undefined) {
       runOpts.expectedVersion = opts.expectedVersion;
@@ -537,18 +576,33 @@ export class Instructed {
       }
     }
 
+    // Mint one workerId for this whole `poll()` call so all the
+    // workers in this process share an identity (matches the
+    // intended HA model: one workerId per process, many subs).
+    const workerId = opts.workerId ?? defaultWorkerId();
+
     const workers: RunningWorker[] = [];
 
     // Projections: one routing worker + one processing worker per
     // registration. Both honour the same resolved per-worker tuning.
     for (const p of this.projections) {
       const routeFn = this.resolveProjectionRouteFn(p);
-      const tuning = this.resolveWorkerOptions(p.def.type, opts);
-      const routingOpts = this.routingOpts(tuning, p.opts, opts.workerId);
-      const processingOpts = this.processingOpts(
-        tuning,
+      const resolved = this.resolveWorkerOptionsWithSources(p.def.type, opts);
+      const workerLogger = this.logger_.child(
+        `[${workerId}#${p.def.type}]`,
+      );
+      this.logInfoStarting(workerLogger, "projection", p.def.type, resolved);
+      const routingOpts = this.routingOpts(
+        resolved.tuning,
         p.opts,
-        opts.workerId,
+        workerId,
+        workerLogger,
+      );
+      const processingOpts = this.processingOpts(
+        resolved.tuning,
+        p.opts,
+        workerId,
+        workerLogger,
       );
       const routing = startRoutingWorker(this.persistClient_, {
         name: p.def.type,
@@ -566,18 +620,29 @@ export class Instructed {
           ? { errorPolicy: p.def.errorPolicy }
           : {}),
       }, processingOpts);
+      this.logStopWhenDone(workerLogger, p.def.type, routing, processing);
       workers.push(routing, processing);
     }
 
     // PMs: one routing worker + one processing worker per registration.
     // The processing worker takes the dispatch client too (D-0011).
     for (const pm of this.processManagers) {
-      const tuning = this.resolveWorkerOptions(pm.def.type, opts);
-      const routingOpts = this.routingOpts(tuning, pm.opts, opts.workerId);
-      const processingOpts = this.processingOpts(
-        tuning,
+      const resolved = this.resolveWorkerOptionsWithSources(pm.def.type, opts);
+      const workerLogger = this.logger_.child(
+        `[${workerId}#${pm.def.type}]`,
+      );
+      this.logInfoStarting(workerLogger, "process manager", pm.def.type, resolved);
+      const routingOpts = this.routingOpts(
+        resolved.tuning,
         pm.opts,
-        opts.workerId,
+        workerId,
+        workerLogger,
+      );
+      const processingOpts = this.processingOpts(
+        resolved.tuning,
+        pm.opts,
+        workerId,
+        workerLogger,
       );
       const routing = startRoutingWorker(this.persistClient_, {
         name: pm.def.type,
@@ -618,6 +683,7 @@ export class Instructed {
         pmDef,
         pmOpts,
       );
+      this.logStopWhenDone(workerLogger, pm.def.type, routing, processing);
       workers.push(routing, processing);
     }
 
@@ -657,53 +723,126 @@ export class Instructed {
    * Worker modules then apply their own fallbacks for any field
    * still absent (notably `heartbeatInterval`, which derives from
    * `leaseSeconds`).
+   *
+   * Returns the resolved options together with a per-field
+   * provenance tag (`workers` | `defaults` | `sdk` | `auto`) so the
+   * start-up info line can attribute each value.
    */
-  private resolveWorkerOptions(
+  private resolveWorkerOptionsWithSources(
     name: string,
     opts: PollOptions,
-  ): WorkerOptions {
-    return {
-      ...DEFAULT_WORKER_OPTIONS,
-      ...(opts.defaults ?? {}),
-      ...(opts.workers?.[name] ?? {}),
-    };
+  ): {
+    tuning: WorkerOptions;
+    sources: Record<keyof WorkerOptions, ProvenanceTag>;
+  } {
+    const fields: (keyof WorkerOptions)[] = [
+      "batchSize",
+      "leaseSeconds",
+      "heartbeatInterval",
+      "pollInterval",
+    ];
+    const tuning: WorkerOptions = {};
+    const sources = {} as Record<keyof WorkerOptions, ProvenanceTag>;
+    for (const f of fields) {
+      const wv = opts.workers?.[name]?.[f];
+      const dv = opts.defaults?.[f];
+      const sv = DEFAULT_WORKER_OPTIONS[f];
+      if (wv !== undefined) {
+        tuning[f] = wv;
+        sources[f] = "workers";
+      } else if (dv !== undefined) {
+        tuning[f] = dv;
+        sources[f] = "defaults";
+      } else if (sv !== undefined) {
+        tuning[f] = sv;
+        sources[f] = "sdk";
+      } else {
+        sources[f] = "auto";
+      }
+    }
+    return { tuning, sources };
+  }
+
+  private logInfoStarting(
+    workerLogger: Logger,
+    kind: string,
+    name: string,
+    resolved: {
+      tuning: WorkerOptions;
+      sources: Record<keyof WorkerOptions, ProvenanceTag>;
+    },
+  ): void {
+    workerLogger.info(
+      () => {
+        const fmt = (f: keyof WorkerOptions, unit: string) => {
+          const src = resolved.sources[f];
+          const v = resolved.tuning[f];
+          if (src === "auto") return `${f}=auto (derived)`;
+          return `${f}=${v}${unit} (${src === "sdk" ? "sdk default" : src === "workers" ? `workers.${name}` : "defaults"})`;
+        };
+        return (
+          `starting ${kind} worker; ` +
+          [
+            fmt("pollInterval", "ms"),
+            fmt("leaseSeconds", "s"),
+            fmt("batchSize", ""),
+            fmt("heartbeatInterval", "ms"),
+          ].join(", ")
+        );
+      },
+    );
+  }
+
+  private logStopWhenDone(
+    workerLogger: Logger,
+    name: string,
+    routing: RunningWorker,
+    processing: RunningWorker,
+  ): void {
+    // Fire the stop log once both halves have wound down. Don't
+    // await: this runs as a side observer of the running worker.
+    void Promise.all([routing.stopped, processing.stopped]).then(() => {
+      workerLogger.info(`stopped worker for "${name}"`);
+    });
   }
 
   private routingOpts(
     tuning: WorkerOptions,
     reg: RegistrationOptions,
-    workerId: string | undefined,
+    workerId: string,
+    logger: Logger,
   ) {
-    const out: Parameters<typeof startRoutingWorker>[2] = {};
+    const out: Parameters<typeof startRoutingWorker>[2] = { workerId, logger };
     if (tuning.batchSize !== undefined) out.batchSize = tuning.batchSize;
     if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds;
     if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval;
     // Note: `heartbeatInterval` is intentionally ignored for routing
     // workers under D-0025 (per-batch claim/release; no heartbeat).
     if (reg.onError !== undefined) out.onError = reg.onError;
-    if (workerId !== undefined) out.workerId = workerId;
     return out;
   }
 
   private processingOpts(
     tuning: WorkerOptions,
     reg: RegistrationOptions,
-    workerId: string | undefined,
+    workerId: string,
+    logger: Logger,
   ) {
     // The processing worker has no `batchSize` knob (it claims one
     // item at a time); the other knobs map 1:1.
-    const out: Parameters<typeof startProjectionWorker>[2] = {};
+    const out: Parameters<typeof startProjectionWorker>[2] = { workerId, logger };
     if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds;
     if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval;
     if (tuning.heartbeatInterval !== undefined) {
       out.heartbeatInterval = tuning.heartbeatInterval;
     }
     if (reg.onError !== undefined) out.onError = reg.onError;
-    if (workerId !== undefined) out.workerId = workerId;
     return out;
   }
 
 }
+
+type ProvenanceTag = "workers" | "defaults" | "sdk" | "auto";
 
 function normaliseConsistency(
   list: string[] | SubscriptionRef[],

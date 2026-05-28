@@ -554,7 +554,7 @@ describe("projection worker — D-0016 handler opacity", () => {
       const ctx = captured!;
       assert.deepEqual(
         Object.keys(ctx).sort(),
-        ["attempt", "eventNumber", "partitionKey", "signal", "workerId"],
+        ["attempt", "eventNumber", "logger", "partitionKey", "signal", "workerId"],
       );
       // Belt and braces: explicit field-absence checks.
       const bag = ctx as unknown as Record<string, unknown>;

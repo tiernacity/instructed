@@ -302,3 +302,120 @@ describe("Instructed -- command router", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+
+describe("Instructed -- logger integration", () => {
+  test("info on register/poll; trace from worker; warn from handler; per-worker prefix", async () => {
+    const lines: { level: string; msg: string }[] = [];
+    const app = new Instructed({
+      db: pool,
+      logger: {
+        info: (m) => lines.push({ level: "info", msg: m }),
+        warn: (m) => lines.push({ level: "warn", msg: m }),
+        trace: (m) => lines.push({ level: "trace", msg: m }),
+      },
+    });
+
+    // register(): one info per registered thing.
+    app.register(counter());
+
+    const projName = `proj-${randomUUID().slice(0, 8)}`;
+    app.register({
+      type: projName,
+      routeFn: (e: RecordedEvent) =>
+        e.type === "Added" ? { partitionKey: "_default" } : "ignore",
+      async handler(_event, ctx) {
+        // Handler-side ctx.logger is wired: this warn should appear
+        // with the per-worker prefix.
+        ctx.logger.warn("handler-warn");
+      },
+    });
+
+    // Two `info` lines from registration so far.
+    assert.ok(
+      lines.filter((l) => l.level === "info" && /registered/.test(l.msg))
+        .length >= 2,
+      `expected register infos, saw ${JSON.stringify(lines)}`,
+    );
+
+    const handle = await app.poll({
+      defaults: { pollInterval: 25, heartbeatInterval: 1_000 },
+    });
+    try {
+      // poll(): one info per worker on start with provenance tags.
+      const startInfos = lines.filter(
+        (l) =>
+          l.level === "info" &&
+          /starting projection worker/.test(l.msg) &&
+          /pollInterval=25ms \(defaults\)/.test(l.msg),
+      );
+      assert.equal(
+        startInfos.length,
+        1,
+        `expected 1 starting info with provenance, saw ${JSON.stringify(lines)}`,
+      );
+
+      // Drive an event through so handler logs and worker traces fire.
+      await app.dispatch<CounterCommand>(
+        "Counter",
+        randomUUID(),
+        { kind: "add", n: 1 },
+        { consistency: [projName], consistencyTimeout: 5_000 },
+      );
+
+      // Handler-side warn observed with the per-worker prefix.
+      const handlerWarns = lines.filter(
+        (l) =>
+          l.level === "warn" &&
+          l.msg.endsWith(" handler-warn") &&
+          new RegExp(`#${projName}\\]`).test(l.msg),
+      );
+      assert.equal(
+        handlerWarns.length,
+        1,
+        `expected one prefixed handler warn, saw ${JSON.stringify(lines)}`,
+      );
+
+      // Worker-internal trace site fired (routing commit).
+      const routingTraces = lines.filter(
+        (l) =>
+          l.level === "trace" &&
+          /routing: committing/.test(l.msg) &&
+          new RegExp(`#${projName}\\]`).test(l.msg),
+      );
+      assert.ok(
+        routingTraces.length >= 1,
+        `expected routing trace, saw ${JSON.stringify(lines)}`,
+      );
+    } finally {
+      await handle.stop();
+    }
+
+    // Worker stop info appears once both halves wind down.
+    await new Promise((r) => setTimeout(r, 30));
+    const stopInfos = lines.filter(
+      (l) =>
+        l.level === "info" &&
+        new RegExp(`stopped worker for "${projName}"`).test(l.msg),
+    );
+    assert.equal(stopInfos.length, 1);
+  });
+
+  test("unwired levels never invoke the thunk (no console output by default for trace)", async () => {
+    // Smoke test: with no logger supplied, the default impl handles
+    // info/warn/error via console but trace is silent. We can't
+    // observe console without intercepting; instead, confirm via
+    // public API that the default impl exposes no `trace`.
+    const app = new Instructed({ db: pool });
+    assert.equal(typeof app.logger.trace, "function");
+    // Calling trace on the default-wired Logger is a no-op; the
+    // thunk must not run.
+    let calls = 0;
+    app.logger.trace(() => {
+      calls += 1;
+      return "x";
+    });
+    assert.equal(calls, 0);
+  });
+});

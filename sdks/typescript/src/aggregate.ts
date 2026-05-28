@@ -36,6 +36,7 @@
  */
 
 import type { Client } from "./client.ts";
+import { DEFAULT_LOGGER_IMPL, Logger } from "./logger.ts";
 import {
   RetryBudgetExhausted,
   SnapshotNotFound,
@@ -50,6 +51,18 @@ import type {
   NewEvent,
   RecordedEvent,
 } from "./types.ts";
+
+/**
+ * Per-dispatch context handed to {@link AggregateDefinition.execute}
+ * and {@link CommandRouter}. Currently exposes a {@link Logger}; may
+ * grow other dispatch-scoped facilities (correlation ids, etc.) in
+ * later iterations.
+ *
+ * The same context is reused across OCC retries within one dispatch.
+ */
+export interface DispatchContext {
+  logger: Logger;
+}
 
 /**
  * The domain-event shape passed to `apply` (§11.3). The SDK projects
@@ -141,6 +154,7 @@ export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> 
   execute(
     state: S,
     command: C,
+    ctx: DispatchContext,
   ): NewEvent | NewEvent[] | undefined | void;
 
   /** Pure: fold one event into state. The SDK tracks version. */
@@ -219,6 +233,25 @@ export interface RunCommandOptions {
    * `event.correlation_id` with this value (§11.8 / AGG-021).
    */
   correlationId?: string;
+
+  /**
+   * Per-dispatch context threaded to `def.execute` and to the
+   * snapshot-write warn site. Optional at the L2 boundary; when
+   * omitted, the runner synthesises a context whose `logger` wraps
+   * {@link DEFAULT_LOGGER_IMPL} — the same fallback the
+   * `Instructed` facade uses when its `logger` option is omitted.
+   *
+   * Application code (handlers, `execute`, routers) therefore
+   * always sees a real `ctx.logger`: the only question is which
+   * {@link ILoggerImpl} sits behind it. Callers that want silence
+   * pass `{ logger: Logger.fromImpl(NOOP_LOGGER_IMPL) }`.
+   *
+   * `Instructed.dispatch` always supplies a ctx carrying the app's
+   * configured root logger; the fallback only fires for direct L2
+   * callers (`runCommand` outside the facade) that don't supply
+   * one.
+   */
+  ctx?: DispatchContext;
 }
 
 /** Pagination chunk size for `readStream` during load. Internal. */
@@ -293,6 +326,16 @@ async function executeCommand<S, C, E extends DomainEvent>(
   const correlationId = opts.correlationId;
   const explicitExpected = opts.expectedVersion;
 
+  // Reused across OCC retries (per design): logging at retry points
+  // is the SDK's concern, but the per-execute context is stable.
+  // The fallback mirrors the facade's default-logger behaviour:
+  // info/warn/error to console, trace silent. Application code
+  // dispatching through `Instructed` always gets the app's
+  // configured logger; this fallback only fires for direct L2
+  // callers that don't supply a ctx.
+  const ctx: DispatchContext =
+    opts.ctx ?? { logger: Logger.fromImpl(DEFAULT_LOGGER_IMPL) };
+
   let attempt = 0;
   let lastError: unknown;
 
@@ -301,7 +344,7 @@ async function executeCommand<S, C, E extends DomainEvent>(
     attempt += 1;
     try {
       const loaded = await loadAggregate(client, def, streamUuid);
-      const events = normaliseEvents(def.execute(loaded.state, command));
+      const events = normaliseEvents(def.execute(loaded.state, command, ctx));
 
       if (events.length === 0) {
         // Commanded no-op semantics: nothing to append.

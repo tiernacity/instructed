@@ -91,11 +91,25 @@ export {
   prefixType,
   DEFAULT_RETRY_BUDGET,
   type AggregateDefinition,
+  type DispatchContext,
   type RanCommand,
   type RunCommandOptions,
   type SnapshotPolicy,
   type DomainEvent,
 } from "./aggregate.ts";
+
+// Pluggable logger surface (TODO #16). The contract is required
+// core (porters reproduce the four optional-method shape and the
+// thunk-or-string ctx logger); the default `DEFAULT_LOGGER_IMPL`
+// (console for info/warn/error, silent trace) is idiomatic to the
+// TS SDK and is a convenience, not part of the contract.
+export {
+  Logger,
+  DEFAULT_LOGGER_IMPL,
+  NOOP_LOGGER_IMPL,
+  type ILoggerImpl,
+  type LogMessage,
+} from "./logger.ts";
 
 // L2 retry-exhaustion class (emitted by `runCommand`).
 export { RetryBudgetExhausted } from "./errors.ts";

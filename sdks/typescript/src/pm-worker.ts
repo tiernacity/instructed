@@ -227,6 +227,15 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
     handle: async (state, event, ctx) => {
       const result = await def.handle(state, event, ctx as PmHandlerContext);
       const commands = result.commands ?? [];
+      const complete = result.complete === true;
+      // Summary trace: replaces the script-side `withTrace` wrapper
+      // that was previously the example app's only way to observe
+      // PM activity. With a wired logger, every PM gets this for
+      // free.
+      ctx.logger.trace(
+        () =>
+          `pm handle: event ${event.type}#${event.event_number} -> ${commands.length} command(s); complete=${complete}`,
+      );
       // Dispatch in declaration order. Each command runs on the
       // same `client` (D-0026). A dispatch failure throws out of
       // this handler -> substrate sees the throw -> SUB-B error
@@ -237,8 +246,18 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
       // retry-in or lease-takeover redelivery may produce
       // duplicates at the aggregate; no IS004 protection without
       // deterministic event IDs.
+      const dispatchCtx = { logger: ctx.logger };
       for (const c of commands) {
-        const resolved = resolveDispatch(c, opts);
+        const resolved = resolveDispatch(c, opts, dispatchCtx);
+        // Per-command trace: aggregate type + command type are
+        // enough to read a PM's behaviour off the log without
+        // dumping payloads.
+        const cmdType =
+          (resolved.command as { type?: string }).type ?? "<untyped>";
+        ctx.logger.trace(
+          () =>
+            `pm dispatch: ${resolved.def.type}.${cmdType} -> ${resolved.streamUuid}`,
+        );
         await runCommandWithSnapshots(
           client,
           resolved.def,
@@ -247,10 +266,11 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
           {
             causationId: event.event_id,
             correlationId: event.correlation_id ?? undefined,
+            ctx: dispatchCtx,
           },
         );
       }
-      return { complete: result.complete === true };
+      return { complete };
     },
   };
 
@@ -266,6 +286,7 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
 function resolveDispatch(
   c: DispatchedCommand,
   opts: PmWorkerOptions,
+  dispatchCtx: { logger: import("./logger.ts").Logger },
 ): {
   def: AggregateDefinition<any, any, any>;
   streamUuid: string;
@@ -284,7 +305,7 @@ function resolveDispatch(
         "{ aggregate, streamUuid, command } shape.",
     );
   }
-  const route = opts.router(c);
+  const route = opts.router(c, dispatchCtx);
   const def = opts.aggregates.get(route.aggregateType);
   if (!def) {
     throw new Error(

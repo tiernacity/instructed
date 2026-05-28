@@ -137,3 +137,12 @@ export {
   type ProcessManagerDefinition,
   type DispatchOptions,
 } from "./instructed.ts";
+
+// Pluggable logger surface (TODO #16).
+export {
+  Logger,
+  DEFAULT_LOGGER_IMPL,
+  NOOP_LOGGER_IMPL,
+  type ILoggerImpl,
+  type LogMessage,
+} from "./logger.ts";

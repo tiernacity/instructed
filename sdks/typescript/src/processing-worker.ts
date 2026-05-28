@@ -57,6 +57,7 @@ import {
   SubscriptionNotFound,
   WorkItemLeaseLost,
 } from "./errors.ts";
+import { Logger } from "./logger.ts";
 import type { Event, RecordedEvent } from "./types.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 export type { RunningWorker };
@@ -75,6 +76,13 @@ export interface ProcessingHandlerContext {
   attempt: number;
   /** Aborted on graceful shutdown and on lease loss. */
   signal: AbortSignal;
+  /**
+   * Worker-scoped {@link Logger}. Prefixed with the worker id and
+   * subscription name by the facade; safe to scatter
+   * `trace(() => `...${expensive}...`)` calls because unwired
+   * levels do not invoke the thunk.
+   */
+  logger: Logger;
 }
 
 export type ProcessingHandler<E extends Event = Event> = (
@@ -101,6 +109,8 @@ export interface ErrorPolicyContext {
   eventNumber: bigint;
   /** 1-indexed: the attempt that just failed. */
   attempt: number;
+  /** Worker-scoped logger; see {@link ProcessingHandlerContext.logger}. */
+  logger: Logger;
 }
 
 /**
@@ -179,6 +189,12 @@ export interface ProcessingWorkerOptions {
   pollInterval?: number;
   /** Surfaces handler errors, lease loss, and other lifecycle events. */
   onError?: (err: Error) => void;
+  /**
+   * Worker-scoped {@link Logger}. Defaults to {@link Logger.noop} when
+   * absent, so the worker is silent unless the caller (usually the
+   * `Instructed` facade) wires one in.
+   */
+  logger?: Logger;
 }
 
 export const DEFAULT_PROCESSING_LEASE_SECONDS = 30;
@@ -225,6 +241,7 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
   const heartbeatInterval =
     opts.heartbeatInterval ?? Math.max(1_000, (leaseSeconds * 1000) / 3);
   const pollInterval = opts.pollInterval ?? DEFAULT_PROCESSING_POLL_INTERVAL_MS;
+  const logger = opts.logger ?? Logger.noop();
   // The SDK is opaque to PolicyState (it just hands the value back);
   // erase the generic internally so the default policy (which uses
   // `undefined`) and a user-supplied generic policy share one slot.
@@ -341,8 +358,13 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
         eventNumber,
         attempt,
         signal,
+        logger,
       };
       try {
+        logger.trace(
+          () =>
+            `attempt ${attempt} on event ${eventNumber} (partition ${partitionKey})`,
+        );
         await def.handle(event, ctx);
         return true;
       } catch (err) {
@@ -359,6 +381,7 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
               partitionKey,
               eventNumber,
               attempt,
+              logger,
             },
             policyState,
           );
@@ -444,6 +467,7 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
           eventNumber: claim.eventNumber,
           attempt: 1,
           signal,
+          logger,
         });
       } catch (err) {
         if (err instanceof WorkItemLeaseLost) {

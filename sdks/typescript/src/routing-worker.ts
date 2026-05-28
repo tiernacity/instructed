@@ -77,6 +77,7 @@
  */
 
 import type { Client } from "./client.ts";
+import { Logger } from "./logger.ts";
 import { SubscriptionLeaseLost, SubscriptionNotFound } from "./errors.ts";
 import type {
   Event,
@@ -135,6 +136,12 @@ export interface RoutingWorkerOptions {
   pollInterval?: number;
   /** Called for routing-fn errors and other fatal events. */
   onError?: (err: Error) => void;
+  /**
+   * Worker-scoped {@link Logger}. Defaults to {@link Logger.noop}
+   * when absent (the worker is silent unless the caller wires one
+   * in; the `Instructed` facade always does).
+   */
+  logger?: Logger;
 }
 
 // Defaults exported for re-use by the facade and tests.
@@ -153,6 +160,7 @@ export function startRoutingWorker<E extends Event = Event>(
   const leaseSeconds = opts.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS;
   const pollInterval = opts.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS;
   const onError = opts.onError ?? noopOnError;
+  const logger = opts.logger ?? Logger.noop();
 
   const ac = new AbortController();
   const signal = ac.signal;
@@ -254,11 +262,15 @@ export function startRoutingWorker<E extends Event = Event>(
           if (r.result === "already_claimed") {
             // Another worker holds the lease for this batch; back off
             // and try again next tick. NOT fatal under D-0025.
+            logger.trace("routing: subscription already claimed; backing off");
             await sleep(pollInterval, signal);
             continue;
           }
           claimed = { lastSeen: r.lastSeen };
           holdingLease = true;
+          logger.trace(
+            () => `routing: claimed; lastSeen=${claimed.lastSeen}`,
+          );
         } catch (err) {
           // Genuine errors (stream not found, bad args, transport
           // failures). Surface and exit.
@@ -292,10 +304,14 @@ export function startRoutingWorker<E extends Event = Event>(
         if (batch.length === 0) {
           // No work; release the lease so another process can claim
           // immediately, then poll-sleep.
+          logger.trace("routing: empty batch; releasing and polling");
           await releaseQuietly();
           await sleep(pollInterval, signal);
           continue;
         }
+        logger.trace(
+          () => `routing: read ${batch.length} events from ${stream}`,
+        );
 
         // ---- route ----
         const routed = await routeOneBatch(batch);
@@ -309,6 +325,10 @@ export function startRoutingWorker<E extends Event = Event>(
         }
 
         // ---- commit ----
+        logger.trace(
+          () =>
+            `routing: committing ${routed.decisions.length} decision(s); cursor -> ${routed.cursorTo}`,
+        );
         try {
           await client.routeBatch(
             stream,

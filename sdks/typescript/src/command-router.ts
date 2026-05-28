@@ -35,7 +35,7 @@
  * state) write a `CommandRouter` directly.
  */
 
-import type { AggregateDefinition } from "./aggregate.ts";
+import type { AggregateDefinition, DispatchContext } from "./aggregate.ts";
 import type { Command } from "./types.ts";
 
 /**
@@ -46,6 +46,7 @@ import type { Command } from "./types.ts";
  */
 export type CommandRouter = (
   command: Command,
+  ctx: DispatchContext,
 ) => { aggregateType: string; aggregateId: string };
 
 /**
@@ -87,7 +88,7 @@ export function commandRouter<C extends Command>(
     string,
     CommandRoute<Command, string>
   >;
-  return (command) => {
+  return (command, _ctx) => {
     const entry = table[command.type];
     if (!entry) {
       throw new Error(

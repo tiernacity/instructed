@@ -57,6 +57,7 @@ import {
   type DomainEvent,
   type RunCommandOptions,
 } from "./aggregate.ts";
+import { DEFAULT_LOGGER_IMPL, Logger } from "./logger.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import type { AppendedEvent } from "./types.ts";
 
@@ -68,8 +69,10 @@ import type { AppendedEvent } from "./types.ts";
  * returns `true` on the post-append state, write a snapshot via
  * `recordSnapshot`.
  *
- * Snapshot writes are best-effort per D-0019: failures
- * `console.warn` and do not fail the command. The next load will
+ * Snapshot writes are best-effort per D-0019: failures are reported
+ * via `opts.ctx.logger.warn` (or, when no ctx is supplied, via the
+ * default logger's `console.warn` per `DEFAULT_LOGGER_IMPL`) and do
+ * not fail the command. The next load will
  * fall back to the previous snapshot (or full re-fold from
  * origin) and the next successful command may snapshot again.
  *
@@ -126,14 +129,27 @@ export async function runCommandWithSnapshots<
     } catch (snapErr) {
       // Best-effort per D-0019. The load path works without the
       // snapshot — it'll re-fold from the previous snapshot (or
-      // origin). `console.warn` until a logger surface is added.
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[instructed] snapshot write failed for ${streamUuid}:`,
-        snapErr,
+      // origin). Routed through the dispatch logger so the
+      // application's logger sink sees it. When no ctx is supplied
+      // at the L2 boundary, the fallback (set inside `executeCommand`)
+      // wraps `DEFAULT_LOGGER_IMPL` so the warning still surfaces.
+      const ctxLogger =
+        opts.ctx?.logger ?? Logger.fromImpl(DEFAULT_LOGGER_IMPL);
+      ctxLogger.warn(
+        () =>
+          `snapshot write failed for ${streamUuid}: ${describeError(snapErr)}`,
       );
     }
   }
 
   return result.appended;
+}
+
+function describeError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return String(err);
+  } catch {
+    return "<unprintable error>";
+  }
 }

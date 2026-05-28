@@ -12,6 +12,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
+import { Logger } from "../src/logger.ts";
 import {
   Client,
   exponentialBackoff,
@@ -47,7 +48,7 @@ beforeEach(async () => {
 // ============================================================================
 
 describe("exponentialBackoff", () => {
-  const ctxBase = { workerId: "w", partitionKey: "p", eventNumber: 1n };
+  const ctxBase = { workerId: "w", partitionKey: "p", eventNumber: 1n, logger: Logger.noop() };
 
   test("doubles per attempt, capped", async () => {
     const p = exponentialBackoff({ baseMs: 100, capMs: 1000 });
@@ -86,7 +87,7 @@ describe("exponentialBackoff", () => {
 });
 
 describe("linearBackoff", () => {
-  const ctxBase = { workerId: "w", partitionKey: "p", eventNumber: 1n };
+  const ctxBase = { workerId: "w", partitionKey: "p", eventNumber: 1n, logger: Logger.noop() };
 
   test("grows linearly, capped", async () => {
     const p = linearBackoff({ stepMs: 50, capMs: 200 });
@@ -107,7 +108,7 @@ describe("linearBackoff", () => {
 });
 
 describe("retryUpTo", () => {
-  const ctxBase = { workerId: "w", partitionKey: "p", eventNumber: 1n };
+  const ctxBase = { workerId: "w", partitionKey: "p", eventNumber: 1n, logger: Logger.noop() };
 
   test("delegates to inner when attempt <= max", async () => {
     const inner = exponentialBackoff({ baseMs: 100, capMs: 1000 });

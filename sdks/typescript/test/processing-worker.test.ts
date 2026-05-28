@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
+import { Logger } from "../src/logger.ts";
 import {
   DEFAULT_ERROR_POLICY,
   startProcessingWorker,
@@ -433,7 +434,7 @@ describe("processing worker — default error policy back-off", () => {
     // Step-5 slice 3: ErrorPolicy now takes (err, ctx, state) and
     // returns { decision, state }. The default ignores the state
     // slot (returns undefined); decisions are still pure of attempt.
-    const ctx = { workerId: "w", partitionKey: "p", eventNumber: 1n };
+    const ctx = { workerId: "w", partitionKey: "p", eventNumber: 1n, logger: Logger.noop() };
     const r1 = await DEFAULT_ERROR_POLICY(
       new Error("e"),
       { ...ctx, attempt: 1 },
