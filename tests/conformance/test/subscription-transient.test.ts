@@ -13,22 +13,24 @@
  * exists in the `instructed.*` namespace.
  */
 
-import { before, after, describe, test } from "node:test";
-import assert from "node:assert/strict";
-import type pg from "pg";
-import { closePool, getPool } from "./fixtures.ts";
+import assert from 'node:assert/strict'
+import { before, after, describe, test } from 'node:test'
 
-let pool: pg.Pool;
+import type pg from 'pg'
+
+import { closePool, getPool } from './fixtures.ts'
+
+let pool: pg.Pool
 
 before(async () => {
-  pool = await getPool();
-});
+  pool = await getPool()
+})
 
 after(async () => {
-  await closePool();
-});
+  await closePool()
+})
 
-describe("transient subscriptions — dropped wholesale (NG-0005 / D-0007)", () => {
+describe('transient subscriptions — dropped wholesale (NG-0005 / D-0007)', () => {
   // INV-SUB-T-001: dropped — see NG-0005
   // INV-SUB-T-002: dropped — see NG-0005
   // INV-SUB-T-003: dropped — see NG-0005
@@ -42,7 +44,7 @@ describe("transient subscriptions — dropped wholesale (NG-0005 / D-0007)", () 
   // similar exists in `instructed.*`. The persistent surface
   // (claim_subscription / route_batch / etc.) is the
   // only subscription primitive.
-  test("no transient-subscribe procedure exists in the instructed schema", async () => {
+  test('no transient-subscribe procedure exists in the instructed schema', async () => {
     const r = await pool.query<{ proname: string }>(
       `SELECT proname
          FROM pg_proc p
@@ -54,11 +56,11 @@ describe("transient subscriptions — dropped wholesale (NG-0005 / D-0007)", () 
             OR p.proname ILIKE 'subscribe_transient%'
             OR p.proname ILIKE 'pub%'
           )`,
-    );
+    )
     assert.equal(
       r.rowCount,
       0,
-      `expected no transient-subscribe procedure; found ${r.rows.map((row) => row.proname).join(", ")}`,
-    );
-  });
-});
+      `expected no transient-subscribe procedure; found ${r.rows.map((row) => row.proname).join(', ')}`,
+    )
+  })
+})

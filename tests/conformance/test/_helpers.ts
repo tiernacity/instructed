@@ -14,17 +14,18 @@
  * for setup.
  */
 
-import { randomUUID } from "node:crypto";
-import assert from "node:assert/strict";
-import type pg from "pg";
+import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
+
+import type pg from 'pg'
 
 export interface InputEvent {
-  event_id?: string;
-  event_type: string;
-  data?: unknown;
-  metadata?: unknown;
-  causation_id?: string | null;
-  correlation_id?: string | null;
+  event_id?: string
+  event_type: string
+  data?: unknown
+  metadata?: unknown
+  causation_id?: string | null
+  correlation_id?: string | null
 }
 
 /**
@@ -43,23 +44,18 @@ export async function appendAny(
     data: e.data ?? {},
     ...(e.metadata !== undefined ? { metadata: e.metadata } : {}),
     ...(e.causation_id !== undefined ? { causation_id: e.causation_id } : {}),
-    ...(e.correlation_id !== undefined
-      ? { correlation_id: e.correlation_id }
-      : {}),
-  }));
-  await q.query(
-    `SELECT * FROM instructed.append_to_stream($1, 'any', NULL, $2::jsonb)`,
-    [streamUuid, JSON.stringify(payload)],
-  );
+    ...(e.correlation_id !== undefined ? { correlation_id: e.correlation_id } : {}),
+  }))
+  await q.query(`SELECT * FROM instructed.append_to_stream($1, 'any', NULL, $2::jsonb)`, [
+    streamUuid,
+    JSON.stringify(payload),
+  ])
 }
 
 /** Assert a promise rejects with a PostgresError whose `code` matches. */
-export async function rejectsWithCode(
-  fn: () => Promise<unknown>,
-  code: string,
-): Promise<void> {
+export async function rejectsWithCode(fn: () => Promise<unknown>, code: string): Promise<void> {
   await assert.rejects(fn, (err: unknown) => {
-    const e = err as { code?: unknown };
-    return typeof e.code === "string" && e.code === code;
-  });
+    const e = err as { code?: unknown }
+    return typeof e.code === 'string' && e.code === code
+  })
 }
