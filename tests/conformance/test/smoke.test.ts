@@ -74,7 +74,6 @@ describe("conformance harness — smoke", () => {
       "release_subscription",
       "read_subscription_batch",
       "advance_subscription",
-      "read_subscription_position",
       "delete_subscription",
       // SUB-A work-queue procedures (slice 2).
       "route_batch",

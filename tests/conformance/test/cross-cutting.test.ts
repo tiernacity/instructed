@@ -319,7 +319,7 @@ describe("streams — first-class identity", () => {
         WHERE n.nspname = 'instructed'
           AND p.proname IN (
             'read_stream', 'read_all', 'read_subscription_batch',
-            'read_snapshot', 'read_subscription_position'
+            'read_snapshot'
           )`,
     );
     const offenders = r.rows.filter((row) => row.argname === "stream_id");

@@ -146,7 +146,6 @@ export interface DrainState {
 
 async function snapshotDrainState(
   pool: pg.Pool,
-  client: Client,
   subscriptions: Array<{ stream: string; name: string }>,
   completed: boolean,
 ): Promise<DrainState> {
@@ -158,11 +157,18 @@ async function snapshotDrainState(
   for (const sub of subscriptions) {
     let lastSeen = 0n;
     let subHead = head;
-    try {
-      const pos = await client.readSubscriptionPosition(sub.stream, sub.name);
-      lastSeen = pos.lastSeen;
-    } catch {
-      // Subscription not yet created; treat as fully behind.
+    // Read the routing cursor directly (the read_subscription_position
+    // procedure was removed in A2). Absent row => not yet created;
+    // treat as fully behind (lastSeen stays 0n).
+    const cur = await pool.query<{ last_seen: string }>(
+      `SELECT s.last_seen::text AS last_seen
+         FROM instructed.subscriptions s
+         JOIN instructed.streams str ON str.stream_id = s.stream_id
+        WHERE str.stream_uuid = $1 AND s.subscription_name = $2`,
+      [sub.stream, sub.name],
+    );
+    if (cur.rows.length > 0) {
+      lastSeen = BigInt(cur.rows[0].last_seen);
     }
     if (sub.stream !== "$all") {
       const r2 = await pool.query<{ head: string }>(
@@ -435,7 +441,6 @@ async function main(): Promise<number> {
     );
     const drainState = await snapshotDrainState(
       pool,
-      client,
       subscriptions,
       drainCompleted,
     );

@@ -443,22 +443,6 @@ export class Client {
     return { lastSeen: toBigInt(res.rows[0].last_seen) };
   }
 
-  async readSubscriptionPosition(
-    streamUuid: string,
-    subscriptionName: string,
-    options: SubscriptionShardOption = {},
-  ): Promise<{ lastSeen: bigint }> {
-    const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
-    const res = await this.run<{ last_seen: string | number }>(
-      `SELECT last_seen
-         FROM instructed.read_subscription_position($1, $2, $3::jsonb)`,
-      [streamUuid, subscriptionName, JSON.stringify(opts)],
-      { streamUuid, subscriptionName, shard: options.shard },
-    );
-    return { lastSeen: toBigInt(res.rows[0].last_seen) };
-  }
-
   async deleteSubscription(
     streamUuid: string,
     subscriptionName: string,

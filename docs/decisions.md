@@ -197,8 +197,12 @@ be added later; the store primitive stays explicit.
 
 **Implications:**
 
-- The store exposes `read_subscription_position(stream, name)`
-  returning `last_seen`.
+- The store exposes `is_subscription_caught_up(stream, name,
+  target)` returning a boolean; the dispatcher polls it per name
+  in `consistency: [...]` until each is caught up to the
+  appended position. (This replaced the earlier
+  `read_subscription_position` cursor-read primitive, since
+  removed.)
 - Latency is bounded below by the polling interval (per D-0003).
 - The SDK may layer an auto-collection convenience over the
   explicit-list primitive when the dispatcher and handlers run

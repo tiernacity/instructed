@@ -403,24 +403,6 @@ describe("Client.subscriptions", () => {
     assert.equal(r2.lastSeen, 2n); // monotone only
   });
 
-  test("readSubscriptionPosition reports last_seen", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [ev("A")]);
-    await client.claimSubscription(s, "sub", "w1", 30);
-    await client.advanceSubscription(s, "sub", "w1", 1n);
-    const r = await client.readSubscriptionPosition(s, "sub");
-    assert.equal(r.lastSeen, 1n);
-  });
-
-  test("readSubscriptionPosition on missing subscription raises (IS020)", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [ev("A")]);
-    await assert.rejects(
-      () => client.readSubscriptionPosition(s, "nope"),
-      (err) => err instanceof SubscriptionNotFound && err.code === "IS020",
-    );
-  });
-
   test("delete removes the row; missing raises IS020 (D-0009, not lenient)", async () => {
     const s = randomUUID();
     await client.appendToStream(s, expected.noStream, [ev("A")]);

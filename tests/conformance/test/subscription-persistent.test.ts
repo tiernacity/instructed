@@ -4,8 +4,7 @@
  * Drives `instructed.claim_subscription`,
  * `instructed.release_subscription`,
  * `instructed.read_subscription_batch`,
- * `instructed.advance_subscription`,
- * `instructed.read_subscription_position`, and
+ * `instructed.advance_subscription`, and
  * `instructed.delete_subscription` directly via `pg` (D-0021).
  *
  * Each `test(...)` carries one or more `// INV-SUB-P-NNN` annotations
@@ -138,12 +137,33 @@ async function advance(
   return BigInt(r.rows[0].last_seen);
 }
 
+// Reads the routing cursor directly. The read_subscription_position
+// procedure was removed in A2; D-0021 permits direct table reads for
+// post-condition assertions in this SQL-only harness.
 async function position(streamUuid: string, name: string): Promise<bigint> {
   const r = await pool.query<{ last_seen: string }>(
-    `SELECT * FROM instructed.read_subscription_position($1, $2)`,
+    `SELECT s.last_seen::text AS last_seen
+       FROM instructed.subscriptions s
+       JOIN instructed.streams str ON str.stream_id = s.stream_id
+      WHERE str.stream_uuid = $1 AND s.subscription_name = $2`,
     [streamUuid, name],
   );
   return BigInt(r.rows[0].last_seen);
+}
+
+// True when no subscription row exists for (stream, name).
+async function subscriptionGone(
+  streamUuid: string,
+  name: string,
+): Promise<boolean> {
+  const r = await pool.query(
+    `SELECT 1
+       FROM instructed.subscriptions s
+       JOIN instructed.streams str ON str.stream_id = s.stream_id
+      WHERE str.stream_uuid = $1 AND s.subscription_name = $2`,
+    [streamUuid, name],
+  );
+  return r.rows.length === 0;
 }
 
 async function deleteSub(streamUuid: string, name: string): Promise<void> {
@@ -681,8 +701,8 @@ describe("subscriptions — lifecycle", () => {
     await claim(s, "h", "w1");
     await advance(s, "h", "w1", 3n);
     await deleteSub(s, "h");
-    // The cursor is gone — a position read raises IS020.
-    await rejectsWithCode(() => position(s, "h"), "IS020");
+    // The cursor is gone — the subscription row no longer exists.
+    assert.equal(await subscriptionGone(s, "h"), true);
     // A subsequent claim honours start_from (here: explicit '4').
     const r = await claim(s, "h", "w1", 30, { start_from: "4" });
     assert.equal(r.last_seen, 4n);
@@ -733,23 +753,4 @@ describe("subscriptions — lifecycle", () => {
     await rejectsWithCode(() => release(s, "h", "worker-A"), "IS022");
   });
 
-  // read_subscription_position (supporting CON-010 strong-consistency-on-
-  //   dispatch per D-0010) — reads the cursor without claiming.
-  test("read_subscription_position returns last_seen without claiming the lease", async () => {
-    const s = await seedStream(2);
-    await claim(s, "h", "w1");
-    await advance(s, "h", "w1", 1n);
-    // Position read does NOT require a worker_id; anyone may call.
-    assert.equal(await position(s, "h"), 1n);
-    // And the lease is still held by w1.
-    const reclaim = await claim(s, "h", "w2");
-    assert.equal(reclaim.result, "already_claimed");
-    assert.equal(reclaim.claimed_by, "w1");
-  });
-
-  // read_subscription_position on a missing subscription raises IS020.
-  test("read_subscription_position on a missing subscription raises IS020", async () => {
-    const s = await seedStream(1);
-    await rejectsWithCode(() => position(s, "no-such"), "IS020");
-  });
 });

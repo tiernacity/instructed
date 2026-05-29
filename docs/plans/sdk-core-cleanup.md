@@ -141,7 +141,7 @@ is final). Each slice ends green.
 - [x] **A1 — Remove `extend_subscription_claim`.**
       Smallest legacy proc; no SDK worker calls it; cleanest first cut.
       Provider-then-consumer or consumer-then-provider (see §4 ordering note).
-- [ ] **A2 — Remove `read_subscription_position`.**
+- [x] **A2 — Remove `read_subscription_position`.**
       Consumers: `consistency.ts` already uses `isSubscriptionCaughtUp`
       (no change). Soak uses it (see §5 gotcha). Conformance:
       subscription-persistent + smoke + cross-cutting.
@@ -338,3 +338,29 @@ revert was for risk/context management, not because it was broken.
     recipe lists it for A2/A3, not A1).
   * Gates: SQL installs clean; SDK 168/168 + type-check; conformance
     166/166; coverage MISSING 0.
+- 2026-05-29 — **A2** (remove `read_subscription_position`). Atomic.
+  Touched: `sql/instructed.sql` (proc block + header + lock-set
+  inventories), `client.ts` (method), SDK `consistency.test.ts` (2
+  assertions → `isSubscriptionCaughtUp`) + `client.test.ts` (2 cases
+  removed), conformance `smoke`/`cross-cutting` (proc-name lists) +
+  `subscription-persistent` (header, `position` wrapper rewritten to
+  a direct `subscriptions` SELECT, delete-test IS020 check →
+  `subscriptionGone` row-absence assert, 2 proc-specific tests
+  removed), soak `checks.ts` (added `readCursor` helper, 3 sites) +
+  `soak.ts` (inlined direct cursor query; dropped now-unused `client`
+  param from `snapshotDrainState`), docs (`sql-contract`,
+  `decisions` D-0010 implication → `is_subscription_caught_up`).
+  Surprises / notes:
+  * The conformance `position()` helper was load-bearing across ~6
+    cursor-state assertions, not just the 2 proc-specific tests —
+    rewrote it to read the cursor directly (D-0021 allows it) rather
+    than delete it.
+  * The delete-subscription test used `position()` raising IS020 as
+    its "row is gone" proof; replaced with a direct row-absence
+    check (`subscriptionGone`).
+  * The 2 removed proc-specific tests carried no INV-* annotation
+    (CON-010 prose only) — coverage stayed MISSING 0.
+  * Soak: `pmLastSeen` can now be null (no row yet); guarded the
+    PM-024 comparison accordingly.
+  * Gates: SQL clean; SDK 166/166 + type-check; soak type-check;
+    conformance 164/164; coverage MISSING 0.

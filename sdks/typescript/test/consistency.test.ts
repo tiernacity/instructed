@@ -106,8 +106,12 @@ describe("waitForProjection -- happy path", () => {
       assert.ok(Date.now() - start < 5_000);
       assert.ok(handled >= 2, `expected handler to have run >= 2, got ${handled}`);
       // cursor is at or past the last event.
-      const pos = await client.readSubscriptionPosition("$all", name);
-      assert.ok(pos.lastSeen >= appended[appended.length - 1].event_number);
+      const caughtUp = await client.isSubscriptionCaughtUp(
+        "$all",
+        name,
+        appended[appended.length - 1].event_number,
+      );
+      assert.ok(caughtUp);
     } finally {
       await worker.stop();
     }
@@ -143,8 +147,12 @@ describe("waitForProjection -- happy path", () => {
       );
       // Predicate-true guarantees both conjuncts; the cursor reached
       // the event_number target.
-      const pos = await client.readSubscriptionPosition(stream, name);
-      assert.ok(pos.lastSeen >= appended[0].event_number);
+      const caughtUp = await client.isSubscriptionCaughtUp(
+        stream,
+        name,
+        appended[0].event_number,
+      );
+      assert.ok(caughtUp);
     } finally {
       await worker.stop();
     }

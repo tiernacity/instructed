@@ -87,6 +87,24 @@ function subKey(stream: string, name: string): string {
   return `${stream}::${name}`;
 }
 
+// Read a subscription's routing cursor directly. Replaces the removed
+// `read_subscription_position` procedure (A2). Returns null when the
+// subscription row does not exist yet (first claim hasn't happened).
+async function readCursor(
+  pool: pg.Pool,
+  stream: string,
+  name: string,
+): Promise<bigint | null> {
+  const r = await pool.query<{ last_seen: string }>(
+    `SELECT s.last_seen::text AS last_seen
+       FROM instructed.subscriptions s
+       JOIN instructed.streams str ON str.stream_id = s.stream_id
+      WHERE str.stream_uuid = $1 AND s.subscription_name = $2`,
+    [stream, name],
+  );
+  return r.rows.length === 0 ? null : BigInt(r.rows[0].last_seen);
+}
+
 export async function sampleOnce(
   ctx: CheckContext,
   state: SamplerState,
@@ -95,17 +113,12 @@ export async function sampleOnce(
 
   // --- last_seen monotonicity per subscription ---------------------------
   for (const sub of ctx.subscriptions) {
-    let lastSeen: bigint;
-    try {
-      const pos = await ctx.client.readSubscriptionPosition(
-        sub.stream,
-        sub.name,
-      );
-      lastSeen = pos.lastSeen;
-    } catch {
+    const lastSeenOrNull = await readCursor(ctx.pool, sub.stream, sub.name);
+    if (lastSeenOrNull === null) {
       // Subscription may not exist yet (first claim hasn't happened).
       continue;
     }
+    const lastSeen = lastSeenOrNull;
     const key = subKey(sub.stream, sub.name);
     const history = state.lastSeenByKey.get(key) ?? [];
     if (history.length > 0) {
@@ -323,16 +336,11 @@ export async function runFinalChecks(
 
   // --- subscription last_seen never past head ---------------------------
   for (const sub of ctx.subscriptions) {
-    let lastSeen: bigint;
-    try {
-      const pos = await ctx.client.readSubscriptionPosition(
-        sub.stream,
-        sub.name,
-      );
-      lastSeen = pos.lastSeen;
-    } catch {
+    const lastSeenOrNull = await readCursor(ctx.pool, sub.stream, sub.name);
+    if (lastSeenOrNull === null) {
       continue;
     }
+    const lastSeen = lastSeenOrNull;
     // Per-stream subscription: cursor is a stream_version; per-`$all`
     // subscription: cursor is an event_number. Either way the head
     // is what we look up.
@@ -358,10 +366,7 @@ export async function runFinalChecks(
   }
 
   // --- PM snapshots: source_version <= last_seen (PM-024) ---------------
-  const pmPos = await ctx.client.readSubscriptionPosition(
-    "$all",
-    ctx.forwarderName,
-  );
+  const pmLastSeen = await readCursor(ctx.pool, "$all", ctx.forwarderName);
   const snaps = await ctx.pool.query<{
     source_uuid: string;
     source_version: string;
@@ -374,12 +379,12 @@ export async function runFinalChecks(
   let forwardedTotalLocal = 0;
   for (const r of snaps.rows) {
     const sv = BigInt(r.source_version);
-    if (sv > pmPos.lastSeen) {
+    if (pmLastSeen !== null && sv > pmLastSeen) {
       violations.push({
         code: "PM-024",
         message:
           `PM snapshot ${r.source_uuid} source_version=${sv} ` +
-          `> last_seen=${pmPos.lastSeen}`,
+          `> last_seen=${pmLastSeen}`,
       });
     }
     // Folded state is JSON; pull it to total forwarded.
