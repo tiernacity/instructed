@@ -177,7 +177,7 @@ surface so nothing downstream changes. Validate with `npm run
 type-check` + `npm test`.
 
 - [x] **B1 — `types.ts` → `types/`.**
-- [ ] **B2 — `errors.ts` → `errors/`.**
+- [x] **B2 — `errors.ts` → `errors/`.**
 - [ ] **B3 — `client.ts` → `client/`** (+ `row-mappers.ts`, `pack-event.ts`).
       **MUST also do A6 here** (row-mapper consolidation): in the same
       slice, extract `toBigInt`/`toDate`/`mapRecordedEvent`/`RawEventRow`
@@ -499,3 +499,23 @@ revert was for risk/context management, not because it was broken.
     before/after (type-only exports covered by type-check).
   * Gates: SDK 162/162 + type-check. (Conformance/SQL untouched by a
     pure SDK move.)
+- 2026-05-29 — **B2** (`errors.ts` → `errors/`). Commit `5a41a9f`.
+  Split the 456-line flat `errors.ts` into seven files under `errors/`
+  (`base`, `append`, `snapshot`, `subscription`, `work-item`, `sdk`,
+  `map-pg-error`) + a re-export-only barrel `index.ts`. 10 src
+  importers + 1 test importer updated to `./errors/index.ts`.
+  Surprises / notes:
+  * Deviated from the plan's tentative `consistency.ts` filename for
+    the non-SQLSTATE group → named it `sdk.ts`, because it holds
+    `RetryBudgetExhausted` (L2 aggregate retry) and
+    `UnknownAggregateType` (L3 facade) as well as the two consistency
+    errors; "consistency" would have mislabelled it.
+  * `InvalidParameterValue` (22023) has no path of its own; parked it
+    in `base.ts` next to `InstructedError` as the generic L1 error.
+    `map-pg-error.ts` imports it from there.
+  * `map-pg-error.ts` is the one file with fan-in: it imports every
+    concrete error class from the per-domain files. No cycles (base ←
+    domains ← map-pg-error is a clean DAG).
+  * Verified the full L1/L2/L3 error-class set is present on both
+    `core` and `index` runtime namespaces post-split.
+  * Gates: SDK 162/162 + type-check. (SQL/conformance untouched.)
