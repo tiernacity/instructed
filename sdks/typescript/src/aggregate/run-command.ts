@@ -35,23 +35,18 @@
  * them into one atomic write would conflate the two failure modes.
  */
 
-import type { Client } from "../client/index.ts";
-import { DEFAULT_LOGGER_IMPL, Logger } from "../logger/index.ts";
+import type { Client } from '../client/index.ts'
 import {
   RetryBudgetExhausted,
   SnapshotNotFound,
   StreamNotFound,
   WrongExpectedVersion,
-} from "../errors/index.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
-import { expected as ev } from "../types/index.ts";
-import type {
-  AppendedEvent,
-  ExpectedVersion,
-  NewEvent,
-  RecordedEvent,
-} from "../types/index.ts";
-import type { SnapshotPolicy } from "./snapshot-policy.ts";
+} from '../errors/index.ts'
+import { DEFAULT_LOGGER_IMPL, Logger } from '../logger/index.ts'
+import { expected as ev } from '../types/index.ts'
+import type { AppendedEvent, ExpectedVersion, NewEvent, RecordedEvent } from '../types/index.ts'
+import type { SnapshotPolicy } from './snapshot-policy.ts'
+import { SNAPSHOT_MODULE_VERSION_KEY } from './snapshot-version.ts'
 
 /**
  * Per-dispatch context handed to {@link AggregateDefinition.execute}
@@ -62,7 +57,7 @@ import type { SnapshotPolicy } from "./snapshot-policy.ts";
  * The same context is reused across OCC retries within one dispatch.
  */
 export interface DispatchContext {
-  logger: Logger;
+  logger: Logger
 }
 
 /**
@@ -73,9 +68,9 @@ export interface DispatchContext {
  * bookkeeping, not domain data.
  */
 export interface DomainEvent {
-  type: string;
-  data: unknown;
-  metadata?: unknown;
+  type: string
+  data: unknown
+  metadata?: unknown
 }
 
 /**
@@ -90,7 +85,7 @@ export interface DomainEvent {
  * Exposed so apps can build their own factory functions on top.
  */
 export function prefixType(type: string): (id: string) => string {
-  return (id) => `${type}-${id}`;
+  return (id) => `${type}-${id}`
 }
 
 /**
@@ -100,7 +95,7 @@ export function prefixType(type: string): (id: string) => string {
  */
 export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> {
   /** Used as `source_type` for snapshots; also a registry key in the facade. */
-  type: string;
+  type: string
 
   /**
    * Optional encoding from an aggregate id (e.g. `"alice"`) to the
@@ -113,23 +108,19 @@ export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> 
    * `(type, id)` and let the SDK / definition derive the stream name;
    * stream names are storage-layer concerns.
    */
-  streamName?(id: string): string;
+  streamName?(id: string): string
 
-  initialState(): S;
+  initialState(): S
 
   /**
    * Pure: produce zero or more events from `(state, command)`. Returning
    * `[]`, `undefined`, or `void` is a no-op — no append, no version bump,
    * no error.
    */
-  execute(
-    state: S,
-    command: C,
-    ctx: DispatchContext,
-  ): NewEvent | NewEvent[] | undefined | void;
+  execute(state: S, command: C, ctx: DispatchContext): NewEvent | NewEvent[] | undefined | void
 
   /** Pure: fold one event into state. The SDK tracks version. */
-  apply(state: S, event: E): S;
+  apply(state: S, event: E): S
 
   /**
    * Optional snapshot policy. Declared here; invoked by the L3
@@ -137,7 +128,7 @@ export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> 
    * `runCommand` / `runCommandAndApply` primitives ignore this
    * field (they are unopinionated about snapshot orchestration).
    */
-  snapshotPolicy?: SnapshotPolicy<S>;
+  snapshotPolicy?: SnapshotPolicy<S>
 
   /**
    * SDK-managed snapshot version tag (SNAP-002). When set:
@@ -162,7 +153,7 @@ export interface AggregateDefinition<S, C, E extends DomainEvent = DomainEvent> 
    * vice versa) counts as mismatch. This prevents
    * "accidentally adopting versioning silently."
    */
-  snapshotModuleVersion?: string;
+  snapshotModuleVersion?: string
 }
 
 export interface RunCommandOptions {
@@ -171,7 +162,7 @@ export interface RunCommandOptions {
    * (mapping.md AGG-010). `retryBudget: 0` disables retry (single
    * attempt; first IS001 raises {@link RetryBudgetExhausted}).
    */
-  retryBudget?: number;
+  retryBudget?: number
 
   /**
    * Explicit expected-version assertion. Defaults to `expected.exact(V)`
@@ -181,14 +172,14 @@ export interface RunCommandOptions {
    * as the underlying `WrongExpectedVersion` rather than as a retry
    * loop. Recorded in D-0019.
    */
-  expectedVersion?: ExpectedVersion;
+  expectedVersion?: ExpectedVersion
 
   /**
    * Per-call command identity. Defaults to `crypto.randomUUID()`.
    * The SDK fills any unset `event.causation_id` with this value
    * unless `causationId` is supplied (§11.8 / AGG-020).
    */
-  commandId?: string;
+  commandId?: string
 
   /**
    * Explicit causation id (overrides the `commandId`-based default).
@@ -197,13 +188,13 @@ export interface RunCommandOptions {
    * triggering_event.event_id` (§11.8 / D-0017 / PM-012). Callers
    * who omit this get the `commandId` default.
    */
-  causationId?: string;
+  causationId?: string
 
   /**
    * Optional correlation id. The SDK fills any unset
    * `event.correlation_id` with this value (§11.8 / AGG-021).
    */
-  correlationId?: string;
+  correlationId?: string
 
   /**
    * Per-dispatch context threaded to `def.execute` and to the
@@ -222,14 +213,14 @@ export interface RunCommandOptions {
    * callers (`runCommand` outside the facade) that don't supply
    * one.
    */
-  ctx?: DispatchContext;
+  ctx?: DispatchContext
 }
 
 /** Pagination chunk size for `readStream` during load. Internal. */
-const LOAD_PAGE_SIZE = 500;
+const LOAD_PAGE_SIZE = 500
 
 /** Default retry budget — see {@link RunCommandOptions.retryBudget}. */
-export const DEFAULT_RETRY_BUDGET = 5;
+export const DEFAULT_RETRY_BUDGET = 5
 
 /**
  * Result of `runCommandAndApply`. Includes the post-append state
@@ -242,13 +233,13 @@ export const DEFAULT_RETRY_BUDGET = 5;
  * `eventsSinceSnapshot` is the loaded counter unchanged.
  */
 export interface RanCommand<S> {
-  appended: AppendedEvent[];
+  appended: AppendedEvent[]
   /** State after folding `appended` through `apply`. */
-  state: S;
+  state: S
   /** Stream version after append (loaded version if `appended` is empty). */
-  version: bigint;
+  version: bigint
   /** Loaded `eventsSinceSnapshot` + `appended.length`. */
-  eventsSinceSnapshot: number;
+  eventsSinceSnapshot: number
 }
 
 /**
@@ -264,17 +255,17 @@ export interface RanCommand<S> {
  * `runCommandAndApply`, which folds.
  */
 interface ExecutedCommand<S> {
-  appended: AppendedEvent[];
+  appended: AppendedEvent[]
   /** Loaded baseline state (pre-append). Identical to the state passed to `execute`. */
-  loadedState: S;
+  loadedState: S
   /** Loaded baseline version. */
-  loadedVersion: bigint;
+  loadedVersion: bigint
   /** Loaded `eventsSinceSnapshot` counter. */
-  loadedEventsSinceSnapshot: number;
+  loadedEventsSinceSnapshot: number
   /** The events written, with causation / correlation defaults applied. */
-  filled: NewEvent[];
+  filled: NewEvent[]
   /** True iff `execute` returned no events. `appended` is then `[]`. */
-  noOp: boolean;
+  noOp: boolean
 }
 
 async function executeCommand<S, C, E extends DomainEvent>(
@@ -284,18 +275,18 @@ async function executeCommand<S, C, E extends DomainEvent>(
   command: C,
   opts: RunCommandOptions,
 ): Promise<ExecutedCommand<S>> {
-  const retryBudget = opts.retryBudget ?? DEFAULT_RETRY_BUDGET;
+  const retryBudget = opts.retryBudget ?? DEFAULT_RETRY_BUDGET
   if (!Number.isInteger(retryBudget) || retryBudget < 0) {
     throw new RangeError(
       `runCommand: retryBudget must be a non-negative integer, got ${retryBudget}`,
-    );
+    )
   }
-  const commandId = opts.commandId ?? globalThis.crypto.randomUUID();
+  const commandId = opts.commandId ?? globalThis.crypto.randomUUID()
   // §11.8: explicit causationId wins for event defaulting; otherwise
   // commandId doubles as the causation default (AGG-020).
-  const causationDefault = opts.causationId ?? commandId;
-  const correlationId = opts.correlationId;
-  const explicitExpected = opts.expectedVersion;
+  const causationDefault = opts.causationId ?? commandId
+  const correlationId = opts.correlationId
+  const explicitExpected = opts.expectedVersion
 
   // Reused across OCC retries (per design): logging at retry points
   // is the SDK's concern, but the per-execute context is stable.
@@ -304,18 +295,17 @@ async function executeCommand<S, C, E extends DomainEvent>(
   // dispatching through `Instructed` always gets the app's
   // configured logger; this fallback only fires for direct L2
   // callers that don't supply a ctx.
-  const ctx: DispatchContext =
-    opts.ctx ?? { logger: Logger.fromImpl(DEFAULT_LOGGER_IMPL) };
+  const ctx: DispatchContext = opts.ctx ?? { logger: Logger.fromImpl(DEFAULT_LOGGER_IMPL) }
 
-  let attempt = 0;
-  let lastError: unknown;
+  let attempt = 0
+  let lastError: unknown
 
   // total attempts = 1 + retryBudget (default budget 5 → up to 6 attempts).
   while (attempt <= retryBudget) {
-    attempt += 1;
+    attempt += 1
     try {
-      const loaded = await loadAggregate(client, def, streamUuid);
-      const events = normaliseEvents(def.execute(loaded.state, command, ctx));
+      const loaded = await loadAggregate(client, def, streamUuid)
+      const events = normaliseEvents(def.execute(loaded.state, command, ctx))
 
       if (events.length === 0) {
         // Commanded no-op semantics: nothing to append.
@@ -326,7 +316,7 @@ async function executeCommand<S, C, E extends DomainEvent>(
           loadedEventsSinceSnapshot: loaded.eventsSinceSnapshot,
           filled: [],
           noOp: true,
-        };
+        }
       }
 
       // §11.8 defaulting: fill any unset causation_id with commandId,
@@ -336,14 +326,10 @@ async function executeCommand<S, C, E extends DomainEvent>(
         ...e,
         causation_id: e.causation_id ?? causationDefault,
         correlation_id: e.correlation_id ?? correlationId,
-      }));
+      }))
 
-      const expectedVersion = explicitExpected ?? ev.exact(loaded.version);
-      const appended = await client.appendToStream(
-        streamUuid,
-        expectedVersion,
-        filled,
-      );
+      const expectedVersion = explicitExpected ?? ev.exact(loaded.version)
+      const appended = await client.appendToStream(streamUuid, expectedVersion, filled)
 
       return {
         appended,
@@ -352,24 +338,24 @@ async function executeCommand<S, C, E extends DomainEvent>(
         loadedEventsSinceSnapshot: loaded.eventsSinceSnapshot,
         filled,
         noOp: false,
-      };
+      }
     } catch (err) {
-      lastError = err;
+      lastError = err
       // Retry only on default-expected-version mismatches (the SDK's
       // own OCC assertion). An explicit caller-supplied expectedVersion
       // is a deliberate assertion and is not retried (D-0019).
       if (err instanceof WrongExpectedVersion && explicitExpected === undefined) {
-        if (attempt > retryBudget) break;
-        continue;
+        if (attempt > retryBudget) break
+        continue
       }
-      throw err;
+      throw err
     }
   }
 
-  throw new RetryBudgetExhausted(
-    `runCommand: retry budget exhausted after ${attempt} attempt(s)`,
-    { attempts: attempt, lastError },
-  );
+  throw new RetryBudgetExhausted(`runCommand: retry budget exhausted after ${attempt} attempt(s)`, {
+    attempts: attempt,
+    lastError,
+  })
 }
 
 /**
@@ -402,8 +388,8 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
   command: C,
   opts: RunCommandOptions = {},
 ): Promise<AppendedEvent[]> {
-  const r = await executeCommand(client, def, streamUuid, command, opts);
-  return r.appended;
+  const r = await executeCommand(client, def, streamUuid, command, opts)
+  return r.appended
 }
 
 /**
@@ -422,18 +408,14 @@ export async function runCommand<S, C, E extends DomainEvent = DomainEvent>(
  * Does **not** invoke `def.snapshotPolicy`; see
  * `runCommandWithSnapshots` (L3).
  */
-export async function runCommandAndApply<
-  S,
-  C,
-  E extends DomainEvent = DomainEvent,
->(
+export async function runCommandAndApply<S, C, E extends DomainEvent = DomainEvent>(
   client: Client,
   def: AggregateDefinition<S, C, E>,
   streamUuid: string,
   command: C,
   opts: RunCommandOptions = {},
 ): Promise<RanCommand<S>> {
-  const r = await executeCommand(client, def, streamUuid, command, opts);
+  const r = await executeCommand(client, def, streamUuid, command, opts)
 
   if (r.noOp) {
     return {
@@ -441,19 +423,19 @@ export async function runCommandAndApply<
       state: r.loadedState,
       version: r.loadedVersion,
       eventsSinceSnapshot: r.loadedEventsSinceSnapshot,
-    };
+    }
   }
 
   // Fold appended events through apply to produce the staged
   // state. Cheap; `apply` is pure user code on at most a
   // command-worth of events.
-  let stagedState = r.loadedState;
+  let stagedState = r.loadedState
   for (const e of r.filled) {
     stagedState = def.apply(stagedState, {
       type: e.type,
       data: e.data,
       metadata: e.metadata,
-    } as E);
+    } as E)
   }
 
   return {
@@ -461,16 +443,16 @@ export async function runCommandAndApply<
     state: stagedState,
     version: r.appended[r.appended.length - 1].stream_version,
     eventsSinceSnapshot: r.loadedEventsSinceSnapshot + r.appended.length,
-  };
+  }
 }
 
 // ---- internals ----
 
 interface LoadedAggregate<S> {
-  state: S;
-  version: bigint;
+  state: S
+  version: bigint
   /** Events folded since the snapshot baseline (or since initialState). */
-  eventsSinceSnapshot: number;
+  eventsSinceSnapshot: number
 }
 
 async function loadAggregate<S, C, E extends DomainEvent>(
@@ -478,9 +460,9 @@ async function loadAggregate<S, C, E extends DomainEvent>(
   def: AggregateDefinition<S, C, E>,
   streamUuid: string,
 ): Promise<LoadedAggregate<S>> {
-  let state = def.initialState();
-  let version = 0n;
-  let eventsSinceSnapshot = 0;
+  let state = def.initialState()
+  let version = 0n
+  let eventsSinceSnapshot = 0
 
   // 1. Try snapshot. SNAP-002: read the snapshot's metadata for
   // `SNAPSHOT_MODULE_VERSION_KEY` and compare strictly against
@@ -491,31 +473,23 @@ async function loadAggregate<S, C, E extends DomainEvent>(
   // aggregate would log on its next touch after a deliberate
   // version bump, which is noise.
   try {
-    const snap = await client.readSnapshot<S>(streamUuid);
-    let snapModuleVersion: string | undefined;
-    if (
-      snap.metadata &&
-      typeof snap.metadata === "object" &&
-      snap.metadata !== null
-    ) {
-      const v = (snap.metadata as Record<string, unknown>)[
-        SNAPSHOT_MODULE_VERSION_KEY
-      ];
-      if (typeof v === "string") snapModuleVersion = v;
+    const snap = await client.readSnapshot<S>(streamUuid)
+    let snapModuleVersion: string | undefined
+    if (snap.metadata && typeof snap.metadata === 'object' && snap.metadata !== null) {
+      const v = (snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY]
+      if (typeof v === 'string') snapModuleVersion = v
     }
-    const want = def.snapshotModuleVersion;
+    const want = def.snapshotModuleVersion
     const matches =
-      want === undefined
-        ? snapModuleVersion === undefined
-        : snapModuleVersion === want;
+      want === undefined ? snapModuleVersion === undefined : snapModuleVersion === want
     if (matches) {
-      state = snap.data;
-      version = snap.sourceVersion;
+      state = snap.data
+      version = snap.sourceVersion
     }
     // Mismatch: leave `state` / `version` at their initial
     // values; the readStream loop below will page from 0.
   } catch (err) {
-    if (!(err instanceof SnapshotNotFound)) throw err;
+    if (!(err instanceof SnapshotNotFound)) throw err
     // No snapshot: start from initialState() at version 0.
   }
 
@@ -523,27 +497,23 @@ async function loadAggregate<S, C, E extends DomainEvent>(
   // (no snapshot, no events yet) raises IS003 here; treat that as an
   // empty stream so runCommand can be the first writer.
   while (true) {
-    let page: RecordedEvent[];
+    let page: RecordedEvent[]
     try {
-      page = await client.readStream(
-        streamUuid,
-        version + 1n,
-        LOAD_PAGE_SIZE,
-      );
+      page = await client.readStream(streamUuid, version + 1n, LOAD_PAGE_SIZE)
     } catch (err) {
-      if (err instanceof StreamNotFound && version === 0n) break;
-      throw err;
+      if (err instanceof StreamNotFound && version === 0n) break
+      throw err
     }
-    if (page.length === 0) break;
+    if (page.length === 0) break
     for (const row of page) {
-      state = def.apply(state, recordedToDomain<E>(row));
-      version = row.stream_version;
-      eventsSinceSnapshot += 1;
+      state = def.apply(state, recordedToDomain<E>(row))
+      version = row.stream_version
+      eventsSinceSnapshot += 1
     }
-    if (page.length < LOAD_PAGE_SIZE) break;
+    if (page.length < LOAD_PAGE_SIZE) break
   }
 
-  return { state, version, eventsSinceSnapshot };
+  return { state, version, eventsSinceSnapshot }
 }
 
 function recordedToDomain<E extends DomainEvent>(row: RecordedEvent): E {
@@ -551,13 +521,11 @@ function recordedToDomain<E extends DomainEvent>(row: RecordedEvent): E {
     type: row.type,
     data: row.data,
     metadata: row.metadata,
-  } as E;
+  } as E
 }
 
-function normaliseEvents(
-  v: NewEvent | NewEvent[] | undefined | void,
-): NewEvent[] {
-  if (v == null) return [];
-  if (Array.isArray(v)) return v;
-  return [v];
+function normaliseEvents(v: NewEvent | NewEvent[] | undefined | void): NewEvent[] {
+  if (v == null) return []
+  if (Array.isArray(v)) return v
+  return [v]
 }

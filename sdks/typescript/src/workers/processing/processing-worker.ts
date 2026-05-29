@@ -51,45 +51,41 @@
  * slice 9. Tests import this module directly.
  */
 
-import type { Client } from "../../client/index.ts";
-import type {
-  SubscriptionLeaseLost} from "../../errors/index.ts";
-import {
-  SubscriptionNotFound,
-  WorkItemLeaseLost,
-} from "../../errors/index.ts";
-import { Logger } from "../../logger/index.ts";
-import type { Event, RecordedEvent } from "../../types/index.ts";
-import type { RunningWorker } from "../../internal/running-worker.ts";
-export type { RunningWorker };
-import { defaultWorkerId } from "../../internal/worker-id.ts";
-import { sleep } from "../../internal/sleep.ts";
+import type { Client } from '../../client/index.ts'
+import type { SubscriptionLeaseLost } from '../../errors/index.ts'
+import { SubscriptionNotFound, WorkItemLeaseLost } from '../../errors/index.ts'
+import type { RunningWorker } from '../../internal/running-worker.ts'
+import { Logger } from '../../logger/index.ts'
+import type { Event, RecordedEvent } from '../../types/index.ts'
+export type { RunningWorker }
+import { sleep } from '../../internal/sleep.ts'
+import { defaultWorkerId } from '../../internal/worker-id.ts'
 
 // ============================================================================
 // Public surface
 // ============================================================================
 
 export interface ProcessingHandlerContext {
-  workerId: string;
-  partitionKey: string;
-  eventNumber: bigint;
+  workerId: string
+  partitionKey: string
+  eventNumber: bigint
   /** 1-indexed retry attempt counter. Reset per work item. */
-  attempt: number;
+  attempt: number
   /** Aborted on graceful shutdown and on lease loss. */
-  signal: AbortSignal;
+  signal: AbortSignal
   /**
    * Worker-scoped {@link Logger}. Prefixed with the worker id and
    * subscription name by the facade; safe to scatter
    * `trace(() => `...${expensive}...`)` calls because unwired
    * levels do not invoke the thunk.
    */
-  logger: Logger;
+  logger: Logger
 }
 
 export type ProcessingHandler<E extends Event = Event> = (
   event: RecordedEvent<E>,
   ctx: ProcessingHandlerContext,
-) => Promise<void>;
+) => Promise<void>
 
 /**
  * Kind-specific terminal-success step (slice 6: projection DELETE;
@@ -98,20 +94,18 @@ export type ProcessingHandler<E extends Event = Event> = (
 export type ProcessingCompleter<E extends Event = Event> = (
   event: RecordedEvent<E>,
   ctx: ProcessingHandlerContext,
-) => Promise<void>;
+) => Promise<void>
 
-export type ErrorPolicyDecision =
-  | { kind: "retry-in"; delayMs: number }
-  | { kind: "stop" };
+export type ErrorPolicyDecision = { kind: 'retry-in'; delayMs: number } | { kind: 'stop' }
 
 export interface ErrorPolicyContext {
-  workerId: string;
-  partitionKey: string;
-  eventNumber: bigint;
+  workerId: string
+  partitionKey: string
+  eventNumber: bigint
   /** 1-indexed: the attempt that just failed. */
-  attempt: number;
+  attempt: number
   /** Worker-scoped logger; see {@link ProcessingHandlerContext.logger}. */
-  logger: Logger;
+  logger: Logger
 }
 
 /**
@@ -120,7 +114,7 @@ export interface ErrorPolicyContext {
  * invocation against the same work item.
  */
 export interface ErrorPolicyResult<PolicyState = undefined> {
-  decision: ErrorPolicyDecision;
+  decision: ErrorPolicyDecision
   /**
    * Opaque-to-the-SDK state for the next invocation. Returned as-is
    * to the policy on the next failed attempt against the same work
@@ -134,7 +128,7 @@ export interface ErrorPolicyResult<PolicyState = undefined> {
    * policy closes over its long-lived state in a closure and
    * ignores the slot.
    */
-  state: PolicyState;
+  state: PolicyState
 }
 
 /**
@@ -159,47 +153,44 @@ export type ErrorPolicy<PolicyState = undefined> = (
   err: unknown,
   ctx: ErrorPolicyContext,
   state: PolicyState | undefined,
-) => ErrorPolicyResult<PolicyState> | Promise<ErrorPolicyResult<PolicyState>>;
+) => ErrorPolicyResult<PolicyState> | Promise<ErrorPolicyResult<PolicyState>>
 
-export interface ProcessingWorkerDefinition<
-  E extends Event = Event,
-  PolicyState = undefined,
-> {
+export interface ProcessingWorkerDefinition<E extends Event = Event, PolicyState = undefined> {
   /** Subscription name (must match the routing worker for the same sub). */
-  name: string;
+  name: string
   /** Source stream; default `$all`. */
-  stream?: string;
-  handle: ProcessingHandler<E>;
-  complete: ProcessingCompleter<E>;
+  stream?: string
+  handle: ProcessingHandler<E>
+  complete: ProcessingCompleter<E>
   /**
    * Retry/error policy. Type-parameterised by `PolicyState` for
    * callers writing stateful policies; defaults to
    * `ErrorPolicy<undefined>` (the stateless case) so existing
    * code keeps typing.
    */
-  errorPolicy?: ErrorPolicy<PolicyState>;
+  errorPolicy?: ErrorPolicy<PolicyState>
 }
 
 export interface ProcessingWorkerOptions {
-  workerId?: string;
+  workerId?: string
   /** Lease duration in seconds. Default 30. */
-  leaseSeconds?: number;
+  leaseSeconds?: number
   /** Heartbeat tick in ms. Default = `leaseSeconds * 1000 / 3`. */
-  heartbeatInterval?: number;
+  heartbeatInterval?: number
   /** Idle poll interval in ms. Default 200. */
-  pollInterval?: number;
+  pollInterval?: number
   /** Surfaces handler errors, lease loss, and other lifecycle events. */
-  onError?: (err: Error) => void;
+  onError?: (err: Error) => void
   /**
    * Worker-scoped {@link Logger}. Defaults to {@link Logger.noop} when
    * absent, so the worker is silent unless the caller (usually the
    * `Instructed` facade) wires one in.
    */
-  logger?: Logger;
+  logger?: Logger
 }
 
-export const DEFAULT_PROCESSING_LEASE_SECONDS = 30;
-export const DEFAULT_PROCESSING_POLL_INTERVAL_MS = 200;
+export const DEFAULT_PROCESSING_LEASE_SECONDS = 30
+export const DEFAULT_PROCESSING_POLL_INTERVAL_MS = 200
 
 /**
  * SUB-B default error policy: exponential backoff with base 100ms,
@@ -213,70 +204,69 @@ export const DEFAULT_PROCESSING_POLL_INTERVAL_MS = 200;
  * L2 default has no dependency on the L3 standard-library file.
  */
 export const DEFAULT_ERROR_POLICY: ErrorPolicy = (_err, ctx, _state) => {
-  const base = 100;
-  const cap = 30_000;
+  const base = 100
+  const cap = 30_000
   // attempt is 1-indexed; first retry waits base; clamp the exponent
   // so we never compute a huge intermediate even if attempt is large.
-  const exp = Math.min(ctx.attempt - 1, 20);
+  const exp = Math.min(ctx.attempt - 1, 20)
   return {
-    decision: { kind: "retry-in", delayMs: Math.min(cap, base * 2 ** exp) },
+    decision: { kind: 'retry-in', delayMs: Math.min(cap, base * 2 ** exp) },
     state: undefined,
-  };
-};
+  }
+}
 
 // ============================================================================
 // Implementation
 // ============================================================================
 
 /** Single retry delay on a transient non-IS030 heartbeat error. */
-const HEARTBEAT_RETRY_DELAY_MS = 100;
+const HEARTBEAT_RETRY_DELAY_MS = 100
 
 export function startProcessingWorker<E extends Event = Event, PolicyState = undefined>(
   client: Client,
   def: ProcessingWorkerDefinition<E, PolicyState>,
   opts: ProcessingWorkerOptions = {},
 ): RunningWorker {
-  const stream = def.stream ?? "$all";
-  const workerId = opts.workerId ?? defaultWorkerId();
-  const leaseSeconds = opts.leaseSeconds ?? DEFAULT_PROCESSING_LEASE_SECONDS;
-  const heartbeatInterval =
-    opts.heartbeatInterval ?? Math.max(1_000, (leaseSeconds * 1000) / 3);
-  const pollInterval = opts.pollInterval ?? DEFAULT_PROCESSING_POLL_INTERVAL_MS;
-  const logger = opts.logger ?? Logger.noop();
+  const stream = def.stream ?? '$all'
+  const workerId = opts.workerId ?? defaultWorkerId()
+  const leaseSeconds = opts.leaseSeconds ?? DEFAULT_PROCESSING_LEASE_SECONDS
+  const heartbeatInterval = opts.heartbeatInterval ?? Math.max(1_000, (leaseSeconds * 1000) / 3)
+  const pollInterval = opts.pollInterval ?? DEFAULT_PROCESSING_POLL_INTERVAL_MS
+  const logger = opts.logger ?? Logger.noop()
   // The SDK is opaque to PolicyState (it just hands the value back);
   // erase the generic internally so the default policy (which uses
   // `undefined`) and a user-supplied generic policy share one slot.
   const errorPolicy: ErrorPolicy<unknown> =
     (def.errorPolicy as ErrorPolicy<unknown> | undefined) ??
-    (DEFAULT_ERROR_POLICY as ErrorPolicy<unknown>);
-  const onError = opts.onError ?? noopOnError;
+    (DEFAULT_ERROR_POLICY as ErrorPolicy<unknown>)
+  const onError = opts.onError ?? noopOnError
 
-  const ac = new AbortController();
-  const signal = ac.signal;
+  const ac = new AbortController()
+  const signal = ac.signal
 
-  let closing = false;
-  let aborted = false;
-  let closePromise: Promise<void> | null = null;
+  let closing = false
+  let aborted = false
+  let closePromise: Promise<void> | null = null
 
-  let resolveStopped!: () => void;
+  let resolveStopped!: () => void
   const stopped = new Promise<void>((res) => {
-    resolveStopped = res;
-  });
+    resolveStopped = res
+  })
 
   function markAborted(err: Error): void {
-    if (aborted) return;
-    aborted = true;
+    if (aborted) return
+    aborted = true
     try {
-      ac.abort();
+      ac.abort()
     } catch {
       /* ignore */
     }
-    safeOnError(err);
+    safeOnError(err)
   }
 
   function safeOnError(err: Error): void {
     try {
-      onError(err);
+      onError(err)
     } catch {
       /* onError must never propagate */
     }
@@ -297,8 +287,8 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
     itemSignal: AbortSignal,
   ): Promise<void> {
     while (!closing && !aborted && !itemSignal.aborted) {
-      await sleep(heartbeatInterval, itemSignal);
-      if (closing || aborted || itemSignal.aborted) return;
+      await sleep(heartbeatInterval, itemSignal)
+      if (closing || aborted || itemSignal.aborted) return
       try {
         await client.extendWorkItemClaim(
           stream,
@@ -307,16 +297,16 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
           partitionKey,
           eventNumber,
           leaseSeconds,
-        );
-        continue;
+        )
+        continue
       } catch (err) {
         if (err instanceof WorkItemLeaseLost) {
-          markAborted(err);
-          return;
+          markAborted(err)
+          return
         }
         // One short retry on a transient (e.g. connection blip).
-        await sleep(HEARTBEAT_RETRY_DELAY_MS, itemSignal);
-        if (closing || aborted || itemSignal.aborted) return;
+        await sleep(HEARTBEAT_RETRY_DELAY_MS, itemSignal)
+        if (closing || aborted || itemSignal.aborted) return
         try {
           await client.extendWorkItemClaim(
             stream,
@@ -325,12 +315,12 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
             partitionKey,
             eventNumber,
             leaseSeconds,
-          );
-          continue;
+          )
+          continue
         } catch (err2) {
-          if (!(err2 instanceof WorkItemLeaseLost)) safeOnError(err2 as Error);
-          markAborted(err2 as Error);
-          return;
+          if (!(err2 instanceof WorkItemLeaseLost)) safeOnError(err2 as Error)
+          markAborted(err2 as Error)
+          return
         }
       }
     }
@@ -347,11 +337,11 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
     partitionKey: string,
     eventNumber: bigint,
   ): Promise<boolean> {
-    let attempt = 1;
+    let attempt = 1
     // Per-work-item policy state slot. Starts as `undefined`;
     // threaded forward across attempts; discarded on success (this
     // function returns and the next work item gets a fresh slot).
-    let policyState: unknown = undefined;
+    let policyState: unknown = undefined
     while (!closing && !aborted) {
       const ctx: ProcessingHandlerContext = {
         workerId,
@@ -360,20 +350,17 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
         attempt,
         signal,
         logger,
-      };
+      }
       try {
-        logger.trace(
-          () =>
-            `attempt ${attempt} on event ${eventNumber} (partition ${partitionKey})`,
-        );
-        await def.handle(event, ctx);
-        return true;
+        logger.trace(() => `attempt ${attempt} on event ${eventNumber} (partition ${partitionKey})`)
+        await def.handle(event, ctx)
+        return true
       } catch (err) {
         // Surface the handler error so applications can log/observe
         // every failed attempt, not just the final outcome. Matches
         // the existing projection worker behaviour.
-        safeOnError(asError(err, `handler threw on event ${eventNumber}`));
-        let result: ErrorPolicyResult<unknown>;
+        safeOnError(asError(err, `handler threw on event ${eventNumber}`))
+        let result: ErrorPolicyResult<unknown>
         try {
           result = await errorPolicy(
             err,
@@ -385,79 +372,66 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
               logger,
             },
             policyState,
-          );
+          )
         } catch (policyErr) {
           // A throwing error policy is itself a `stop` signal: we have
           // no defensible way to decide. Surface and exit.
-          safeOnError(
-            asError(policyErr, "errorPolicy itself threw; stopping worker"),
-          );
-          markAborted(asError(policyErr, "errorPolicy threw"));
-          return false;
+          safeOnError(asError(policyErr, 'errorPolicy itself threw; stopping worker'))
+          markAborted(asError(policyErr, 'errorPolicy threw'))
+          return false
         }
-        policyState = result.state;
-        const decision = result.decision;
-        if (decision.kind === "stop") {
+        policyState = result.state
+        const decision = result.decision
+        if (decision.kind === 'stop') {
           // SUB-B `stop`: worker exits; item stays `claimed`; the
           // lease will expire and another worker may pick it up. We
           // do NOT call fail_work_item -- that's reserved for the
           // (future) `quarantineAfter` convenience wrapper.
-          markAborted(asError(err, "errorPolicy returned 'stop'"));
-          return false;
+          markAborted(asError(err, "errorPolicy returned 'stop'"))
+          return false
         }
         // retry-in
-        await sleep(decision.delayMs, signal);
-        attempt += 1;
+        await sleep(decision.delayMs, signal)
+        attempt += 1
       }
     }
-    return false;
+    return false
   }
 
   async function processOneItem(claim: {
-    partitionKey: string;
-    eventNumber: bigint;
+    partitionKey: string
+    eventNumber: bigint
   }): Promise<void> {
     // Fetch the event payload by primary-key lookup on $all. The
     // worker's view of the payload is MVCC; the event is immutable.
-    let event: RecordedEvent<E> | null;
+    let event: RecordedEvent<E> | null
     try {
-      const rows = await client.readAll<E>(claim.eventNumber, 1);
-      event =
-        rows.length > 0 && rows[0].event_number === claim.eventNumber
-          ? rows[0]
-          : null;
+      const rows = await client.readAll<E>(claim.eventNumber, 1)
+      event = rows.length > 0 && rows[0].event_number === claim.eventNumber ? rows[0] : null
     } catch (err) {
-      safeOnError(asError(err, "failed to read event payload"));
-      return;
+      safeOnError(asError(err, 'failed to read event payload'))
+      return
     }
     if (event === null) {
       safeOnError(
         new Error(
           `processing worker: event ${claim.eventNumber} not found in $all (race with rebuild?)`,
         ),
-      );
-      return;
+      )
+      return
     }
 
     // Per-item heartbeat. Its own AbortController fires when we're
     // done with this item so the heartbeat exits without affecting
     // the worker-wide signal.
-    const itemAc = new AbortController();
-    const hb = heartbeatForItem(
-      claim.partitionKey,
-      claim.eventNumber,
-      itemAc.signal,
-    ).catch(() => {
+    const itemAc = new AbortController()
+    const hb = heartbeatForItem(claim.partitionKey, claim.eventNumber, itemAc.signal).catch(() => {
       /* heartbeat reports via markAborted / onError */
-    });
+    })
 
     try {
-      const ok = await runHandlerWithPolicy(
-        event,
-        claim.partitionKey,
-        claim.eventNumber,
-      );
-      if (!ok) return;
+      const ok = await runHandlerWithPolicy(event, claim.partitionKey, claim.eventNumber)
+      if (!ok) return
       // Terminal success step. Kind-specific. On IS030 the lease was
       // taken over between handle and complete -- surface and stop;
       // the takeover worker (or a future redelivery) will handle it.
@@ -469,50 +443,45 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
           attempt: 1,
           signal,
           logger,
-        });
+        })
       } catch (err) {
         if (err instanceof WorkItemLeaseLost) {
-          markAborted(err);
-          return;
+          markAborted(err)
+          return
         }
         // Other complete errors are transient SDK problems (network
         // blip, etc.). Surface and stop -- redoing the handler
         // without redoing complete is unsafe; the lease expiry will
         // redeliver the whole item to another worker.
-        safeOnError(asError(err, "complete threw"));
-        markAborted(asError(err, "complete failed"));
+        safeOnError(asError(err, 'complete threw'))
+        markAborted(asError(err, 'complete failed'))
       }
     } finally {
-      itemAc.abort();
-      await hb;
+      itemAc.abort()
+      await hb
     }
   }
 
   async function loop(): Promise<void> {
     try {
       while (!closing && !aborted) {
-        let claim: Awaited<ReturnType<Client["claimWorkItem"]>>;
+        let claim: Awaited<ReturnType<Client['claimWorkItem']>>
         try {
-          claim = await client.claimWorkItem(
-            stream,
-            def.name,
-            workerId,
-            leaseSeconds,
-          );
+          claim = await client.claimWorkItem(stream, def.name, workerId, leaseSeconds)
         } catch (err) {
           if (err instanceof SubscriptionNotFound) {
             // Subscription doesn't exist yet (routing worker hasn't
             // created it). Treat as empty queue and try again.
-            await sleep(pollInterval, signal);
-            continue;
+            await sleep(pollInterval, signal)
+            continue
           }
-          safeOnError(asError(err, "claim_work_item failed"));
-          await sleep(pollInterval, signal);
-          continue;
+          safeOnError(asError(err, 'claim_work_item failed'))
+          await sleep(pollInterval, signal)
+          continue
         }
         if (claim === null) {
-          await sleep(pollInterval, signal);
-          continue;
+          await sleep(pollInterval, signal)
+          continue
         }
         if (claim.wasTakeover) {
           // Informational; matches the design note. Surface only via
@@ -521,37 +490,37 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
             new Error(
               `processing worker: took over work item ${claim.partitionKey}/${claim.eventNumber} from ${claim.priorClaimedBy}`,
             ),
-          );
+          )
         }
         await processOneItem({
           partitionKey: claim.partitionKey,
           eventNumber: claim.eventNumber,
-        });
+        })
       }
     } finally {
-      resolveStopped();
+      resolveStopped()
     }
   }
 
-  const loopPromise = loop();
+  const loopPromise = loop()
   loopPromise.catch(() => {
     /* unreachable: loop's try/finally always resolves stopped */
-  });
+  })
 
   return {
     stopped,
     stop(): Promise<void> {
-      if (closePromise) return closePromise;
-      closing = true;
+      if (closePromise) return closePromise
+      closing = true
       try {
-        ac.abort();
+        ac.abort()
       } catch {
         /* ignore */
       }
-      closePromise = stopped;
-      return closePromise;
+      closePromise = stopped
+      return closePromise
     },
-  };
+  }
 }
 
 function noopOnError(_err: Error): void {
@@ -560,12 +529,12 @@ function noopOnError(_err: Error): void {
 
 function asError(err: unknown, prefix: string): Error {
   if (err instanceof Error) {
-    return new Error(`${prefix}: ${err.message}`, { cause: err });
+    return new Error(`${prefix}: ${err.message}`, { cause: err })
   }
-  return new Error(`${prefix}: ${String(err)}`);
+  return new Error(`${prefix}: ${String(err)}`)
 }
 
 // Marker re-export to satisfy lint when SubscriptionLeaseLost is only
 // referenced via instanceof in user-facing layers (kept for slice-9
 // integration; the processing worker doesn't surface it directly).
-export type { SubscriptionLeaseLost };
+export type { SubscriptionLeaseLost }

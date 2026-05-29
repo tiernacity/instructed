@@ -64,18 +64,18 @@
  * PM-E work for deterministic event IDs.
  */
 
-import type { Client } from "../../client/index.ts";
-import { prefixType } from "../../aggregate/index.ts";
-import { SnapshotNotFound } from "../../errors/index.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "../../aggregate/index.ts";
+import { prefixType } from '../../aggregate/index.ts'
+import { SNAPSHOT_MODULE_VERSION_KEY } from '../../aggregate/index.ts'
+import type { Client } from '../../client/index.ts'
+import { SnapshotNotFound } from '../../errors/index.ts'
+import type { RunningWorker } from '../../internal/running-worker.ts'
+import type { Event, RecordedEvent } from '../../types/index.ts'
 import {
   startProcessingWorker,
   type ErrorPolicy,
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
-} from "../processing/index.ts";
-import type { Event, RecordedEvent } from "../../types/index.ts";
-import type { RunningWorker } from "../../internal/running-worker.ts";
+} from '../processing/index.ts'
 
 // ============================================================================
 // Public surface
@@ -90,7 +90,7 @@ import type { RunningWorker } from "../../internal/running-worker.ts";
  */
 export interface PmSubstrateHandleResult {
   /** Terminate the partition: DELETE snapshot + all work-items. */
-  complete?: boolean;
+  complete?: boolean
 }
 
 /**
@@ -98,7 +98,7 @@ export interface PmSubstrateHandleResult {
  * kind-agnostic processing-worker context; aliased here for the
  * substrate's self-contained public surface.
  */
-export type PmSubstrateHandlerContext = ProcessingHandlerContext;
+export type PmSubstrateHandlerContext = ProcessingHandlerContext
 
 /**
  * PM substrate definition.
@@ -119,7 +119,7 @@ export type PmSubstrateHandlerContext = ProcessingHandlerContext;
 export interface PmSubstrateDefinition<S, E extends Event = Event, PolicyState = undefined> {
   /** PM type — doubles as the subscription name and the snapshot
    *  source_type prefix. Same role as `AggregateDefinition.type`. */
-  type: string;
+  type: string
   /**
    * Optional encoding from a PM partition key to the snapshot
    * source_uuid. Default: `${type}-${partitionKey}` (see
@@ -127,37 +127,37 @@ export interface PmSubstrateDefinition<S, E extends Event = Event, PolicyState =
    * an internal storage concern; applications identify PM
    * instances by `(type, partitionKey)`.
    */
-  streamName?(partitionKey: string): string;
+  streamName?(partitionKey: string): string
   /** Default `$all`. */
-  stream?: string;
-  initialState(): S;
-  apply(state: S, event: RecordedEvent<E>): S;
+  stream?: string
+  initialState(): S
+  apply(state: S, event: RecordedEvent<E>): S
   handle(
     state: S,
     event: RecordedEvent<E>,
     ctx: PmSubstrateHandlerContext,
-  ): Promise<PmSubstrateHandleResult> | PmSubstrateHandleResult;
+  ): Promise<PmSubstrateHandleResult> | PmSubstrateHandleResult
   /** SDK-managed snapshot version tag; mismatch triggers rebuild. */
-  snapshotModuleVersion?: string;
+  snapshotModuleVersion?: string
   /**
    * Retry/error-policy hook. Defaults to `DEFAULT_ERROR_POLICY`
    * (exponential backoff, retry forever). Type-parameterised by
    * `PolicyState` for callers writing stateful policies; defaults
    * to `ErrorPolicy<undefined>`.
    */
-  errorPolicy?: ErrorPolicy<PolicyState>;
+  errorPolicy?: ErrorPolicy<PolicyState>
 }
 
-export type PmSubstrateOptions = ProcessingWorkerOptions;
+export type PmSubstrateOptions = ProcessingWorkerOptions
 
 // ============================================================================
 // Implementation
 // ============================================================================
 
 interface StagedWork<S> {
-  sourceUuid: string;
-  stagedState: S;
-  complete: boolean;
+  sourceUuid: string
+  stagedState: S
+  complete: boolean
 }
 
 /**
@@ -177,7 +177,7 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
   def: PmSubstrateDefinition<S, E, PolicyState>,
   opts: PmSubstrateOptions = {},
 ): RunningWorker {
-  const stream = def.stream ?? "$all";
+  const stream = def.stream ?? '$all'
 
   // Per-item staged state shared between the slice-5 `handle` and
   // `complete` callbacks. Keyed by `${partitionKey}:${eventNumber}`.
@@ -185,9 +185,9 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
   // `stop` the `complete` callback never fires and a stale entry just
   // orphans (the worker is exiting). Lease loss during heartbeat also
   // exits without running `complete`. No cleanup is required.
-  const staged = new Map<string, StagedWork<S>>();
+  const staged = new Map<string, StagedWork<S>>()
   function key(pk: string, en: bigint): string {
-    return `${pk}:${en.toString()}`;
+    return `${pk}:${en.toString()}`
   }
 
   async function loadState(
@@ -196,32 +196,26 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
     claimedEventNumber: bigint,
   ): Promise<S> {
     // Snapshot path first; rebuild on miss or module-version mismatch.
-    let snapData: S | null = null;
-    let snapModuleVersion: string | undefined;
+    let snapData: S | null = null
+    let snapModuleVersion: string | undefined
     try {
-      const snap = await client.readSnapshot<S>(sourceUuid);
-      snapData = snap.data;
-      if (
-        snap.metadata &&
-        typeof snap.metadata === "object" &&
-        snap.metadata !== null
-      ) {
-        const v = (snap.metadata as Record<string, unknown>)[
-          SNAPSHOT_MODULE_VERSION_KEY
-        ];
-        if (typeof v === "string") snapModuleVersion = v;
+      const snap = await client.readSnapshot<S>(sourceUuid)
+      snapData = snap.data
+      if (snap.metadata && typeof snap.metadata === 'object' && snap.metadata !== null) {
+        const v = (snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY]
+        if (typeof v === 'string') snapModuleVersion = v
       }
     } catch (err) {
-      if (!(err instanceof SnapshotNotFound)) throw err;
+      if (!(err instanceof SnapshotNotFound)) throw err
     }
 
-    const want = def.snapshotModuleVersion;
+    const want = def.snapshotModuleVersion
     const matches =
       snapData !== null &&
-      (want === undefined ? snapModuleVersion === undefined : snapModuleVersion === want);
+      (want === undefined ? snapModuleVersion === undefined : snapModuleVersion === want)
 
     if (matches) {
-      return snapData as S;
+      return snapData as S
     }
 
     // Rebuild: fold every prior `done` event for the partition through
@@ -232,26 +226,22 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
       def.type,
       claimedPartitionKey,
       claimedEventNumber,
-    );
-    let state = def.initialState();
-    for (const ev of priorEvents) state = def.apply(state, ev);
-    return state;
+    )
+    let state = def.initialState()
+    for (const ev of priorEvents) state = def.apply(state, ev)
+    return state
   }
 
-  const sourceUuidOf = def.streamName ?? prefixType(def.type);
+  const sourceUuidOf = def.streamName ?? prefixType(def.type)
   const adapted = {
     name: def.type,
     stream,
     errorPolicy: def.errorPolicy,
     handle: async (event: RecordedEvent<E>, ctx: ProcessingHandlerContext) => {
-      const sourceUuid = sourceUuidOf(ctx.partitionKey);
-      const baseState = await loadState(
-        sourceUuid,
-        ctx.partitionKey,
-        ctx.eventNumber,
-      );
-      const stagedState = def.apply(baseState, event);
-      const result = await def.handle(stagedState, event, ctx);
+      const sourceUuid = sourceUuidOf(ctx.partitionKey)
+      const baseState = await loadState(sourceUuid, ctx.partitionKey, ctx.eventNumber)
+      const stagedState = def.apply(baseState, event)
+      const result = await def.handle(stagedState, event, ctx)
       // The substrate doesn't dispatch. Side effects between `handle`
       // and the snapshot+ack tx are the caller's responsibility, and
       // happen inside their `handle` implementation. If they throw,
@@ -262,39 +252,31 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
         sourceUuid,
         stagedState,
         complete: result.complete === true,
-      });
+      })
     },
-    complete: async (
-      event: RecordedEvent<E>,
-      ctx: ProcessingHandlerContext,
-    ) => {
-      const k = key(ctx.partitionKey, ctx.eventNumber);
-      const entry = staged.get(k);
+    complete: async (event: RecordedEvent<E>, ctx: ProcessingHandlerContext) => {
+      const k = key(ctx.partitionKey, ctx.eventNumber)
+      const entry = staged.get(k)
       if (!entry) {
         // Should never happen: `complete` only runs after `handle`
         // succeeds, and `handle` always stores an entry on success.
         throw new Error(
           `pm substrate: no staged state for ${ctx.partitionKey}/${ctx.eventNumber}; this is a bug`,
-        );
+        )
       }
-      staged.delete(k);
+      staged.delete(k)
       if (entry.complete) {
         // PM-F terminal: DELETE snapshot + all work-items for the
         // partition in one tx.
-        await client.completePmInstance(
-          stream,
-          def.type,
-          ctx.partitionKey,
-          entry.sourceUuid,
-        );
-        return;
+        await client.completePmInstance(stream, def.type, ctx.partitionKey, entry.sourceUuid)
+        return
       }
       // Non-terminal: UPDATE work item -> 'done' + UPSERT snapshot in
       // one tx. The snapshot's metadata carries the module-version
       // tag for the next state-load.
-      const metadata: Record<string, unknown> = {};
+      const metadata: Record<string, unknown> = {}
       if (def.snapshotModuleVersion !== undefined) {
-        metadata[SNAPSHOT_MODULE_VERSION_KEY] = def.snapshotModuleVersion;
+        metadata[SNAPSHOT_MODULE_VERSION_KEY] = def.snapshotModuleVersion
       }
       await client.completeWorkItemPm<S>(
         stream,
@@ -309,9 +291,9 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
           data: entry.stagedState,
           metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
         },
-      );
+      )
     },
-  };
+  }
 
-  return startProcessingWorker<E, PolicyState>(client, adapted, opts);
+  return startProcessingWorker<E, PolicyState>(client, adapted, opts)
 }

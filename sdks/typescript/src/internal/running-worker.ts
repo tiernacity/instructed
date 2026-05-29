@@ -11,11 +11,11 @@ export interface RunningWorker {
    * Returns the same promise as {@link stopped}, so
    * `await worker.stop()` waits for the loop to fully exit.
    */
-  stop(): Promise<void>;
+  stop(): Promise<void>
   /**
    * Resolves when the loop has exited — whether stopped via
    * {@link stop}, by a worker-internal error policy escalation,
    * or by any other means. Never rejects.
    */
-  readonly stopped: Promise<void>;
+  readonly stopped: Promise<void>
 }

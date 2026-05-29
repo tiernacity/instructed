@@ -71,11 +71,7 @@
  * helpers in whatever shape fits the language, or none at all.
  */
 
-import type {
-  ErrorPolicy,
-  ErrorPolicyContext,
-  ErrorPolicyResult,
-} from "./processing-worker.ts";
+import type { ErrorPolicy, ErrorPolicyContext, ErrorPolicyResult } from './processing-worker.ts'
 
 // ============================================================================
 // exponentialBackoff
@@ -83,16 +79,16 @@ import type {
 
 export interface ExponentialBackoffOptions {
   /** Initial delay for attempt 1. Doubles per attempt. */
-  baseMs: number;
+  baseMs: number
   /** Upper bound on the computed delay. */
-  capMs: number;
+  capMs: number
   /**
    * Full-jitter mode. When `true`, the returned delay is a
    * uniform sample in `[0, computedDelay)` rather than the
    * computed delay itself. Helps avoid thundering-herd retries
    * across many concurrently-failing workers. Default `false`.
    */
-  jitter?: boolean;
+  jitter?: boolean
 }
 
 /**
@@ -104,28 +100,22 @@ export interface ExponentialBackoffOptions {
  * Retries forever (never emits `stop`). Compose with `retryUpTo`
  * to cap attempts.
  */
-export function exponentialBackoff(
-  opts: ExponentialBackoffOptions,
-): ErrorPolicy<undefined> {
-  const { baseMs, capMs, jitter = false } = opts;
+export function exponentialBackoff(opts: ExponentialBackoffOptions): ErrorPolicy<undefined> {
+  const { baseMs, capMs, jitter = false } = opts
   if (!Number.isFinite(baseMs) || baseMs < 0) {
-    throw new RangeError(
-      `exponentialBackoff: baseMs must be a non-negative number, got ${baseMs}`,
-    );
+    throw new RangeError(`exponentialBackoff: baseMs must be a non-negative number, got ${baseMs}`)
   }
   if (!Number.isFinite(capMs) || capMs < 0) {
-    throw new RangeError(
-      `exponentialBackoff: capMs must be a non-negative number, got ${capMs}`,
-    );
+    throw new RangeError(`exponentialBackoff: capMs must be a non-negative number, got ${capMs}`)
   }
   return (_err, ctx, _state) => {
     // Clamp the exponent so we never compute an absurd
     // intermediate even if attempt is very large.
-    const exp = Math.min(ctx.attempt - 1, 30);
-    const raw = Math.min(capMs, baseMs * 2 ** exp);
-    const delayMs = jitter ? Math.random() * raw : raw;
-    return { decision: { kind: "retry-in", delayMs }, state: undefined };
-  };
+    const exp = Math.min(ctx.attempt - 1, 30)
+    const raw = Math.min(capMs, baseMs * 2 ** exp)
+    const delayMs = jitter ? Math.random() * raw : raw
+    return { decision: { kind: 'retry-in', delayMs }, state: undefined }
+  }
 }
 
 // ============================================================================
@@ -134,9 +124,9 @@ export function exponentialBackoff(
 
 export interface LinearBackoffOptions {
   /** Delay for attempt 1; grows by stepMs each attempt. */
-  stepMs: number;
+  stepMs: number
   /** Upper bound on the computed delay. */
-  capMs: number;
+  capMs: number
 }
 
 /**
@@ -144,24 +134,18 @@ export interface LinearBackoffOptions {
  * Retries forever (never emits `stop`). Compose with `retryUpTo`
  * to cap attempts.
  */
-export function linearBackoff(
-  opts: LinearBackoffOptions,
-): ErrorPolicy<undefined> {
-  const { stepMs, capMs } = opts;
+export function linearBackoff(opts: LinearBackoffOptions): ErrorPolicy<undefined> {
+  const { stepMs, capMs } = opts
   if (!Number.isFinite(stepMs) || stepMs < 0) {
-    throw new RangeError(
-      `linearBackoff: stepMs must be a non-negative number, got ${stepMs}`,
-    );
+    throw new RangeError(`linearBackoff: stepMs must be a non-negative number, got ${stepMs}`)
   }
   if (!Number.isFinite(capMs) || capMs < 0) {
-    throw new RangeError(
-      `linearBackoff: capMs must be a non-negative number, got ${capMs}`,
-    );
+    throw new RangeError(`linearBackoff: capMs must be a non-negative number, got ${capMs}`)
   }
   return (_err, ctx, _state) => ({
-    decision: { kind: "retry-in", delayMs: Math.min(capMs, stepMs * ctx.attempt) },
+    decision: { kind: 'retry-in', delayMs: Math.min(capMs, stepMs * ctx.attempt) },
     state: undefined,
-  });
+  })
 }
 
 // ============================================================================
@@ -191,9 +175,7 @@ export function retryUpTo<PolicyState>(
   inner: ErrorPolicy<PolicyState>,
 ): ErrorPolicy<PolicyState> {
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
-    throw new RangeError(
-      `retryUpTo: maxAttempts must be a positive integer, got ${maxAttempts}`,
-    );
+    throw new RangeError(`retryUpTo: maxAttempts must be a positive integer, got ${maxAttempts}`)
   }
   return async (err, ctx: ErrorPolicyContext, state) => {
     if (ctx.attempt > maxAttempts) {
@@ -201,14 +183,14 @@ export function retryUpTo<PolicyState>(
       // state, which is fine — the worker exits on `stop` and the
       // state slot is discarded anyway.
       return {
-        decision: { kind: "stop" as const },
+        decision: { kind: 'stop' as const },
         // The state-of-record going into the stop is whatever was
         // last set; preserve it verbatim. Cast covers the `state`
         // parameter being `PolicyState | undefined`.
         state: state as PolicyState,
-      };
+      }
     }
-    const result: ErrorPolicyResult<PolicyState> = await inner(err, ctx, state);
-    return result;
-  };
+    const result: ErrorPolicyResult<PolicyState> = await inner(err, ctx, state)
+    return result
+  }
 }

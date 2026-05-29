@@ -15,20 +15,15 @@
  * `src/index.ts` (L3: runCommandWithSnapshots).
  */
 
-export {
-  runCommand,
-  runCommandAndApply,
-  prefixType,
-  DEFAULT_RETRY_BUDGET,
-} from "./run-command.ts";
+export { runCommand, runCommandAndApply, prefixType, DEFAULT_RETRY_BUDGET } from './run-command.ts'
 export type {
   AggregateDefinition,
   DispatchContext,
   DomainEvent,
   RanCommand,
   RunCommandOptions,
-} from "./run-command.ts";
-export { everyN } from "./snapshot-policy.ts";
-export type { SnapshotPolicy } from "./snapshot-policy.ts";
-export { runCommandWithSnapshots } from "./snapshots.ts";
-export { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
+} from './run-command.ts'
+export { everyN } from './snapshot-policy.ts'
+export type { SnapshotPolicy } from './snapshot-policy.ts'
+export { runCommandWithSnapshots } from './snapshots.ts'
+export { SNAPSHOT_MODULE_VERSION_KEY } from './snapshot-version.ts'

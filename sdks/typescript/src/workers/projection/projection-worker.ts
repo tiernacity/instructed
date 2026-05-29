@@ -23,15 +23,15 @@
  * runs" for the routing / processing split.
  */
 
-import type { Client } from "../../client/index.ts";
-import type { Event, RecordedEvent } from "../../types/index.ts";
+import type { Client } from '../../client/index.ts'
+import type { RunningWorker } from '../../internal/running-worker.ts'
+import type { Event, RecordedEvent } from '../../types/index.ts'
 import {
   startProcessingWorker,
   type ErrorPolicy,
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
-} from "../processing/index.ts";
-import type { RunningWorker } from "../../internal/running-worker.ts";
+} from '../processing/index.ts'
 
 // ============================================================================
 // Projection processing worker
@@ -43,30 +43,30 @@ import type { RunningWorker } from "../../internal/running-worker.ts";
  * projection-facing name so the public surface is self-contained.
  * Per D-0016: no tx, no Queryable, no framework-owned resource.
  */
-export type ProjectionHandlerContext = ProcessingHandlerContext;
+export type ProjectionHandlerContext = ProcessingHandlerContext
 
 export type ProjectionHandler<E extends Event = Event> = (
   event: RecordedEvent<E>,
   ctx: ProjectionHandlerContext,
-) => Promise<void>;
+) => Promise<void>
 
 export interface ProjectionWorkerDefinition<E extends Event = Event, PolicyState = undefined> {
   /** Subscription name (must match the routing worker for the same sub). */
-  name: string;
+  name: string
   /** Source stream; default `$all`. */
-  stream?: string;
+  stream?: string
   /** User-supplied projection handler. Opaque to the SDK (D-0016). */
-  handler: ProjectionHandler<E>;
+  handler: ProjectionHandler<E>
   /**
    * Retry/error-policy hook. Defaults to `DEFAULT_ERROR_POLICY`
    * (exponential backoff, retry forever). Type-parameterised by
    * `PolicyState` for callers writing stateful policies; defaults
    * to `ErrorPolicy<undefined>`.
    */
-  errorPolicy?: ErrorPolicy<PolicyState>;
+  errorPolicy?: ErrorPolicy<PolicyState>
 }
 
-export type ProjectionWorkerOptions = ProcessingWorkerOptions;
+export type ProjectionWorkerOptions = ProcessingWorkerOptions
 
 /**
  * Start a projection processing worker. Wraps `startProcessingWorker`
@@ -82,7 +82,7 @@ export function startProjectionWorker<E extends Event = Event, PolicyState = und
   def: ProjectionWorkerDefinition<E, PolicyState>,
   opts: ProjectionWorkerOptions = {},
 ): RunningWorker {
-  const stream = def.stream ?? "$all";
+  const stream = def.stream ?? '$all'
   return startProcessingWorker<E, PolicyState>(
     client,
     {
@@ -100,9 +100,9 @@ export function startProjectionWorker<E extends Event = Event, PolicyState = und
           ctx.workerId,
           ctx.partitionKey,
           ctx.eventNumber,
-        );
+        )
       },
     },
     opts,
-  );
+  )
 }

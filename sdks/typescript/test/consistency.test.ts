@@ -8,10 +8,10 @@
  * and the empty-input no-op.
  */
 
-import { after, before, beforeEach, describe, test } from "node:test";
-import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { closePool, getPool, truncateAll } from "./fixtures.ts";
+import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
+import { after, before, beforeEach, describe, test } from 'node:test'
+
 import {
   Client,
   ConsistencyTargetError,
@@ -21,11 +21,9 @@ import {
   startProjectionWorker,
   startRoutingWorker,
   waitForProjection,
-} from "../src/index.ts";
-import type {
-  RunningWorker,
-  SubscriptionRef,
-} from "../src/index.ts";
+} from '../src/index.ts'
+import type { RunningWorker, SubscriptionRef } from '../src/index.ts'
+import { closePool, getPool, truncateAll } from './fixtures.ts'
 
 /**
  * Wire a routing+processing pair for `name` against `stream`.
@@ -36,99 +34,94 @@ function startProjPair(
   name: string,
   stream: string,
   handler: () => Promise<void>,
-  startFrom?: "origin" | "current",
+  startFrom?: 'origin' | 'current',
 ): RunningWorker {
   const router = startRoutingWorker(
     client,
     {
       name,
       stream,
-      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
+      routeFn: routingFnForPartitionBy({ kind: 'sequential' }),
       ...(startFrom !== undefined ? { startFrom } : {}),
     },
     { pollInterval: 25 },
-  );
+  )
   const proc = startProjectionWorker(
     client,
     { name, stream, handler },
     { pollInterval: 25, heartbeatInterval: 1_000 },
-  );
+  )
   return {
     stopped: Promise.all([router.stopped, proc.stopped]).then(() => {}),
     stop: async () => {
-      await Promise.all([router.stop(), proc.stop()]);
+      await Promise.all([router.stop(), proc.stop()])
     },
-  };
+  }
 }
-import type pg from "pg";
+import type pg from 'pg'
 
-let pool: pg.Pool;
-let client: Client;
+let pool: pg.Pool
+let client: Client
 
 before(async () => {
-  pool = await getPool();
-  client = new Client(pool);
-});
+  pool = await getPool()
+  client = new Client(pool)
+})
 after(async () => {
-  await closePool();
-});
+  await closePool()
+})
 beforeEach(async () => {
-  await truncateAll(pool);
-});
+  await truncateAll(pool)
+})
 
 // ---------------------------------------------------------------------------
 
-describe("waitForProjection -- happy path", () => {
-  test("returns once a running $all projection catches up", async () => {
-    const stream = randomUUID();
-    const name = `p-${randomUUID().slice(0, 8)}`;
+describe('waitForProjection -- happy path', () => {
+  test('returns once a running $all projection catches up', async () => {
+    const stream = randomUUID()
+    const name = `p-${randomUUID().slice(0, 8)}`
 
-    let handled = 0;
-    const worker = startProjPair(
-      client,
-      name,
-      "$all",
-      async () => {
-        handled++;
-      },
-    );
+    let handled = 0
+    const worker = startProjPair(client, name, '$all', async () => {
+      handled++
+    })
     try {
       const appended = await client.appendToStream(stream, expected.noStream, [
-        { type: "A", data: {} },
-        { type: "B", data: {} },
-      ]);
-      const subs: SubscriptionRef[] = [{ stream: "$all", name }];
-      const start = Date.now();
+        { type: 'A', data: {} },
+        { type: 'B', data: {} },
+      ])
+      const subs: SubscriptionRef[] = [{ stream: '$all', name }]
+      const start = Date.now()
       await waitForProjection(client, appended, subs, {
         timeout: 5_000,
         pollInterval: 10,
-      });
-      assert.ok(Date.now() - start < 5_000);
-      assert.ok(handled >= 2, `expected handler to have run >= 2, got ${handled}`);
+      })
+      assert.ok(Date.now() - start < 5_000)
+      assert.ok(handled >= 2, `expected handler to have run >= 2, got ${handled}`)
       // cursor is at or past the last event.
       const caughtUp = await client.isSubscriptionCaughtUp(
-        "$all",
+        '$all',
         name,
         appended[appended.length - 1].event_number,
-      );
-      assert.ok(caughtUp);
+      )
+      assert.ok(caughtUp)
     } finally {
-      await worker.stop();
+      await worker.stop()
     }
-  });
+  })
 
-  test("per-stream subscription waits in event_number space (SUB-A)", async () => {
+  test('per-stream subscription waits in event_number space (SUB-A)', async () => {
     // Under SUB-A all work-items carry the global event_number and
     // the catch-up predicate compares in that space for both `$all`
     // and per-stream subscriptions. The legacy stream_version-based
     // target is gone; the same wall-clock moment is reached either
     // way because each AppendedEvent carries both numbers.
-    const stream = randomUUID();
-    const name = `p-${randomUUID().slice(0, 8)}`;
+    const stream = randomUUID()
+    const name = `p-${randomUUID().slice(0, 8)}`
 
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "X", data: {} },
-    ]);
+      { type: 'X', data: {} },
+    ])
     const worker = startProjPair(
       client,
       name,
@@ -136,103 +129,87 @@ describe("waitForProjection -- happy path", () => {
       async () => {
         /* no-op */
       },
-      "origin",
-    );
+      'origin',
+    )
     try {
-      await waitForProjection(
-        client,
-        appended,
-        [{ stream, name }],
-        { timeout: 5_000, pollInterval: 10 },
-      );
+      await waitForProjection(client, appended, [{ stream, name }], {
+        timeout: 5_000,
+        pollInterval: 10,
+      })
       // Predicate-true guarantees both conjuncts; the cursor reached
       // the event_number target.
-      const caughtUp = await client.isSubscriptionCaughtUp(
-        stream,
-        name,
-        appended[0].event_number,
-      );
-      assert.ok(caughtUp);
+      const caughtUp = await client.isSubscriptionCaughtUp(stream, name, appended[0].event_number)
+      assert.ok(caughtUp)
     } finally {
-      await worker.stop();
+      await worker.stop()
     }
-  });
+  })
 
-  test("empty appended / empty subscriptions are no-ops", async () => {
-    await waitForProjection(client, [], [{ stream: "$all", name: "irrelevant" }]);
-    const stream = randomUUID();
+  test('empty appended / empty subscriptions are no-ops', async () => {
+    await waitForProjection(client, [], [{ stream: '$all', name: 'irrelevant' }])
+    const stream = randomUUID()
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "A", data: {} },
-    ]);
+      { type: 'A', data: {} },
+    ])
     // Empty subscription list returns immediately even if there's
     // appended events.
-    await waitForProjection(client, appended, []);
-  });
-});
+    await waitForProjection(client, appended, [])
+  })
+})
 
 // ---------------------------------------------------------------------------
 
-describe("waitForProjection — timeout", () => {
-  test("throws ConsistencyTimeout listing missing subscriptions", async () => {
-    const stream = randomUUID();
+describe('waitForProjection — timeout', () => {
+  test('throws ConsistencyTimeout listing missing subscriptions', async () => {
+    const stream = randomUUID()
     // Subscription that nobody is running — claim it ourselves so the
     // row exists, then never advance it.
-    const stuck = `stuck-${randomUUID().slice(0, 8)}`;
-    await client.claimSubscription(
-      "$all",
-      stuck,
-      "test-worker",
-      60,
-      { startFrom: "origin" },
-    );
+    const stuck = `stuck-${randomUUID().slice(0, 8)}`
+    await client.claimSubscription('$all', stuck, 'test-worker', 60, { startFrom: 'origin' })
 
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "A", data: {} },
-      { type: "B", data: {} },
-    ]);
+      { type: 'A', data: {} },
+      { type: 'B', data: {} },
+    ])
 
-    const start = Date.now();
+    const start = Date.now()
     await assert.rejects(
       () =>
-        waitForProjection(
-          client,
-          appended,
-          [{ stream: "$all", name: stuck }],
-          { timeout: 150, pollInterval: 25 },
-        ),
+        waitForProjection(client, appended, [{ stream: '$all', name: stuck }], {
+          timeout: 150,
+          pollInterval: 25,
+        }),
       (err: unknown) => {
-        assert.ok(err instanceof ConsistencyTimeout);
-        const e = err as ConsistencyTimeout;
-        assert.equal(e.waitedMs, 150);
-        assert.deepEqual(e.missing, [`$all::${stuck}`]);
-        return true;
+        assert.ok(err instanceof ConsistencyTimeout)
+        const e = err as ConsistencyTimeout
+        assert.equal(e.waitedMs, 150)
+        assert.deepEqual(e.missing, [`$all::${stuck}`])
+        return true
       },
-    );
+    )
     // Sanity: at least the timeout elapsed (no early throw).
-    assert.ok(Date.now() - start >= 100);
+    assert.ok(Date.now() - start >= 100)
 
-    await client.releaseSubscription("$all", stuck, "test-worker");
-  });
+    await client.releaseSubscription('$all', stuck, 'test-worker')
+  })
 
-  test("non-existent subscription times out (treated as not caught up)", async () => {
-    const stream = randomUUID();
+  test('non-existent subscription times out (treated as not caught up)', async () => {
+    const stream = randomUUID()
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "A", data: {} },
-    ]);
+      { type: 'A', data: {} },
+    ])
     await assert.rejects(
       () =>
-        waitForProjection(
-          client,
-          appended,
-          [{ stream: "$all", name: "never-created" }],
-          { timeout: 100, pollInterval: 20 },
-        ),
+        waitForProjection(client, appended, [{ stream: '$all', name: 'never-created' }], {
+          timeout: 100,
+          pollInterval: 20,
+        }),
       (err: unknown) =>
         err instanceof ConsistencyTimeout &&
-        (err as ConsistencyTimeout).missing.includes("$all::never-created"),
-    );
-  });
-});
+        (err as ConsistencyTimeout).missing.includes('$all::never-created'),
+    )
+  })
+})
 
 // ---------------------------------------------------------------------------
 // SUB-A slice 8 — work-item conjunct
@@ -243,22 +220,18 @@ describe("waitForProjection — timeout", () => {
 // the second conjunct under the real SUB-A routing + processing path.
 // ---------------------------------------------------------------------------
 
-describe("waitForProjection — SUB-A work-item conjunct", () => {
-  test("routed-but-pending blocks; predicate flips to true once handler completes", async () => {
-    const { startRoutingWorker } = await import("../src/workers/routing/index.ts");
-    const { startProjectionWorker } = await import(
-      "../src/workers/projection/index.ts"
-    );
-    const { routingFnForPartitionBy } = await import(
-      "../src/facade/partition-by.ts"
-    );
+describe('waitForProjection — SUB-A work-item conjunct', () => {
+  test('routed-but-pending blocks; predicate flips to true once handler completes', async () => {
+    const { startRoutingWorker } = await import('../src/workers/routing/index.ts')
+    const { startProjectionWorker } = await import('../src/workers/projection/index.ts')
+    const { routingFnForPartitionBy } = await import('../src/facade/partition-by.ts')
 
-    const stream = randomUUID();
-    const name = `subA-wait-${randomUUID().slice(0, 8)}`;
+    const stream = randomUUID()
+    const name = `subA-wait-${randomUUID().slice(0, 8)}`
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "A", data: {} },
-      { type: "B", data: {} },
-    ]);
+      { type: 'A', data: {} },
+      { type: 'B', data: {} },
+    ])
 
     // Block the handler so work-items stay `claimed` and the
     // predicate's second conjunct is false even though routing
@@ -266,124 +239,115 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
     // require the stream to exist before claim_subscription; we use
     // $all uniformly across these tests so workers can start in any
     // order).
-    let release!: () => void;
+    let release!: () => void
     const block = new Promise<void>((r) => {
-      release = r;
-    });
+      release = r
+    })
     const router = startRoutingWorker(client, {
       name,
-      stream: "$all",
-      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
-      startFrom: "origin",
-    });
+      stream: '$all',
+      routeFn: routingFnForPartitionBy({ kind: 'sequential' }),
+      startFrom: 'origin',
+    })
     const proj = startProjectionWorker(client, {
       name,
-      stream: "$all",
+      stream: '$all',
       handler: async () => {
-        await block;
+        await block
       },
-    });
+    })
 
     try {
       // Phase 1: wait should NOT return while handler is blocked.
-      const racer = waitForProjection(
-        client,
-        appended,
-        [{ stream: "$all", name }],
-        { timeout: 2_000, pollInterval: 10 },
-      );
-      let racerResolved = false;
+      const racer = waitForProjection(client, appended, [{ stream: '$all', name }], {
+        timeout: 2_000,
+        pollInterval: 10,
+      })
+      let racerResolved = false
       racer.then(
         () => {
-          racerResolved = true;
+          racerResolved = true
         },
         () => {
-          racerResolved = true;
+          racerResolved = true
         },
-      );
-      await new Promise((r) => setTimeout(r, 250));
+      )
+      await new Promise((r) => setTimeout(r, 250))
       assert.equal(
         racerResolved,
         false,
-        "waitForProjection must not return while work-items are in flight",
-      );
+        'waitForProjection must not return while work-items are in flight',
+      )
 
       // Phase 2: unblock handlers; wait should return cleanly.
-      release();
-      await racer;
+      release()
+      await racer
     } finally {
-      release();
-      await Promise.all([router.stop(), proj.stop()]);
+      release()
+      await Promise.all([router.stop(), proj.stop()])
     }
-  });
+  })
 
-  test("failed work-item keeps the predicate false (operator-only resolution)", async () => {
-    const { startRoutingWorker } = await import("../src/workers/routing/index.ts");
-    const stream = randomUUID();
-    const name = `subA-fail-${randomUUID().slice(0, 8)}`;
+  test('failed work-item keeps the predicate false (operator-only resolution)', async () => {
+    const { startRoutingWorker } = await import('../src/workers/routing/index.ts')
+    const stream = randomUUID()
+    const name = `subA-fail-${randomUUID().slice(0, 8)}`
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "A", data: {} },
-    ]);
+      { type: 'A', data: {} },
+    ])
 
     // Just routing -- no processing worker; we'll set the work-item
     // to `failed` directly via SQL after routing fires. Source from
     // $all uniformly with the other SUB-A tests in this describe.
     const router = startRoutingWorker(client, {
       name,
-      stream: "$all",
-      routeFn: () => ({ partitionKey: "p1" }),
-      startFrom: "origin",
-    });
+      stream: '$all',
+      routeFn: () => ({ partitionKey: 'p1' }),
+      startFrom: 'origin',
+    })
 
     try {
       // Wait for routing to insert the work-item, then claim+fail it
       // directly to put it in `failed` state.
-      const deadline = Date.now() + 2_000;
+      const deadline = Date.now() + 2_000
       while (Date.now() < deadline) {
         const r = await pool.query(
           `SELECT 1 FROM instructed.subscription_work_items
             WHERE subscription_name = $1`,
           [name],
-        );
-        if ((r.rowCount ?? 0) > 0) break;
-        await new Promise((r) => setTimeout(r, 25));
+        )
+        if ((r.rowCount ?? 0) > 0) break
+        await new Promise((r) => setTimeout(r, 25))
       }
       // Claim then fail via the same worker id.
-      const claimed = await client.claimWorkItem(
-        "$all",
-        name,
-        "test-w",
-        30,
-      );
-      assert.ok(claimed, "expected a claimable work item");
+      const claimed = await client.claimWorkItem('$all', name, 'test-w', 30)
+      assert.ok(claimed, 'expected a claimable work item')
       await client.failWorkItem(
-        "$all",
+        '$all',
         name,
-        "test-w",
+        'test-w',
         claimed.partitionKey,
         claimed.eventNumber,
-        "synthetic-failure-for-test",
-      );
+        'synthetic-failure-for-test',
+      )
 
       // Predicate must report not-caught-up due to the `failed` row.
       await assert.rejects(
         () =>
-          waitForProjection(
-            client,
-            appended,
-            [{ stream: "$all", name }],
-            { timeout: 150, pollInterval: 25 },
-          ),
+          waitForProjection(client, appended, [{ stream: '$all', name }], {
+            timeout: 150,
+            pollInterval: 25,
+          }),
         (err: unknown) =>
           err instanceof ConsistencyTimeout &&
           (err as ConsistencyTimeout).missing.includes(`$all::${name}`),
-      );
+      )
     } finally {
-      await router.stop();
+      await router.stop()
     }
-  });
+  })
 
-  test("race-safety: append + immediate wait does not spuriously return caught-up", async () => {
+  test('race-safety: append + immediate wait does not spuriously return caught-up', async () => {
     // Load-bearing on the routing worker's atomic route_batch: cursor
     // advance and work-item INSERTs commit in one tx. If they didn't,
     // there would be a window where last_seen >= N but the work-item
@@ -393,51 +357,45 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
     // We source from $all so the routing worker can claim the
     // subscription before any user stream exists (per-stream sources
     // would raise IS003 at claim-time).
-    const { startRoutingWorker } = await import("../src/workers/routing/index.ts");
-    const { startProjectionWorker } = await import(
-      "../src/workers/projection/index.ts"
-    );
-    const { routingFnForPartitionBy } = await import(
-      "../src/facade/partition-by.ts"
-    );
+    const { startRoutingWorker } = await import('../src/workers/routing/index.ts')
+    const { startProjectionWorker } = await import('../src/workers/projection/index.ts')
+    const { routingFnForPartitionBy } = await import('../src/facade/partition-by.ts')
 
-    const stream = randomUUID();
-    const name = `subA-race-${randomUUID().slice(0, 8)}`;
+    const stream = randomUUID()
+    const name = `subA-race-${randomUUID().slice(0, 8)}`
 
     const router = startRoutingWorker(client, {
       name,
-      stream: "$all",
-      routeFn: routingFnForPartitionBy({ kind: "sequential" }),
-      startFrom: "origin",
-    });
-    let handled = 0;
+      stream: '$all',
+      routeFn: routingFnForPartitionBy({ kind: 'sequential' }),
+      startFrom: 'origin',
+    })
+    let handled = 0
     const proj = startProjectionWorker(client, {
       name,
-      stream: "$all",
+      stream: '$all',
       handler: async () => {
-        handled += 1;
+        handled += 1
       },
-    });
+    })
 
     try {
       // Append-then-immediately-wait. The wait must block until both
       // routing and processing actually happen; it must not see a
       // stale "caught up" from before the append.
       const appended = await client.appendToStream(stream, expected.noStream, [
-        { type: "R", data: {} },
-      ]);
-      await waitForProjection(
-        client,
-        appended,
-        [{ stream: "$all", name }],
-        { timeout: 5_000, pollInterval: 10 },
-      );
-      assert.ok(handled >= 1, "handler must have run before wait returned");
+        { type: 'R', data: {} },
+      ])
+      await waitForProjection(client, appended, [{ stream: '$all', name }], {
+        timeout: 5_000,
+        pollInterval: 10,
+      })
+      assert.ok(handled >= 1, 'handler must have run before wait returned')
     } finally {
-      await Promise.all([router.stop(), proj.stop()]);
+      await Promise.all([router.stop(), proj.stop()])
     }
-  });
-});
+  })
+})
 
 // ---------------------------------------------------------------------------
 // CON-B: cross-stream guard
@@ -453,85 +411,77 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
 // See `docs/todo/consistency.md` :: CON-B.
 // ---------------------------------------------------------------------------
 
-describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
-  test("per-stream ref matching an appended stream resolves normally", async () => {
-    const stream = randomUUID();
-    const name = `con-b-ok-${randomUUID().slice(0, 8)}`;
+describe('waitForProjection \u2014 cross-stream guard (CON-B)', () => {
+  test('per-stream ref matching an appended stream resolves normally', async () => {
+    const stream = randomUUID()
+    const name = `con-b-ok-${randomUUID().slice(0, 8)}`
     // Per-stream sources require the stream to exist before
     // claim_subscription (IS003), so append first, then start the
     // workers (mirrors the pattern used by the timeout tests).
     const appended = await client.appendToStream(stream, expected.noStream, [
-      { type: "A", data: {} },
-    ]);
-    const worker = startProjPair(client, name, stream, async () => {});
+      { type: 'A', data: {} },
+    ])
+    const worker = startProjPair(client, name, stream, async () => {})
     try {
       // Per-stream ref pointing at the appended stream: must not
       // throw the guard, and must drain normally.
-      await waitForProjection(
-        client,
-        appended,
-        [{ stream, name }],
-        { timeout: 5_000, pollInterval: 10 },
-      );
+      await waitForProjection(client, appended, [{ stream, name }], {
+        timeout: 5_000,
+        pollInterval: 10,
+      })
     } finally {
-      await worker.stop();
+      await worker.stop()
     }
-  });
+  })
 
-  test("per-stream ref differing from every appended stream rejects fast (before pollInterval)", async () => {
+  test('per-stream ref differing from every appended stream rejects fast (before pollInterval)', async () => {
     // `waitForProjection` is async, so the pre-await throw
     // surfaces as a rejected promise on the next microtask. The
     // "synchronous" intent in CON-B is fast-fail: the rejection
     // must materialise long before `pollInterval` would have
     // elapsed. We assert on error class and on elapsed time.
-    const appendedStream = randomUUID();
-    const otherStream = randomUUID();
-    const appended = await client.appendToStream(
-      appendedStream,
-      expected.noStream,
-      [{ type: "A", data: {} }],
-    );
+    const appendedStream = randomUUID()
+    const otherStream = randomUUID()
+    const appended = await client.appendToStream(appendedStream, expected.noStream, [
+      { type: 'A', data: {} },
+    ])
 
-    const start = Date.now();
+    const start = Date.now()
     await assert.rejects(
       () =>
-        waitForProjection(
-          client,
-          appended,
-          [{ stream: otherStream, name: "x" }],
-          { timeout: 10_000, pollInterval: 250 },
-        ),
+        waitForProjection(client, appended, [{ stream: otherStream, name: 'x' }], {
+          timeout: 10_000,
+          pollInterval: 250,
+        }),
       (err: unknown) => {
         assert.ok(
           err instanceof ConsistencyTargetError,
           `expected ConsistencyTargetError, got ${err}`,
-        );
-        const e = err as ConsistencyTargetError;
-        assert.equal(e.subscriptionStream, otherStream);
-        assert.equal(e.subscriptionName, "x");
-        assert.deepEqual(e.appendedStreams, [appendedStream]);
-        return true;
+        )
+        const e = err as ConsistencyTargetError
+        assert.equal(e.subscriptionStream, otherStream)
+        assert.equal(e.subscriptionName, 'x')
+        assert.deepEqual(e.appendedStreams, [appendedStream])
+        return true
       },
-    );
-    const elapsed = Date.now() - start;
+    )
+    const elapsed = Date.now() - start
     assert.ok(
       elapsed < 100,
       `must reject before pollInterval (${elapsed}ms elapsed; pollInterval=250)`,
-    );
-  });
+    )
+  })
 
-  test("mixed list: one valid ref + one invalid ref rejects (invalid prevents wait)", async () => {
-    const appendedStream = randomUUID();
-    const otherStream = randomUUID();
-    const validName = `con-b-mixed-${randomUUID().slice(0, 8)}`;
+  test('mixed list: one valid ref + one invalid ref rejects (invalid prevents wait)', async () => {
+    const appendedStream = randomUUID()
+    const otherStream = randomUUID()
+    const validName = `con-b-mixed-${randomUUID().slice(0, 8)}`
     // Append first; per-stream source requires the stream to exist
     // before claim_subscription.
-    const appended = await client.appendToStream(
-      appendedStream,
-      expected.noStream,
-      [{ type: "A", data: {} }],
-    );
-    const worker = startProjPair(client, validName, appendedStream, async () => {});
+    const appended = await client.appendToStream(appendedStream, expected.noStream, [
+      { type: 'A', data: {} },
+    ])
+    const worker = startProjPair(client, validName, appendedStream, async () => {})
     try {
       await assert.rejects(
         () =>
@@ -540,36 +490,34 @@ describe("waitForProjection \u2014 cross-stream guard (CON-B)", () => {
             appended,
             [
               { stream: appendedStream, name: validName },
-              { stream: otherStream, name: "bad" },
+              { stream: otherStream, name: 'bad' },
             ],
             { timeout: 10_000, pollInterval: 250 },
           ),
         (err: unknown) =>
           err instanceof ConsistencyTargetError &&
           (err as ConsistencyTargetError).subscriptionStream === otherStream,
-      );
+      )
     } finally {
-      await worker.stop();
+      await worker.stop()
     }
-  });
+  })
 
-  test("$all refs are never rejected regardless of appended streams", async () => {
-    const stream = randomUUID();
-    const name = `con-b-all-${randomUUID().slice(0, 8)}`;
-    const worker = startProjPair(client, name, "$all", async () => {});
+  test('$all refs are never rejected regardless of appended streams', async () => {
+    const stream = randomUUID()
+    const name = `con-b-all-${randomUUID().slice(0, 8)}`
+    const worker = startProjPair(client, name, '$all', async () => {})
     try {
       const appended = await client.appendToStream(stream, expected.noStream, [
-        { type: "A", data: {} },
-      ]);
+        { type: 'A', data: {} },
+      ])
       // $all ref is always valid; guard must not fire.
-      await waitForProjection(
-        client,
-        appended,
-        [{ stream: "$all", name }],
-        { timeout: 5_000, pollInterval: 10 },
-      );
+      await waitForProjection(client, appended, [{ stream: '$all', name }], {
+        timeout: 5_000,
+        pollInterval: 10,
+      })
     } finally {
-      await worker.stop();
+      await worker.stop()
     }
-  });
-});
+  })
+})

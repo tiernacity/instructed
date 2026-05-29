@@ -32,12 +32,7 @@
     "typescript/unbound-method": "off",
     "typescript/restrict-template-expressions": "off"
   },
-  "ignorePatterns": [
-    "node_modules/",
-    "dist/",
-    "build/",
-    "coverage/"
-  ],
+  "ignorePatterns": ["node_modules/", "dist/", "build/", "coverage/"],
   "options": {
     "typeAware": true,
     "typeCheck": true

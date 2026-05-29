@@ -13,67 +13,68 @@
  * pg.PoolClient), it issues BEGIN/COMMIT on the existing session.
  */
 
-import type * as pg from "pg";
-import { Client } from "../client/index.ts";
-import { mapPgError } from "../errors/index.ts";
-import type { Queryable } from "../types/index.ts";
+import type * as pg from 'pg'
+
+import { Client } from '../client/index.ts'
+import { mapPgError } from '../errors/index.ts'
+import type { Queryable } from '../types/index.ts'
 
 interface PoolLike {
-  connect(): Promise<pg.PoolClient>;
+  connect(): Promise<pg.PoolClient>
 }
 
 function isPoolLike(con: unknown): con is PoolLike {
   return (
-    typeof con === "object" &&
+    typeof con === 'object' &&
     con !== null &&
-    typeof (con as { connect?: unknown }).connect === "function"
-  );
+    typeof (con as { connect?: unknown }).connect === 'function'
+  )
 }
 
 export async function withTransaction<T>(
   client: Client,
   fn: (tx: Client) => Promise<T>,
 ): Promise<T> {
-  const con = client.con as unknown;
+  const con = client.con as unknown
   if (isPoolLike(con)) {
-    const pc = await con.connect();
+    const pc = await con.connect()
     try {
-      await pc.query("BEGIN");
-      let result: T;
+      await pc.query('BEGIN')
+      let result: T
       try {
-        result = await fn(new Client(pc as unknown as Queryable));
+        result = await fn(new Client(pc as unknown as Queryable))
       } catch (err) {
         try {
-          await pc.query("ROLLBACK");
+          await pc.query('ROLLBACK')
         } catch {
           // ignore
         }
-        throw err;
+        throw err
       }
-      await pc.query("COMMIT");
-      return result;
+      await pc.query('COMMIT')
+      return result
     } finally {
-      pc.release();
+      pc.release()
     }
   }
   // Already a single session: inline BEGIN/COMMIT.
-  const session = con as Queryable;
+  const session = con as Queryable
   try {
-    await session.query("BEGIN");
+    await session.query('BEGIN')
   } catch (err) {
-    throw mapPgError(err);
+    throw mapPgError(err)
   }
-  let result: T;
+  let result: T
   try {
-    result = await fn(client);
+    result = await fn(client)
   } catch (err) {
     try {
-      await session.query("ROLLBACK");
+      await session.query('ROLLBACK')
     } catch {
       // ignore
     }
-    throw err;
+    throw err
   }
-  await session.query("COMMIT");
-  return result;
+  await session.query('COMMIT')
+  return result
 }

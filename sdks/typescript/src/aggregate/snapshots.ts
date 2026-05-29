@@ -50,16 +50,16 @@
  * "snapshot is best-effort" semantics).
  */
 
-import type { Client } from "../client/index.ts";
+import type { Client } from '../client/index.ts'
+import { DEFAULT_LOGGER_IMPL, Logger } from '../logger/index.ts'
+import type { AppendedEvent } from '../types/index.ts'
 import {
   runCommandAndApply,
   type AggregateDefinition,
   type DomainEvent,
   type RunCommandOptions,
-} from "./run-command.ts";
-import { DEFAULT_LOGGER_IMPL, Logger } from "../logger/index.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
-import type { AppendedEvent } from "../types/index.ts";
+} from './run-command.ts'
+import { SNAPSHOT_MODULE_VERSION_KEY } from './snapshot-version.ts'
 
 /**
  * Run a command against an aggregate stream with snapshot
@@ -84,32 +84,22 @@ import type { AppendedEvent } from "../types/index.ts";
  * it, this matches `runCommand`'s shape so the migration from
  * `runCommand`-with-snapshot-policy is mechanical.
  */
-export async function runCommandWithSnapshots<
-  S,
-  C,
-  E extends DomainEvent = DomainEvent,
->(
+export async function runCommandWithSnapshots<S, C, E extends DomainEvent = DomainEvent>(
   client: Client,
   def: AggregateDefinition<S, C, E>,
   streamUuid: string,
   command: C,
   opts: RunCommandOptions = {},
 ): Promise<AppendedEvent[]> {
-  const result = await runCommandAndApply(client, def, streamUuid, command, opts);
+  const result = await runCommandAndApply(client, def, streamUuid, command, opts)
 
   // No events appended (handler no-op): nothing to snapshot.
-  if (result.appended.length === 0) return result.appended;
+  if (result.appended.length === 0) return result.appended
 
   // No policy declared: skip orchestration entirely.
-  if (!def.snapshotPolicy) return result.appended;
+  if (!def.snapshotPolicy) return result.appended
 
-  if (
-    def.snapshotPolicy.shouldSnapshot(
-      result.state,
-      result.version,
-      result.eventsSinceSnapshot,
-    )
-  ) {
+  if (def.snapshotPolicy.shouldSnapshot(result.state, result.version, result.eventsSinceSnapshot)) {
     // SNAP-002: stamp the module-version metadata so the next
     // load can detect a shape change. Strict semantics on read:
     // a snapshot written with a version is rejected by a def
@@ -117,7 +107,7 @@ export async function runCommandWithSnapshots<
     const metadata =
       def.snapshotModuleVersion !== undefined
         ? { [SNAPSHOT_MODULE_VERSION_KEY]: def.snapshotModuleVersion }
-        : undefined;
+        : undefined
     try {
       await client.recordSnapshot({
         sourceUuid: streamUuid,
@@ -125,7 +115,7 @@ export async function runCommandWithSnapshots<
         sourceVersion: result.version,
         data: result.state,
         metadata,
-      });
+      })
     } catch (snapErr) {
       // Best-effort per D-0019. The load path works without the
       // snapshot — it'll re-fold from the previous snapshot (or
@@ -133,23 +123,19 @@ export async function runCommandWithSnapshots<
       // application's logger sink sees it. When no ctx is supplied
       // at the L2 boundary, the fallback (set inside `executeCommand`)
       // wraps `DEFAULT_LOGGER_IMPL` so the warning still surfaces.
-      const ctxLogger =
-        opts.ctx?.logger ?? Logger.fromImpl(DEFAULT_LOGGER_IMPL);
-      ctxLogger.warn(
-        () =>
-          `snapshot write failed for ${streamUuid}: ${describeError(snapErr)}`,
-      );
+      const ctxLogger = opts.ctx?.logger ?? Logger.fromImpl(DEFAULT_LOGGER_IMPL)
+      ctxLogger.warn(() => `snapshot write failed for ${streamUuid}: ${describeError(snapErr)}`)
     }
   }
 
-  return result.appended;
+  return result.appended
 }
 
 function describeError(err: unknown): string {
-  if (err instanceof Error) return err.message;
+  if (err instanceof Error) return err.message
   try {
-    return String(err);
+    return String(err)
   } catch {
-    return "<unprintable error>";
+    return '<unprintable error>'
   }
 }

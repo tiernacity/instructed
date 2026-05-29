@@ -76,25 +76,20 @@
  *     lost lease surfaces as `IS022` rather than via a heartbeat.
  */
 
-import type { Client } from "../../client/index.ts";
-import { Logger } from "../../logger/index.ts";
-import { SubscriptionLeaseLost, SubscriptionNotFound } from "../../errors/index.ts";
-import type {
-  Event,
-  RecordedEvent,
-  RouteDecision,
-  StartFrom,
-} from "../../types/index.ts";
-import type { RunningWorker } from "../../internal/running-worker.ts";
-export type { RunningWorker };
-import { defaultWorkerId } from "../../internal/worker-id.ts";
-import { sleep } from "../../internal/sleep.ts";
+import type { Client } from '../../client/index.ts'
+import { SubscriptionLeaseLost, SubscriptionNotFound } from '../../errors/index.ts'
+import type { RunningWorker } from '../../internal/running-worker.ts'
+import { Logger } from '../../logger/index.ts'
+import type { Event, RecordedEvent, RouteDecision, StartFrom } from '../../types/index.ts'
+export type { RunningWorker }
+import { sleep } from '../../internal/sleep.ts'
+import { defaultWorkerId } from '../../internal/worker-id.ts'
 
 /**
  * Routing-extension-point output. Either route the event to the
  * named partition, or skip it. PM-F surface as seen by user code.
  */
-export type RoutingDecision = { partitionKey: string } | "ignore";
+export type RoutingDecision = { partitionKey: string } | 'ignore'
 
 /**
  * Routing-extension-point contract. Given an event from the source
@@ -109,92 +104,92 @@ export type RoutingDecision = { partitionKey: string } | "ignore";
  */
 export type RoutingFn<E extends Event = Event> = (
   event: RecordedEvent<E>,
-) => RoutingDecision | Promise<RoutingDecision>;
+) => RoutingDecision | Promise<RoutingDecision>
 
 export interface RoutingDefinition<E extends Event = Event> {
   /** Subscription name. */
-  name: string;
+  name: string
   /** Source stream; default `$all`. */
-  stream?: string;
+  stream?: string
   /** Per-event routing decision. Pure, deterministic, no I/O, fast. */
-  routeFn: RoutingFn<E>;
+  routeFn: RoutingFn<E>
   /** Honoured only on the first claim that creates the subscription. */
-  startFrom?: StartFrom;
+  startFrom?: StartFrom
 }
 
 export interface RoutingWorkerOptions {
-  workerId?: string;
+  workerId?: string
   /** Max events fetched per readAll round-trip. Default 100. */
-  batchSize?: number;
+  batchSize?: number
   /**
    * Lease duration in seconds. Default 30. Bounds the per-batch
    * processing budget: if a batch overruns this, route_batch raises
    * IS022 and the work is redone by the next worker.
    */
-  leaseSeconds?: number;
+  leaseSeconds?: number
   /** Idle poll interval in ms. Default 200. */
-  pollInterval?: number;
+  pollInterval?: number
   /** Called for routing-fn errors and other fatal events. */
-  onError?: (err: Error) => void;
+  onError?: (err: Error) => void
   /**
    * Worker-scoped {@link Logger}. Defaults to {@link Logger.noop}
    * when absent (the worker is silent unless the caller wires one
    * in; the `Instructed` facade always does).
    */
-  logger?: Logger;
+  logger?: Logger
 }
 
 // Defaults exported for re-use by the facade and tests.
-export const DEFAULT_ROUTING_BATCH_SIZE = 100;
-export const DEFAULT_ROUTING_LEASE_SECONDS = 30;
-export const DEFAULT_ROUTING_POLL_INTERVAL_MS = 200;
+export const DEFAULT_ROUTING_BATCH_SIZE = 100
+export const DEFAULT_ROUTING_LEASE_SECONDS = 30
+export const DEFAULT_ROUTING_POLL_INTERVAL_MS = 200
 
 export function startRoutingWorker<E extends Event = Event>(
   client: Client,
   def: RoutingDefinition<E>,
   opts: RoutingWorkerOptions = {},
 ): RunningWorker {
-  const stream = def.stream ?? "$all";
-  const workerId = opts.workerId ?? defaultWorkerId();
-  const batchSize = opts.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE;
-  const leaseSeconds = opts.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS;
-  const pollInterval = opts.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS;
-  const onError = opts.onError ?? noopOnError;
-  const logger = opts.logger ?? Logger.noop();
+  const stream = def.stream ?? '$all'
+  const workerId = opts.workerId ?? defaultWorkerId()
+  const batchSize = opts.batchSize ?? DEFAULT_ROUTING_BATCH_SIZE
+  const leaseSeconds = opts.leaseSeconds ?? DEFAULT_ROUTING_LEASE_SECONDS
+  const pollInterval = opts.pollInterval ?? DEFAULT_ROUTING_POLL_INTERVAL_MS
+  const onError = opts.onError ?? noopOnError
+  const logger = opts.logger ?? Logger.noop()
 
-  const ac = new AbortController();
-  const signal = ac.signal;
+  const ac = new AbortController()
+  const signal = ac.signal
 
-  let closing = false;
-  let aborted = false;
-  let closePromise: Promise<void> | null = null;
+  let closing = false
+  let aborted = false
+  let closePromise: Promise<void> | null = null
   /**
    * Tracks whether we currently hold the lease. Set to true after a
    * successful claim_subscription returning 'claimed'; cleared after
    * release_subscription, IS022, or fatal error. Used by the close
    * path to decide whether to attempt a final release.
    */
-  let holdingLease = false;
+  let holdingLease = false
 
-  let resolveStopped!: () => void;
+  let resolveStopped!: () => void
   const stopped = new Promise<void>((res) => {
-    resolveStopped = res;
-  });
+    resolveStopped = res
+  })
 
   function markAborted(err: Error): void {
-    if (aborted) return;
-    aborted = true;
+    if (aborted) return
+    aborted = true
     try {
-      ac.abort();
+      ac.abort()
     } catch {
       /* ignore */
     }
-    safeOnError(err);
+    safeOnError(err)
   }
 
   function safeOnError(err: Error): void {
     try {
-      onError(err);
+      onError(err)
     } catch {
       /* onError must never propagate */
     }
@@ -209,134 +204,117 @@ export function startRoutingWorker<E extends Event = Event>(
   async function routeOneBatch(
     batch: RecordedEvent<E>[],
   ): Promise<{ decisions: RouteDecision[]; cursorTo: bigint } | null> {
-    const decisions: RouteDecision[] = [];
-    let cursorTo: bigint | null = null;
+    const decisions: RouteDecision[] = []
+    let cursorTo: bigint | null = null
     for (const event of batch) {
-      if (closing || aborted) return null;
-      let d: RoutingDecision;
+      if (closing || aborted) return null
+      let d: RoutingDecision
       try {
-        d = await def.routeFn(event);
+        d = await def.routeFn(event)
       } catch (err) {
         markAborted(
-          err instanceof Error
-            ? err
-            : new Error(`routing worker: routeFn threw: ${String(err)}`),
-        );
-        return null;
+          err instanceof Error ? err : new Error(`routing worker: routeFn threw: ${String(err)}`),
+        )
+        return null
       }
-      if (closing || aborted) return null;
-      cursorTo = event.event_number;
-      if (d === "ignore") continue;
-      if (!d || typeof d !== "object" || typeof d.partitionKey !== "string") {
+      if (closing || aborted) return null
+      cursorTo = event.event_number
+      if (d === 'ignore') continue
+      if (!d || typeof d !== 'object' || typeof d.partitionKey !== 'string') {
         markAborted(
           new Error(
             `routing worker: routeFn must return "ignore" or { partitionKey: string }; got ${JSON.stringify(d)}`,
           ),
-        );
-        return null;
+        )
+        return null
       }
       decisions.push({
         partitionKey: d.partitionKey,
         eventNumber: event.event_number,
-      });
+      })
     }
-    if (cursorTo === null) return null;
-    return { decisions, cursorTo };
+    if (cursorTo === null) return null
+    return { decisions, cursorTo }
   }
 
   async function loop(): Promise<void> {
     try {
       while (!closing && !aborted) {
         // ---- claim ----
-        let claimed: { lastSeen: bigint };
+        let claimed: { lastSeen: bigint }
         try {
-          const claimOpts =
-            def.startFrom !== undefined ? { startFrom: def.startFrom } : {};
+          const claimOpts = def.startFrom !== undefined ? { startFrom: def.startFrom } : {}
           const r = await client.claimSubscription(
             stream,
             def.name,
             workerId,
             leaseSeconds,
             claimOpts,
-          );
-          if (r.result === "already_claimed") {
+          )
+          if (r.result === 'already_claimed') {
             // Another worker holds the lease for this batch; back off
             // and try again next tick. NOT fatal under D-0025.
-            logger.trace("routing: subscription already claimed; backing off");
-            await sleep(pollInterval, signal);
-            continue;
+            logger.trace('routing: subscription already claimed; backing off')
+            await sleep(pollInterval, signal)
+            continue
           }
-          claimed = { lastSeen: r.lastSeen };
-          holdingLease = true;
-          logger.trace(
-            () => `routing: claimed; lastSeen=${claimed.lastSeen}`,
-          );
+          claimed = { lastSeen: r.lastSeen }
+          holdingLease = true
+          logger.trace(() => `routing: claimed; lastSeen=${claimed.lastSeen}`)
         } catch (err) {
           // Genuine errors (stream not found, bad args, transport
           // failures). Surface and exit.
-          safeOnError(err as Error);
-          return;
+          safeOnError(err as Error)
+          return
         }
 
         if (closing || aborted) {
-          await releaseQuietly();
-          break;
+          await releaseQuietly()
+          break
         }
 
         // ---- read ----
-        let batch: RecordedEvent<E>[];
+        let batch: RecordedEvent<E>[]
         try {
           batch =
-            stream === "$all"
+            stream === '$all'
               ? await client.readAll<E>(claimed.lastSeen + 1n, batchSize)
-              : await client.readStream<E>(
-                  stream,
-                  claimed.lastSeen + 1n,
-                  batchSize,
-                );
+              : await client.readStream<E>(stream, claimed.lastSeen + 1n, batchSize)
         } catch (err) {
-          safeOnError(err as Error);
-          await releaseQuietly();
-          await sleep(pollInterval, signal);
-          continue;
+          safeOnError(err as Error)
+          await releaseQuietly()
+          await sleep(pollInterval, signal)
+          continue
         }
 
         if (batch.length === 0) {
           // No work; release the lease so another process can claim
           // immediately, then poll-sleep.
-          logger.trace("routing: empty batch; releasing and polling");
-          await releaseQuietly();
-          await sleep(pollInterval, signal);
-          continue;
+          logger.trace('routing: empty batch; releasing and polling')
+          await releaseQuietly()
+          await sleep(pollInterval, signal)
+          continue
         }
-        logger.trace(
-          () => `routing: read ${batch.length} events from ${stream}`,
-        );
+        logger.trace(() => `routing: read ${batch.length} events from ${stream}`)
 
         // ---- route ----
-        const routed = await routeOneBatch(batch);
+        const routed = await routeOneBatch(batch)
         if (routed === null) {
           // Either: (a) the user-code routeFn threw and markAborted
           // fired (we'll exit the outer loop), or (b) close/abort hit
           // mid-iteration. Either way: drop the batch, release if we
           // can, exit.
-          await releaseQuietly();
-          break;
+          await releaseQuietly()
+          break
         }
 
         // ---- commit ----
         logger.trace(
           () =>
             `routing: committing ${routed.decisions.length} decision(s); cursor -> ${routed.cursorTo}`,
-        );
+        )
         try {
-          await client.routeBatch(
-            stream,
-            def.name,
-            workerId,
-            routed.cursorTo,
-            routed.decisions,
-          );
+          await client.routeBatch(stream, def.name, workerId, routed.cursorTo, routed.decisions)
         } catch (err) {
           if (isLeaseLoss(err)) {
             // The lease expired mid-batch (likely a slow routeFn) and
@@ -344,67 +322,63 @@ export function startRoutingWorker<E extends Event = Event>(
             // loop. Not fatal under D-0025; the work-item PK absorbs
             // any duplicates the other worker may have already
             // routed.
-            holdingLease = false;
-            continue;
+            holdingLease = false
+            continue
           }
-          safeOnError(err as Error);
-          await releaseQuietly();
-          await sleep(pollInterval, signal);
-          continue;
+          safeOnError(err as Error)
+          await releaseQuietly()
+          await sleep(pollInterval, signal)
+          continue
         }
 
         // ---- release ----
-        await releaseQuietly();
+        await releaseQuietly()
       }
     } finally {
       // Best-effort final release if we still hold the lease.
-      await releaseQuietly();
-      resolveStopped();
+      await releaseQuietly()
+      resolveStopped()
     }
   }
 
   async function releaseQuietly(): Promise<void> {
-    if (!holdingLease) return;
-    holdingLease = false;
+    if (!holdingLease) return
+    holdingLease = false
     try {
-      await client.releaseSubscription(stream, def.name, workerId);
+      await client.releaseSubscription(stream, def.name, workerId)
     } catch (err) {
       if (!isLeaseLoss(err) && !(err instanceof SubscriptionNotFound)) {
         // Surface but don't abort — release is best-effort.
-        safeOnError(err as Error);
+        safeOnError(err as Error)
       }
     }
   }
 
-  const loopPromise = loop();
+  const loopPromise = loop()
   loopPromise.catch(() => {
     /* unreachable: loop's try/finally always resolves stopped */
-  });
+  })
 
   return {
     stopped,
     stop(): Promise<void> {
-      if (closePromise) return closePromise;
-      closing = true;
+      if (closePromise) return closePromise
+      closing = true
       try {
-        ac.abort();
+        ac.abort()
       } catch {
         /* ignore */
       }
-      closePromise = stopped;
-      return closePromise;
+      closePromise = stopped
+      return closePromise
     },
-  };
+  }
 }
 
 function noopOnError(_err: Error): void {
   /* no-op default */
 }
 
-function isLeaseLoss(
-  err: unknown,
-): err is SubscriptionLeaseLost | SubscriptionNotFound {
-  return (
-    err instanceof SubscriptionLeaseLost || err instanceof SubscriptionNotFound
-  );
+function isLeaseLoss(err: unknown): err is SubscriptionLeaseLost | SubscriptionNotFound {
+  return err instanceof SubscriptionLeaseLost || err instanceof SubscriptionNotFound
 }

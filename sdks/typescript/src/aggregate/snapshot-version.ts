@@ -20,4 +20,4 @@
  * `instructed-sdk/core` (the porting-checklist surface).
  */
 
-export const SNAPSHOT_MODULE_VERSION_KEY = "snapshot_module_version";
+export const SNAPSHOT_MODULE_VERSION_KEY = 'snapshot_module_version'

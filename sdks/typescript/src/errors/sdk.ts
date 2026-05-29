@@ -14,28 +14,25 @@
  * entry, not from `/core`.
  */
 
-import { InstructedError } from "./base.ts";
+import { InstructedError } from './base.ts'
 
 export class RetryBudgetExhausted extends InstructedError {
-  readonly attempts: number;
-  readonly lastError: unknown;
+  readonly attempts: number
+  readonly lastError: unknown
   constructor(message: string, opts: { attempts: number; lastError: unknown }) {
-    super(message, { cause: opts.lastError });
-    this.attempts = opts.attempts;
-    this.lastError = opts.lastError;
+    super(message, { cause: opts.lastError })
+    this.attempts = opts.attempts
+    this.lastError = opts.lastError
   }
 }
 
 export class ConsistencyTimeout extends InstructedError {
-  readonly waitedMs: number;
-  readonly missing: string[];
-  constructor(
-    message: string,
-    opts: { waitedMs: number; missing: string[] },
-  ) {
-    super(message);
-    this.waitedMs = opts.waitedMs;
-    this.missing = opts.missing;
+  readonly waitedMs: number
+  readonly missing: string[]
+  constructor(message: string, opts: { waitedMs: number; missing: string[] }) {
+    super(message)
+    this.waitedMs = opts.waitedMs
+    this.missing = opts.missing
   }
 }
 
@@ -51,28 +48,28 @@ export class ConsistencyTimeout extends InstructedError {
  * streams were appended to.
  */
 export class ConsistencyTargetError extends InstructedError {
-  readonly subscriptionStream: string;
-  readonly subscriptionName: string;
-  readonly appendedStreams: string[];
+  readonly subscriptionStream: string
+  readonly subscriptionName: string
+  readonly appendedStreams: string[]
   constructor(
     message: string,
     opts: {
-      subscriptionStream: string;
-      subscriptionName: string;
-      appendedStreams: string[];
+      subscriptionStream: string
+      subscriptionName: string
+      appendedStreams: string[]
     },
   ) {
-    super(message);
-    this.subscriptionStream = opts.subscriptionStream;
-    this.subscriptionName = opts.subscriptionName;
-    this.appendedStreams = opts.appendedStreams;
+    super(message)
+    this.subscriptionStream = opts.subscriptionStream
+    this.subscriptionName = opts.subscriptionName
+    this.appendedStreams = opts.appendedStreams
   }
 }
 
 export class UnknownAggregateType extends InstructedError {
-  readonly aggregateType: string;
+  readonly aggregateType: string
   constructor(aggregateType: string) {
-    super(`Unknown aggregate type: ${aggregateType}`);
-    this.aggregateType = aggregateType;
+    super(`Unknown aggregate type: ${aggregateType}`)
+    this.aggregateType = aggregateType
   }
 }

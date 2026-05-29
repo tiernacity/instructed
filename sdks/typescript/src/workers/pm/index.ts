@@ -6,15 +6,15 @@
  *     the substrate.
  */
 
-export { startPmSubstrate } from "./pm-substrate.ts";
+export { startPmSubstrate } from './pm-substrate.ts'
 export type {
   PmSubstrateDefinition,
   PmSubstrateHandleResult,
   PmSubstrateHandlerContext,
   PmSubstrateOptions,
-} from "./pm-substrate.ts";
+} from './pm-substrate.ts'
 
-export { startPmWorker } from "./pm-worker.ts";
+export { startPmWorker } from './pm-worker.ts'
 export type {
   PmDefinition,
   PmHandleResult,
@@ -22,4 +22,4 @@ export type {
   PmWorkerOptions,
   DispatchedCommand,
   DispatchedCommandExplicit,
-} from "./pm-worker.ts";
+} from './pm-worker.ts'

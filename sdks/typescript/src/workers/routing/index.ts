@@ -5,10 +5,10 @@ export {
   DEFAULT_ROUTING_BATCH_SIZE,
   DEFAULT_ROUTING_LEASE_SECONDS,
   DEFAULT_ROUTING_POLL_INTERVAL_MS,
-} from "./routing-worker.ts";
+} from './routing-worker.ts'
 export type {
   RoutingDecision,
   RoutingFn,
   RoutingDefinition,
   RoutingWorkerOptions,
-} from "./routing-worker.ts";
+} from './routing-worker.ts'

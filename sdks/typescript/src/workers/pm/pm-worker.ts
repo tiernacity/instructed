@@ -50,22 +50,19 @@
  * client / pool separation.
  */
 
-import type { Client } from "../../client/index.ts";
-import { prefixType, type AggregateDefinition } from "../../aggregate/index.ts";
-import { runCommandWithSnapshots } from "../../aggregate/index.ts";
-import type { CommandRouter } from "../../facade/command-router.ts";
-import type { Command } from "../../types/index.ts";
+import { prefixType, type AggregateDefinition } from '../../aggregate/index.ts'
+import { runCommandWithSnapshots } from '../../aggregate/index.ts'
+import type { Client } from '../../client/index.ts'
+import type { CommandRouter } from '../../facade/command-router.ts'
+import type { RunningWorker } from '../../internal/running-worker.ts'
+import type { Command } from '../../types/index.ts'
+import type { Event, RecordedEvent } from '../../types/index.ts'
+import type { ErrorPolicy, ProcessingHandlerContext } from '../processing/index.ts'
 import {
   startPmSubstrate,
   type PmSubstrateDefinition,
   type PmSubstrateOptions,
-} from "./pm-substrate.ts";
-import type {
-  ErrorPolicy,
-  ProcessingHandlerContext,
-} from "../processing/index.ts";
-import type { Event, RecordedEvent } from "../../types/index.ts";
-import type { RunningWorker } from "../../internal/running-worker.ts";
+} from './pm-substrate.ts'
 
 // ============================================================================
 // Public surface
@@ -92,25 +89,21 @@ import type { RunningWorker } from "../../internal/running-worker.ts";
  * The two shapes are discriminated structurally by the presence
  * of `aggregate` and `streamUuid`.
  */
-export type DispatchedCommand =
-  | (Command & { [key: string]: unknown })
-  | DispatchedCommandExplicit;
+export type DispatchedCommand = (Command & { [key: string]: unknown }) | DispatchedCommandExplicit
 
 export interface DispatchedCommandExplicit {
-  streamUuid: string;
-  aggregate: AggregateDefinition<any, any, any>;
-  command: unknown;
+  streamUuid: string
+  aggregate: AggregateDefinition<any, any, any>
+  command: unknown
 }
 
-function isExplicitDispatch(
-  c: DispatchedCommand,
-): c is DispatchedCommandExplicit {
+function isExplicitDispatch(c: DispatchedCommand): c is DispatchedCommandExplicit {
   return (
-    typeof (c as DispatchedCommandExplicit).streamUuid === "string" &&
-    typeof (c as DispatchedCommandExplicit).aggregate === "object" &&
+    typeof (c as DispatchedCommandExplicit).streamUuid === 'string' &&
+    typeof (c as DispatchedCommandExplicit).aggregate === 'object' &&
     (c as DispatchedCommandExplicit).aggregate !== null &&
-    typeof (c as DispatchedCommandExplicit).aggregate.type === "string"
-  );
+    typeof (c as DispatchedCommandExplicit).aggregate.type === 'string'
+  )
 }
 
 /**
@@ -119,14 +112,14 @@ function isExplicitDispatch(
  * the work item `done`).
  */
 export interface PmHandleResult {
-  commands?: DispatchedCommand[];
+  commands?: DispatchedCommand[]
   /** Terminate the partition: DELETE snapshot + all work-items. */
-  complete?: boolean;
+  complete?: boolean
 }
 
 export interface PmHandlerContext extends ProcessingHandlerContext {
   /** The PM's partition (PM-F: routing decides; processing reads). */
-  partitionKey: string;
+  partitionKey: string
 }
 
 /**
@@ -149,28 +142,28 @@ export interface PmHandlerContext extends ProcessingHandlerContext {
 export interface PmDefinition<S, E extends Event = Event, PolicyState = undefined> {
   /** PM type — doubles as the subscription name and the snapshot
    *  source_type prefix. Same role as `AggregateDefinition.type`. */
-  type: string;
+  type: string
   /** Optional source_uuid encoding from partition key. Default
    *  `${type}-${partitionKey}`. See {@link PmSubstrateDefinition}. */
-  streamName?(partitionKey: string): string;
+  streamName?(partitionKey: string): string
   /** Default `$all`. */
-  stream?: string;
-  initialState(): S;
-  apply(state: S, event: RecordedEvent<E>): S;
+  stream?: string
+  initialState(): S
+  apply(state: S, event: RecordedEvent<E>): S
   handle(
     state: S,
     event: RecordedEvent<E>,
     ctx: PmHandlerContext,
-  ): Promise<PmHandleResult> | PmHandleResult;
+  ): Promise<PmHandleResult> | PmHandleResult
   /** SDK-managed snapshot version tag; mismatch triggers rebuild. */
-  snapshotModuleVersion?: string;
+  snapshotModuleVersion?: string
   /**
    * Retry/error-policy hook. Defaults to `DEFAULT_ERROR_POLICY`
    * (exponential backoff, retry forever). Type-parameterised by
    * `PolicyState` for callers writing stateful policies; defaults
    * to `ErrorPolicy<undefined>`.
    */
-  errorPolicy?: ErrorPolicy<PolicyState>;
+  errorPolicy?: ErrorPolicy<PolicyState>
 }
 
 /**
@@ -185,9 +178,9 @@ export interface PmDefinition<S, E extends Event = Event, PolicyState = undefine
  */
 export interface PmWorkerOptions extends PmSubstrateOptions {
   /** Resolves lean commands to `(aggregateType, aggregateId)`. */
-  router?: CommandRouter;
+  router?: CommandRouter
   /** Registry consulted by the router's `aggregateType` result. */
-  aggregates?: ReadonlyMap<string, AggregateDefinition<any, any, any>>;
+  aggregates?: ReadonlyMap<string, AggregateDefinition<any, any, any>>
 }
 
 // ============================================================================
@@ -225,9 +218,9 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
     snapshotModuleVersion: def.snapshotModuleVersion,
     errorPolicy: def.errorPolicy,
     handle: async (state, event, ctx) => {
-      const result = await def.handle(state, event, ctx as PmHandlerContext);
-      const commands = result.commands ?? [];
-      const complete = result.complete === true;
+      const result = await def.handle(state, event, ctx as PmHandlerContext)
+      const commands = result.commands ?? []
+      const complete = result.complete === true
       // Summary trace: replaces the script-side `withTrace` wrapper
       // that was previously the example app's only way to observe
       // PM activity. With a wired logger, every PM gets this for
@@ -235,7 +228,7 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
       ctx.logger.trace(
         () =>
           `pm handle: event ${event.type}#${event.event_number} -> ${commands.length} command(s); complete=${complete}`,
-      );
+      )
       // Dispatch in declaration order. Each command runs on the
       // same `client` (D-0026). A dispatch failure throws out of
       // this handler -> substrate sees the throw -> SUB-B error
@@ -246,35 +239,27 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
       // retry-in or lease-takeover redelivery may produce
       // duplicates at the aggregate; no IS004 protection without
       // deterministic event IDs.
-      const dispatchCtx = { logger: ctx.logger };
+      const dispatchCtx = { logger: ctx.logger }
       for (const c of commands) {
-        const resolved = resolveDispatch(c, opts, dispatchCtx);
+        const resolved = resolveDispatch(c, opts, dispatchCtx)
         // Per-command trace: aggregate type + command type are
         // enough to read a PM's behaviour off the log without
         // dumping payloads.
-        const cmdType =
-          (resolved.command as { type?: string }).type ?? "<untyped>";
+        const cmdType = (resolved.command as { type?: string }).type ?? '<untyped>'
         ctx.logger.trace(
-          () =>
-            `pm dispatch: ${resolved.def.type}.${cmdType} -> ${resolved.streamUuid}`,
-        );
-        await runCommandWithSnapshots(
-          client,
-          resolved.def,
-          resolved.streamUuid,
-          resolved.command,
-          {
-            causationId: event.event_id,
-            correlationId: event.correlation_id ?? undefined,
-            ctx: dispatchCtx,
-          },
-        );
+          () => `pm dispatch: ${resolved.def.type}.${cmdType} -> ${resolved.streamUuid}`,
+        )
+        await runCommandWithSnapshots(client, resolved.def, resolved.streamUuid, resolved.command, {
+          causationId: event.event_id,
+          correlationId: event.correlation_id ?? undefined,
+          ctx: dispatchCtx,
+        })
       }
-      return { complete };
+      return { complete }
     },
-  };
+  }
 
-  return startPmSubstrate<S, E, PolicyState>(client, substrateDef, opts);
+  return startPmSubstrate<S, E, PolicyState>(client, substrateDef, opts)
 }
 
 /**
@@ -286,35 +271,33 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
 function resolveDispatch(
   c: DispatchedCommand,
   opts: PmWorkerOptions,
-  dispatchCtx: { logger: import("../../logger/index.ts").Logger },
+  dispatchCtx: { logger: import('../../logger/index.ts').Logger },
 ): {
-  def: AggregateDefinition<any, any, any>;
-  streamUuid: string;
-  command: unknown;
+  def: AggregateDefinition<any, any, any>
+  streamUuid: string
+  command: unknown
 } {
   if (isExplicitDispatch(c)) {
-    return { def: c.aggregate, streamUuid: c.streamUuid, command: c.command };
+    return { def: c.aggregate, streamUuid: c.streamUuid, command: c.command }
   }
   // Lean form: resolve through the router.
   if (!opts.router || !opts.aggregates) {
     throw new Error(
-      "startPmWorker: handle returned a lean command (no `aggregate`/" +
-        "`streamUuid`) but no `router`/`aggregates` were supplied. " +
-        "Configure a CommandRouter (see `commandRouter()`) and pass it " +
-        "via PmWorkerOptions, or emit the explicit " +
-        "{ aggregate, streamUuid, command } shape.",
-    );
+      'startPmWorker: handle returned a lean command (no `aggregate`/' +
+        '`streamUuid`) but no `router`/`aggregates` were supplied. ' +
+        'Configure a CommandRouter (see `commandRouter()`) and pass it ' +
+        'via PmWorkerOptions, or emit the explicit ' +
+        '{ aggregate, streamUuid, command } shape.',
+    )
   }
-  const route = opts.router(c, dispatchCtx);
-  const def = opts.aggregates.get(route.aggregateType);
+  const route = opts.router(c, dispatchCtx)
+  const def = opts.aggregates.get(route.aggregateType)
   if (!def) {
     throw new Error(
       `startPmWorker: command router resolved "${c.type}" to ` +
         `aggregate type "${route.aggregateType}", which is not registered.`,
-    );
+    )
   }
-  const streamUuid = (def.streamName ?? prefixType(def.type))(
-    route.aggregateId,
-  );
-  return { def, streamUuid, command: c };
+  const streamUuid = (def.streamName ?? prefixType(def.type))(route.aggregateId)
+  return { def, streamUuid, command: c }
 }

@@ -35,8 +35,8 @@
  * state) write a `CommandRouter` directly.
  */
 
-import type { AggregateDefinition, DispatchContext } from "../aggregate/index.ts";
-import type { Command } from "../types/index.ts";
+import type { AggregateDefinition, DispatchContext } from '../aggregate/index.ts'
+import type { Command } from '../types/index.ts'
 
 /**
  * Pure resolution from a command to its target aggregate
@@ -47,7 +47,7 @@ import type { Command } from "../types/index.ts";
 export type CommandRouter = (
   command: Command,
   ctx: DispatchContext,
-) => { aggregateType: string; aggregateId: string };
+) => { aggregateType: string; aggregateId: string }
 
 /**
  * Per-command-type route entry: which aggregate owns this command
@@ -57,9 +57,9 @@ export type CommandRouter = (
  * `id`, so e.g. `id: (cmd) => cmd.accountId` type-checks against
  * the `DepositToAccount` variant only.
  */
-export interface CommandRoute<C extends Command, K extends C["type"]> {
-  aggregate: AggregateDefinition<any, any, any>;
-  id: (cmd: Extract<C, { type: K }>) => string;
+export interface CommandRoute<C extends Command, K extends C['type']> {
+  aggregate: AggregateDefinition<any, any, any>
+  id: (cmd: Extract<C, { type: K }>) => string
 }
 
 /**
@@ -79,25 +79,20 @@ export interface CommandRoute<C extends Command, K extends C["type"]> {
  *       RequestTransfer:     { aggregate: Transfer, id: (c) => c.transferId },
  *     });
  */
-export function commandRouter<C extends Command>(
-  routes: { [K in C["type"]]: CommandRoute<C, K> },
-): CommandRouter {
+export function commandRouter<C extends Command>(routes: {
+  [K in C['type']]: CommandRoute<C, K>
+}): CommandRouter {
   // The mapped-type domain is exactly the discriminator union of
   // `C`; we erase to a plain Record for runtime lookup.
-  const table = routes as unknown as Record<
-    string,
-    CommandRoute<Command, string>
-  >;
+  const table = routes as unknown as Record<string, CommandRoute<Command, string>>
   return (command, _ctx) => {
-    const entry = table[command.type];
+    const entry = table[command.type]
     if (!entry) {
-      throw new Error(
-        `commandRouter: no route for command type "${command.type}"`,
-      );
+      throw new Error(`commandRouter: no route for command type "${command.type}"`)
     }
     return {
       aggregateType: entry.aggregate.type,
       aggregateId: entry.id(command as never),
-    };
-  };
+    }
+  }
 }

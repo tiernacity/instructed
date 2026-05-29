@@ -6,17 +6,17 @@
  * export inventory.
  */
 export type ExpectedVersion =
-  | { kind: "any" }
-  | { kind: "noStream" }
-  | { kind: "streamExists" }
-  | { kind: "exact"; version: bigint };
+  | { kind: 'any' }
+  | { kind: 'noStream' }
+  | { kind: 'streamExists' }
+  | { kind: 'exact'; version: bigint }
 
 /** Constructors mirroring the SQL `expected_version_type` values. */
 export const expected = {
-  any: { kind: "any" } as const,
-  noStream: { kind: "noStream" } as const,
-  streamExists: { kind: "streamExists" } as const,
+  any: { kind: 'any' } as const,
+  noStream: { kind: 'noStream' } as const,
+  streamExists: { kind: 'streamExists' } as const,
   exact(version: bigint | number): ExpectedVersion {
-    return { kind: "exact", version: BigInt(version) };
+    return { kind: 'exact', version: BigInt(version) }
   },
-};
+}

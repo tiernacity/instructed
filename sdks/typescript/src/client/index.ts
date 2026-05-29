@@ -8,4 +8,4 @@
  * of the public surface).
  */
 
-export { Client, type ClientOptions } from "./client.ts";
+export { Client, type ClientOptions } from './client.ts'

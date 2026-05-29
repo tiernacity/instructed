@@ -19,21 +19,21 @@
  */
 export type ClaimResult =
   | {
-      result: "claimed";
-      lastSeen: bigint;
-      claimedBy: string;
-      claimExpiresAt: Date;
+      result: 'claimed'
+      lastSeen: bigint
+      claimedBy: string
+      claimExpiresAt: Date
     }
   | {
-      result: "already_claimed";
-      lastSeen: bigint;
-      claimedBy: string | null;
-      claimExpiresAt: Date | null;
-    };
+      result: 'already_claimed'
+      lastSeen: bigint
+      claimedBy: string | null
+      claimExpiresAt: Date | null
+    }
 
 /** Options recognised by `claim_subscription.p_options.start_from`. */
-export type StartFrom = "origin" | "current" | bigint | number;
+export type StartFrom = 'origin' | 'current' | bigint | number
 
 export interface ClaimSubscriptionOptions {
-  startFrom?: StartFrom;
+  startFrom?: StartFrom
 }

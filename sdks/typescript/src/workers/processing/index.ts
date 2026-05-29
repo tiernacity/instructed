@@ -10,7 +10,7 @@ export {
   DEFAULT_PROCESSING_LEASE_SECONDS,
   DEFAULT_PROCESSING_POLL_INTERVAL_MS,
   DEFAULT_ERROR_POLICY,
-} from "./processing-worker.ts";
+} from './processing-worker.ts'
 export type {
   ProcessingHandler,
   ProcessingCompleter,
@@ -21,15 +21,8 @@ export type {
   ErrorPolicyDecision,
   ErrorPolicyContext,
   ErrorPolicyResult,
-} from "./processing-worker.ts";
+} from './processing-worker.ts'
 
 // L3 error-policy standard library (composable wrappers over ErrorPolicy).
-export {
-  exponentialBackoff,
-  linearBackoff,
-  retryUpTo,
-} from "./error-policies.ts";
-export type {
-  ExponentialBackoffOptions,
-  LinearBackoffOptions,
-} from "./error-policies.ts";
+export { exponentialBackoff, linearBackoff, retryUpTo } from './error-policies.ts'
+export type { ExponentialBackoffOptions, LinearBackoffOptions } from './error-policies.ts'

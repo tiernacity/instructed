@@ -42,8 +42,8 @@
  * separate registration call on the worker).
  */
 
-import type { RoutingFn } from "../workers/routing/index.ts";
-import type { Event, RecordedEvent } from "../types/index.ts";
+import type { Event, RecordedEvent } from '../types/index.ts'
+import type { RoutingFn } from '../workers/routing/index.ts'
 
 /**
  * Three-mode partitioning sugar over a routing-layer `RoutingFn`. None
@@ -51,12 +51,12 @@ import type { Event, RecordedEvent } from "../types/index.ts";
  * time, pass a raw `RoutingFn` instead. PRJ-A.
  */
 export type PartitionBy<E extends Event = Event> =
-  | { kind: "sequential" }
-  | { kind: "per-event" }
-  | { kind: "per-key"; key: (event: RecordedEvent<E>) => string };
+  | { kind: 'sequential' }
+  | { kind: 'per-event' }
+  | { kind: 'per-key'; key: (event: RecordedEvent<E>) => string }
 
 /** The synthetic partition key used by `{ kind: "sequential" }`. */
-export const SEQUENTIAL_PARTITION_KEY = "_default";
+export const SEQUENTIAL_PARTITION_KEY = '_default'
 
 /**
  * Translate a `PartitionBy` into a routing-layer `RoutingFn`. The
@@ -73,13 +73,13 @@ export const SEQUENTIAL_PARTITION_KEY = "_default";
  */
 export function routingFnForPartitionBy<E extends Event>(pb: PartitionBy<E>): RoutingFn<E> {
   switch (pb.kind) {
-    case "sequential":
-      return () => ({ partitionKey: SEQUENTIAL_PARTITION_KEY });
-    case "per-event":
-      return (event) => ({ partitionKey: String(event.event_number) });
-    case "per-key": {
-      const key = pb.key;
-      return (event) => ({ partitionKey: key(event) });
+    case 'sequential':
+      return () => ({ partitionKey: SEQUENTIAL_PARTITION_KEY })
+    case 'per-event':
+      return (event) => ({ partitionKey: String(event.event_number) })
+    case 'per-key': {
+      const key = pb.key
+      return (event) => ({ partitionKey: key(event) })
     }
   }
 }

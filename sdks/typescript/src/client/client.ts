@@ -8,12 +8,9 @@
  * See sql/instructed.sql for the spec.
  */
 
-import type * as pg from "pg";
-import {
-  mapPgError,
-  SnapshotNotFound,
-  type MapPgErrorContext,
-} from "../errors/index.ts";
+import type * as pg from 'pg'
+
+import { mapPgError, SnapshotNotFound, type MapPgErrorContext } from '../errors/index.ts'
 import type {
   Event,
   AppendOptions,
@@ -30,15 +27,15 @@ import type {
   RouteDecision,
   Snapshot,
   SnapshotInput,
-} from "../types/index.ts";
+} from '../types/index.ts'
+import { packEvent, expectedVersionParams } from './pack-event.ts'
 import {
   toBigInt,
   toDate,
   mapRecordedEvent,
   READ_EVENT_COLUMNS,
   type RawEventRow,
-} from "./row-mappers.ts";
-import { packEvent, expectedVersionParams } from "./pack-event.ts";
+} from './row-mappers.ts'
 
 export interface ClientOptions {
   /** Reserved. */
@@ -46,21 +43,19 @@ export interface ClientOptions {
 
 function isQueryable(value: unknown): value is Queryable {
   return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as Queryable).query === "function"
-  );
+    typeof value === 'object' && value !== null && typeof (value as Queryable).query === 'function'
+  )
 }
 
 /** Layer 0: a thin wrapper over the Postgres procedures. */
 export class Client {
-  readonly con: Queryable;
+  readonly con: Queryable
 
   constructor(con: Queryable | pg.Pool, _opts: ClientOptions = {}) {
     if (!isQueryable(con)) {
-      throw new TypeError("Client requires a pg.Pool, pg.Client, or Queryable");
+      throw new TypeError('Client requires a pg.Pool, pg.Client, or Queryable')
     }
-    this.con = con;
+    this.con = con
   }
 
   /** Run a single query against the underlying connection. */
@@ -70,9 +65,9 @@ export class Client {
     ctx: MapPgErrorContext = {},
   ): Promise<pg.QueryResult<T>> {
     try {
-      return await this.con.query<T>(sql, params as any[]);
+      return await this.con.query<T>(sql, params as any[])
     } catch (err) {
-      throw mapPgError(err, ctx);
+      throw mapPgError(err, ctx)
     }
   }
 
@@ -88,43 +83,37 @@ export class Client {
       // Mirror the SQL contract: empty array is invalid_parameter_value
       // (22023). The procedure raises it; we let it through. But we'd
       // rather raise client-side for a marginally better stack.
-      throw new (await import("../errors/index.ts")).InvalidParameterValue(
-        "appendToStream: events must be a non-empty array",
-        { code: "22023" },
-      );
+      throw new (await import('../errors/index.ts')).InvalidParameterValue(
+        'appendToStream: events must be a non-empty array',
+        { code: '22023' },
+      )
     }
-    const ev = expectedVersionParams(expected);
+    const ev = expectedVersionParams(expected)
     // The SDK fills event_id on omission per §11.2. We also fill it
     // here as the lowest layer so direct Client users get the same
     // convenience as runCommand users.
     const filled = events.map((e) => ({
       ...packEvent(e),
       event_id: e.event_id ?? globalThis.crypto.randomUUID(),
-    }));
+    }))
     const res = await this.run<{
-      event_id: string;
-      stream_version: string | number;
-      event_number: string | number;
-      created_at: Date | string;
+      event_id: string
+      stream_version: string | number
+      event_number: string | number
+      created_at: Date | string
     }>(
       `SELECT event_id, stream_version, event_number, created_at
          FROM instructed.append_to_stream($1, $2, $3, $4::jsonb, $5::jsonb)`,
-      [
-        streamUuid,
-        ev.type,
-        ev.version,
-        JSON.stringify(filled),
-        JSON.stringify({}),
-      ],
+      [streamUuid, ev.type, ev.version, JSON.stringify(filled), JSON.stringify({})],
       { streamUuid },
-    );
+    )
     return res.rows.map((r) => ({
       event_id: r.event_id,
       stream_uuid: streamUuid,
       stream_version: toBigInt(r.stream_version),
       event_number: toBigInt(r.event_number),
       created_at: toDate(r.created_at),
-    }));
+    }))
   }
 
   async readStream<E extends Event = Event>(
@@ -137,8 +126,8 @@ export class Client {
          FROM instructed.read_stream($1, $2, $3, $4::jsonb)`,
       [streamUuid, fromVersion.toString(), qty, JSON.stringify({})],
       { streamUuid },
-    );
-    return res.rows.map((r) => mapRecordedEvent<E>(r));
+    )
+    return res.rows.map((r) => mapRecordedEvent<E>(r))
   }
 
   async readAll<E extends Event = Event>(
@@ -149,8 +138,8 @@ export class Client {
       `SELECT ${READ_EVENT_COLUMNS}
          FROM instructed.read_all($1, $2, $3::jsonb)`,
       [fromEventNumber.toString(), qty, JSON.stringify({})],
-    );
-    return res.rows.map((r) => mapRecordedEvent<E>(r));
+    )
+    return res.rows.map((r) => mapRecordedEvent<E>(r))
   }
 
   // ---- snapshots ----
@@ -167,33 +156,33 @@ export class Client {
         JSON.stringify({}),
       ],
       { sourceUuid: snap.sourceUuid },
-    );
+    )
   }
 
   /** Throws SnapshotNotFound (IS010) if no snapshot exists. */
   async readSnapshot<S = unknown>(sourceUuid: string): Promise<Snapshot<S>> {
     const res = await this.run<{
-      source_uuid: string;
-      source_type: string;
-      source_version: string | number;
-      data: unknown;
-      metadata: unknown;
-      created_at: Date | string;
+      source_uuid: string
+      source_type: string
+      source_version: string | number
+      data: unknown
+      metadata: unknown
+      created_at: Date | string
     }>(
       `SELECT source_uuid, source_type, source_version, data, metadata, created_at
          FROM instructed.read_snapshot($1, $2::jsonb)`,
       [sourceUuid, JSON.stringify({})],
       { sourceUuid },
-    );
+    )
     // The SQL function raises IS010 when missing, so res.rows.length is
     // never 0 here; guard for safety.
     if (res.rows.length === 0) {
       throw new SnapshotNotFound(`snapshot ${sourceUuid} not found`, {
-        code: "IS010",
+        code: 'IS010',
         sourceUuid,
-      });
+      })
     }
-    const r = res.rows[0];
+    const r = res.rows[0]
     return {
       sourceUuid: r.source_uuid,
       sourceType: r.source_type,
@@ -201,7 +190,7 @@ export class Client {
       data: r.data as S,
       metadata: r.metadata,
       createdAt: toDate(r.created_at),
-    };
+    }
   }
 
   /** Idempotent: deleting a missing snapshot succeeds silently (INV-SNAP-004). */
@@ -210,7 +199,7 @@ export class Client {
       `SELECT instructed.delete_snapshot($1, $2::jsonb)`,
       [sourceUuid, JSON.stringify({})],
       { sourceUuid },
-    );
+    )
   }
 
   // ---- subscriptions ----
@@ -222,56 +211,49 @@ export class Client {
     leaseSeconds: number,
     options: ClaimSubscriptionOptions = {},
   ): Promise<ClaimResult> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     if (options.startFrom !== undefined) {
       opts.start_from =
-        typeof options.startFrom === "bigint"
+        typeof options.startFrom === 'bigint'
           ? options.startFrom.toString()
-          : typeof options.startFrom === "number"
+          : typeof options.startFrom === 'number'
             ? String(options.startFrom)
-            : options.startFrom;
+            : options.startFrom
     }
     const res = await this.run<{
-      result: "claimed" | "already_claimed";
-      last_seen: string | number;
-      claimed_by: string | null;
-      claim_expires_at: Date | string | null;
+      result: 'claimed' | 'already_claimed'
+      last_seen: string | number
+      claimed_by: string | null
+      claim_expires_at: Date | string | null
     }>(
       `SELECT result, last_seen, claimed_by, claim_expires_at
          FROM instructed.claim_subscription($1, $2, $3, $4, $5::jsonb)`,
-      [
-        streamUuid,
-        subscriptionName,
-        workerId,
-        leaseSeconds,
-        JSON.stringify(opts),
-      ],
+      [streamUuid, subscriptionName, workerId, leaseSeconds, JSON.stringify(opts)],
       {
         streamUuid,
         subscriptionName,
       },
-    );
-    const r = res.rows[0];
+    )
+    const r = res.rows[0]
     // 'already_claimed' under one specific contention race returns
     // (NULL, NULL) for the diagnostic fields -- see the
     // claim_subscription SQL function and ClaimResult docs. Guard the
     // toDate() call so we don't synthesise an `expected Date, got
     // object` error from a legitimate contract outcome.
-    if (r.result === "claimed") {
+    if (r.result === 'claimed') {
       return {
-        result: "claimed",
+        result: 'claimed',
         lastSeen: toBigInt(r.last_seen),
         claimedBy: r.claimed_by as string,
         claimExpiresAt: toDate(r.claim_expires_at as Date | string),
-      };
+      }
     }
     return {
-      result: "already_claimed",
+      result: 'already_claimed',
       lastSeen: toBigInt(r.last_seen),
       claimedBy: r.claimed_by,
-      claimExpiresAt:
-        r.claim_expires_at === null ? null : toDate(r.claim_expires_at),
-    };
+      claimExpiresAt: r.claim_expires_at === null ? null : toDate(r.claim_expires_at),
+    }
   }
 
   async releaseSubscription(
@@ -279,24 +261,21 @@ export class Client {
     subscriptionName: string,
     workerId: string,
   ): Promise<void> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     await this.run(
       `SELECT instructed.release_subscription($1, $2, $3, $4::jsonb)`,
       [streamUuid, subscriptionName, workerId, JSON.stringify(opts)],
       { streamUuid, subscriptionName },
-    );
+    )
   }
 
-  async deleteSubscription(
-    streamUuid: string,
-    subscriptionName: string,
-  ): Promise<void> {
-    const opts: Record<string, unknown> = {};
+  async deleteSubscription(streamUuid: string, subscriptionName: string): Promise<void> {
+    const opts: Record<string, unknown> = {}
     await this.run(
       `SELECT instructed.delete_subscription($1, $2, $3::jsonb)`,
       [streamUuid, subscriptionName, JSON.stringify(opts)],
       { streamUuid, subscriptionName },
-    );
+    )
   }
 
   // ---- SUB-A work queue ----
@@ -317,7 +296,7 @@ export class Client {
     newCursor: bigint,
     decisions: RouteDecision[],
   ): Promise<RouteBatchResult> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     const payload = decisions.map((d) => ({
       partition_key: d.partitionKey,
       // event_number must be a JSON number (the SQL contract requires
@@ -327,10 +306,10 @@ export class Client {
       // SQL contract can be widened to accept a string; documented as
       // a known gap here.
       event_number: Number(d.eventNumber),
-    }));
+    }))
     const res = await this.run<{
-      inserted_count: string | number;
-      new_last_seen: string | number;
+      inserted_count: string | number
+      new_last_seen: string | number
     }>(
       `SELECT inserted_count, new_last_seen
          FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb, $6::jsonb)`,
@@ -343,12 +322,12 @@ export class Client {
         JSON.stringify(opts),
       ],
       { streamUuid, subscriptionName },
-    );
-    const r = res.rows[0];
+    )
+    const r = res.rows[0]
     return {
       insertedCount: toBigInt(r.inserted_count),
       newLastSeen: toBigInt(r.new_last_seen),
-    };
+    }
   }
 
   /**
@@ -366,29 +345,23 @@ export class Client {
     workerId: string,
     leaseSeconds: number,
   ): Promise<ClaimedWorkItem | null> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     const res = await this.run<{
-      partition_key: string;
-      event_number: string | number;
-      claimed_by: string;
-      lease_expires_at: Date | string;
-      was_takeover: boolean;
-      prior_claimed_by: string | null;
+      partition_key: string
+      event_number: string | number
+      claimed_by: string
+      lease_expires_at: Date | string
+      was_takeover: boolean
+      prior_claimed_by: string | null
     }>(
       `SELECT partition_key, event_number, claimed_by, lease_expires_at,
               was_takeover, prior_claimed_by
          FROM instructed.claim_work_item($1, $2, $3, $4, $5::jsonb)`,
-      [
-        streamUuid,
-        subscriptionName,
-        workerId,
-        leaseSeconds,
-        JSON.stringify(opts),
-      ],
+      [streamUuid, subscriptionName, workerId, leaseSeconds, JSON.stringify(opts)],
       { streamUuid, subscriptionName },
-    );
-    if (res.rows.length === 0) return null;
-    const r = res.rows[0];
+    )
+    if (res.rows.length === 0) return null
+    const r = res.rows[0]
     return {
       partitionKey: r.partition_key,
       eventNumber: toBigInt(r.event_number),
@@ -396,7 +369,7 @@ export class Client {
       leaseExpiresAt: toDate(r.lease_expires_at),
       wasTakeover: r.was_takeover,
       priorClaimedBy: r.prior_claimed_by,
-    };
+    }
   }
 
   /**
@@ -414,7 +387,7 @@ export class Client {
     eventNumber: bigint,
     leaseSeconds: number,
   ): Promise<{ leaseExpiresAt: Date }> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     const res = await this.run<{ lease_expires_at: Date | string }>(
       `SELECT lease_expires_at
          FROM instructed.extend_work_item_claim($1, $2, $3, $4, $5, $6, $7::jsonb)`,
@@ -433,8 +406,8 @@ export class Client {
         partitionKey,
         eventNumber,
       },
-    );
-    return { leaseExpiresAt: toDate(res.rows[0].lease_expires_at) };
+    )
+    return { leaseExpiresAt: toDate(res.rows[0].lease_expires_at) }
   }
 
   /**
@@ -453,7 +426,7 @@ export class Client {
     partitionKey: string,
     eventNumber: bigint,
   ): Promise<void> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     await this.run(
       `SELECT instructed.complete_work_item_projection($1, $2, $3, $4, $5, $6::jsonb)`,
       [
@@ -470,7 +443,7 @@ export class Client {
         partitionKey,
         eventNumber,
       },
-    );
+    )
   }
 
   /**
@@ -488,7 +461,7 @@ export class Client {
     eventNumber: bigint,
     snapshot: SnapshotInput<S>,
   ): Promise<void> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     await this.run(
       `SELECT instructed.complete_work_item_pm(
          $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)`,
@@ -502,9 +475,7 @@ export class Client {
         snapshot.sourceType,
         snapshot.sourceVersion.toString(),
         JSON.stringify(snapshot.data),
-        snapshot.metadata === undefined
-          ? null
-          : JSON.stringify(snapshot.metadata),
+        snapshot.metadata === undefined ? null : JSON.stringify(snapshot.metadata),
         JSON.stringify(opts),
       ],
       {
@@ -514,7 +485,7 @@ export class Client {
         eventNumber,
         sourceUuid: snapshot.sourceUuid,
       },
-    );
+    )
   }
 
   /**
@@ -529,32 +500,26 @@ export class Client {
     partitionKey: string,
     snapshotUuid: string,
   ): Promise<CompletePmInstanceResult> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     const res = await this.run<{
-      work_items_deleted: string | number;
-      snapshot_deleted: boolean;
+      work_items_deleted: string | number
+      snapshot_deleted: boolean
     }>(
       `SELECT work_items_deleted, snapshot_deleted
          FROM instructed.complete_pm_instance($1, $2, $3, $4, $5::jsonb)`,
-      [
-        streamUuid,
-        subscriptionName,
-        partitionKey,
-        snapshotUuid,
-        JSON.stringify(opts),
-      ],
+      [streamUuid, subscriptionName, partitionKey, snapshotUuid, JSON.stringify(opts)],
       {
         streamUuid,
         subscriptionName,
         partitionKey,
         sourceUuid: snapshotUuid,
       },
-    );
-    const r = res.rows[0];
+    )
+    const r = res.rows[0]
     return {
       workItemsDeleted: toBigInt(r.work_items_deleted),
       snapshotDeleted: r.snapshot_deleted,
-    };
+    }
   }
 
   /**
@@ -573,7 +538,7 @@ export class Client {
     eventNumber: bigint,
     errorText: string | null,
   ): Promise<void> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     await this.run(
       `SELECT instructed.fail_work_item($1, $2, $3, $4, $5, $6, $7::jsonb)`,
       [
@@ -591,7 +556,7 @@ export class Client {
         partitionKey,
         eventNumber,
       },
-    );
+    )
   }
 
   /**
@@ -605,19 +570,14 @@ export class Client {
     subscriptionName: string,
     target: bigint,
   ): Promise<boolean> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     const res = await this.run<{ caught_up: boolean }>(
       `SELECT caught_up
          FROM instructed.is_subscription_caught_up($1, $2, $3, $4::jsonb)`,
-      [
-        streamUuid,
-        subscriptionName,
-        target.toString(),
-        JSON.stringify(opts),
-      ],
+      [streamUuid, subscriptionName, target.toString(), JSON.stringify(opts)],
       { streamUuid, subscriptionName },
-    );
-    return res.rows[0].caught_up;
+    )
+    return res.rows[0].caught_up
   }
 
   /**
@@ -639,7 +599,7 @@ export class Client {
     partitionKey: string,
     exclusiveUpperBound: bigint,
   ): Promise<RecordedEvent<E>[]> {
-    const opts: Record<string, unknown> = {};
+    const opts: Record<string, unknown> = {}
     const res = await this.run<RawEventRow>(
       `SELECT ${READ_EVENT_COLUMNS}
          FROM instructed.list_pm_rebuild_events($1, $2, $3, $4, $5::jsonb)`,
@@ -655,7 +615,7 @@ export class Client {
         subscriptionName,
         partitionKey,
       },
-    );
-    return res.rows.map((r) => mapRecordedEvent<E>(r));
+    )
+    return res.rows.map((r) => mapRecordedEvent<E>(r))
   }
 }

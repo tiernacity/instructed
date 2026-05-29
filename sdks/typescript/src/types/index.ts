@@ -17,7 +17,7 @@
  *   - `work-item.ts`        — SUB-A work-queue shapes
  */
 
-export type { Queryable, JsonValue } from "./queryable.ts";
+export type { Queryable, JsonValue } from './queryable.ts'
 export type {
   Event,
   NewEvent,
@@ -25,19 +25,15 @@ export type {
   RecordedEventFields,
   RecordedEvent,
   AppendOptions,
-} from "./event.ts";
-export type { Command } from "./command.ts";
-export { expected } from "./expected-version.ts";
-export type { ExpectedVersion } from "./expected-version.ts";
-export type { SnapshotInput, Snapshot } from "./snapshot.ts";
-export type {
-  ClaimResult,
-  StartFrom,
-  ClaimSubscriptionOptions,
-} from "./subscription.ts";
+} from './event.ts'
+export type { Command } from './command.ts'
+export { expected } from './expected-version.ts'
+export type { ExpectedVersion } from './expected-version.ts'
+export type { SnapshotInput, Snapshot } from './snapshot.ts'
+export type { ClaimResult, StartFrom, ClaimSubscriptionOptions } from './subscription.ts'
 export type {
   RouteDecision,
   RouteBatchResult,
   ClaimedWorkItem,
   CompletePmInstanceResult,
-} from "./work-item.ts";
+} from './work-item.ts'

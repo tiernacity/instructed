@@ -38,8 +38,8 @@
  *     lock-acquisition orders, not of pool / client identity.
  */
 
-import type * as pg from "pg";
-import { Client } from "../client/index.ts";
+import type * as pg from 'pg'
+
 import {
   DEFAULT_RETRY_BUDGET,
   prefixType,
@@ -47,40 +47,14 @@ import {
   type DispatchContext,
   type DomainEvent,
   type RunCommandOptions,
-} from "../aggregate/index.ts";
-import { runCommandWithSnapshots } from "../aggregate/index.ts";
-import {
-  startRoutingWorker,
-  DEFAULT_ROUTING_BATCH_SIZE,
-  DEFAULT_ROUTING_LEASE_SECONDS,
-  DEFAULT_ROUTING_POLL_INTERVAL_MS,
-  type RoutingFn,
-} from "../workers/routing/index.ts";
-import {
-  startProjectionWorker,
-  type ProjectionHandler,
-} from "../workers/projection/index.ts";
-import {
-  routingFnForPartitionBy,
-  type PartitionBy,
-} from "./partition-by.ts";
-import {
-  startPmWorker,
-  type PmDefinition,
-} from "../workers/pm/index.ts";
-import type { CommandRouter } from "./command-router.ts";
-import type { ErrorPolicy } from "../workers/processing/index.ts";
-import {
-  waitForProjection,
-  type SubscriptionRef,
-} from "../consistency/index.ts";
-import { UnknownAggregateType } from "../errors/index.ts";
-import {
-  DEFAULT_LOGGER_IMPL,
-  Logger,
-  type ILoggerImpl,
-} from "../logger/index.ts";
-import { defaultWorkerId } from "../internal/worker-id.ts";
+} from '../aggregate/index.ts'
+import { runCommandWithSnapshots } from '../aggregate/index.ts'
+import { Client } from '../client/index.ts'
+import { waitForProjection, type SubscriptionRef } from '../consistency/index.ts'
+import { UnknownAggregateType } from '../errors/index.ts'
+import type { RunningWorker } from '../internal/running-worker.ts'
+import { defaultWorkerId } from '../internal/worker-id.ts'
+import { DEFAULT_LOGGER_IMPL, Logger, type ILoggerImpl } from '../logger/index.ts'
 import type {
   Event,
   Command,
@@ -88,8 +62,19 @@ import type {
   ExpectedVersion,
   Queryable,
   StartFrom,
-} from "../types/index.ts";
-import type { RunningWorker } from "../internal/running-worker.ts";
+} from '../types/index.ts'
+import { startPmWorker, type PmDefinition } from '../workers/pm/index.ts'
+import type { ErrorPolicy } from '../workers/processing/index.ts'
+import { startProjectionWorker, type ProjectionHandler } from '../workers/projection/index.ts'
+import {
+  startRoutingWorker,
+  DEFAULT_ROUTING_BATCH_SIZE,
+  DEFAULT_ROUTING_LEASE_SECONDS,
+  DEFAULT_ROUTING_POLL_INTERVAL_MS,
+  type RoutingFn,
+} from '../workers/routing/index.ts'
+import type { CommandRouter } from './command-router.ts'
+import { routingFnForPartitionBy, type PartitionBy } from './partition-by.ts'
 
 // ============================================================================
 // Public surface
@@ -108,7 +93,7 @@ export interface InstructedOptions {
    * application is responsible for constructing the pool exactly
    * as it wants.
    */
-  db: pg.Pool | Queryable;
+  db: pg.Pool | Queryable
   /**
    * Application-supplied logger. Any subset of `info` / `warn` /
    * `error` / `trace`; unwired levels are silent (and, for `trace`,
@@ -118,7 +103,7 @@ export interface InstructedOptions {
    * `error` to `console`, `trace` silent. Pass `logger: {}` for a
    * fully-silent app.
    */
-  logger?: ILoggerImpl;
+  logger?: ILoggerImpl
 }
 
 /**
@@ -130,7 +115,7 @@ export interface InstructedOptions {
  * {@link Instructed.poll}.
  */
 export interface RegistrationOptions {
-  onError?: (err: Error) => void;
+  onError?: (err: Error) => void
 }
 
 /**
@@ -149,10 +134,10 @@ export interface RegistrationOptions {
  *   from `leaseSeconds`.
  */
 export interface WorkerOptions {
-  batchSize?: number;
-  leaseSeconds?: number;
-  heartbeatInterval?: number;
-  pollInterval?: number;
+  batchSize?: number
+  leaseSeconds?: number
+  heartbeatInterval?: number
+  pollInterval?: number
 }
 
 /**
@@ -167,7 +152,7 @@ export const DEFAULT_WORKER_OPTIONS: WorkerOptions = {
   batchSize: DEFAULT_ROUTING_BATCH_SIZE,
   leaseSeconds: DEFAULT_ROUTING_LEASE_SECONDS,
   pollInterval: DEFAULT_ROUTING_POLL_INTERVAL_MS,
-};
+}
 
 /**
  * Options for {@link Instructed.poll}.
@@ -179,9 +164,9 @@ export const DEFAULT_WORKER_OPTIONS: WorkerOptions = {
  *   `poll()` time so typos fail loudly.
  */
 export interface PollOptions {
-  workerId?: string;
-  defaults?: WorkerOptions;
-  workers?: Record<string, WorkerOptions>;
+  workerId?: string
+  defaults?: WorkerOptions
+  workers?: Record<string, WorkerOptions>
 }
 
 export interface DispatchOptions {
@@ -190,11 +175,11 @@ export interface DispatchOptions {
    * an explicit `[{stream, name}]` list. The list is always explicit
    * -- no `:strong` shorthand (D-0010).
    */
-  consistency?: string[] | SubscriptionRef[];
+  consistency?: string[] | SubscriptionRef[]
   /** Total budget for the consistency wait in ms. Default 5_000. */
-  consistencyTimeout?: number;
-  retryBudget?: number;
-  expectedVersion?: ExpectedVersion;
+  consistencyTimeout?: number
+  retryBudget?: number
+  expectedVersion?: ExpectedVersion
 }
 
 /**
@@ -207,17 +192,17 @@ export interface DispatchOptions {
  */
 export interface ProjectionDefinition<E extends Event = Event> {
   /** Projection type — doubles as the subscription name. */
-  type: string;
+  type: string
   /** Source stream; default `$all`. */
-  stream?: string;
+  stream?: string
   /** Sugar over a `RoutingFn`. */
-  partitionBy?: PartitionBy<E>;
+  partitionBy?: PartitionBy<E>
   /** Raw routing function escape hatch (mutually exclusive with `partitionBy`). */
-  routeFn?: RoutingFn<E>;
+  routeFn?: RoutingFn<E>
   /** Honoured only on the first claim that creates the subscription. */
-  startFrom?: StartFrom;
+  startFrom?: StartFrom
   /** User-supplied projection handler. Opaque to the SDK (D-0016). */
-  handler: ProjectionHandler<E>;
+  handler: ProjectionHandler<E>
   /**
    * Retry/error-policy hook. Default: exponential backoff, retry
    * forever. The facade stores policies as `ErrorPolicy<any>` so
@@ -226,7 +211,7 @@ export interface ProjectionDefinition<E extends Event = Event> {
    * forfeit at this layer. Callers wanting strong typing of
    * `PolicyState` use `startProjectionWorker` directly.
    */
-  errorPolicy?: ErrorPolicy<any>;
+  errorPolicy?: ErrorPolicy<any>
 }
 
 /**
@@ -238,28 +223,30 @@ export interface ProjectionDefinition<E extends Event = Event> {
  * `apply` is the PM-C pure state fold; `handle` produces commands
  * and/or signals partition completion (`complete: true`).
  */
-export interface ProcessManagerDefinition<S, E extends Event = Event>
-  extends Omit<PmDefinition<S, E, any>, "type" | "streamName"> {
+export interface ProcessManagerDefinition<S, E extends Event = Event> extends Omit<
+  PmDefinition<S, E, any>,
+  'type' | 'streamName'
+> {
   /** PM type — doubles as the subscription name. */
-  type: string;
+  type: string
   /** Optional source_uuid encoding (see {@link PmDefinition.streamName}). */
-  streamName?(partitionKey: string): string;
+  streamName?(partitionKey: string): string
   /** PM-F routing decision per event. */
-  routeFn: RoutingFn<E>;
+  routeFn: RoutingFn<E>
   /** Honoured only on the first claim that creates the subscription. */
-  startFrom?: StartFrom;
+  startFrom?: StartFrom
 }
 
 interface RegisteredProjection {
-  stream: string;
-  def: ProjectionDefinition<Event>;
-  opts: RegistrationOptions;
+  stream: string
+  def: ProjectionDefinition<Event>
+  opts: RegistrationOptions
 }
 
 interface RegisteredProcessManager {
-  stream: string;
-  def: ProcessManagerDefinition<unknown, Event>;
-  opts: RegistrationOptions;
+  stream: string
+  def: ProcessManagerDefinition<unknown, Event>
+  opts: RegistrationOptions
 }
 
 // ============================================================================
@@ -267,25 +254,25 @@ interface RegisteredProcessManager {
 // ============================================================================
 
 export class Instructed {
-  private readonly persistClient_: Client;
+  private readonly persistClient_: Client
 
-  private readonly logger_: Logger;
+  private readonly logger_: Logger
 
   private readonly aggregates = new Map<
     string,
     AggregateDefinition<unknown, unknown, DomainEvent>
-  >();
-  private readonly projections: RegisteredProjection[] = [];
-  private readonly processManagers: RegisteredProcessManager[] = [];
-  private commandRouter_: CommandRouter | null = null;
+  >()
+  private readonly projections: RegisteredProjection[] = []
+  private readonly processManagers: RegisteredProcessManager[] = []
+  private commandRouter_: CommandRouter | null = null
 
   constructor(opts: InstructedOptions) {
     // The application owns the pool. The facade just wraps it.
-    this.persistClient_ = new Client(opts.db);
+    this.persistClient_ = new Client(opts.db)
     // Wire the logger. Explicit `undefined` -> default (console for
     // info/warn/error, silent for trace). Explicit empty object
     // `{}` -> fully silent. Anything else -> wired as supplied.
-    this.logger_ = Logger.fromImpl(opts.logger ?? DEFAULT_LOGGER_IMPL);
+    this.logger_ = Logger.fromImpl(opts.logger ?? DEFAULT_LOGGER_IMPL)
   }
 
   /**
@@ -295,7 +282,7 @@ export class Instructed {
    * prefixed child via `ctx.logger`.
    */
   get logger(): Logger {
-    return this.logger_;
+    return this.logger_
   }
 
   // ---- registry ----
@@ -332,18 +319,13 @@ export class Instructed {
    * any future SDK-internal callers that want to bypass the
    * structural dispatch.
    */
-  register(router: CommandRouter): this;
-  register<S, C, E extends DomainEvent = DomainEvent>(
-    def: AggregateDefinition<S, C, E>,
-  ): this;
-  register<E extends Event = Event>(
-    def: ProjectionDefinition<E>,
-    opts?: RegistrationOptions,
-  ): this;
+  register(router: CommandRouter): this
+  register<S, C, E extends DomainEvent = DomainEvent>(def: AggregateDefinition<S, C, E>): this
+  register<E extends Event = Event>(def: ProjectionDefinition<E>, opts?: RegistrationOptions): this
   register<S, E extends Event = Event>(
     def: ProcessManagerDefinition<S, E>,
     opts?: RegistrationOptions,
-  ): this;
+  ): this
   register(
     arg:
       | CommandRouter
@@ -359,33 +341,29 @@ export class Instructed {
     //   has "execute"          -> AggregateDefinition
     //   has "handle" + routeFn -> ProcessManagerDefinition
     //   has "handler"          -> ProjectionDefinition
-    if (typeof arg === "function") {
+    if (typeof arg === 'function') {
       if (opts !== undefined) {
-        throw new Error(
-          "Instructed.register: a CommandRouter takes no options",
-        );
+        throw new Error('Instructed.register: a CommandRouter takes no options')
       }
-      return this.registerCommandRouter(arg);
+      return this.registerCommandRouter(arg)
     }
-    if ("execute" in arg) {
+    if ('execute' in arg) {
       if (opts !== undefined) {
-        throw new Error(
-          "Instructed.register: an AggregateDefinition takes no options",
-        );
+        throw new Error('Instructed.register: an AggregateDefinition takes no options')
       }
-      return this.registerAggregate(arg);
+      return this.registerAggregate(arg)
     }
-    if ("handle" in arg && "routeFn" in arg) {
-      return this.registerProcessManager(arg, opts);
+    if ('handle' in arg && 'routeFn' in arg) {
+      return this.registerProcessManager(arg, opts)
     }
-    if ("handler" in arg) {
-      return this.registerProjection(arg, opts);
+    if ('handler' in arg) {
+      return this.registerProjection(arg, opts)
     }
     throw new Error(
       "Instructed.register: argument doesn't match any registerable shape " +
-        "(CommandRouter / AggregateDefinition / ProjectionDefinition / " +
-        "ProcessManagerDefinition)",
-    );
+        '(CommandRouter / AggregateDefinition / ProjectionDefinition / ' +
+        'ProcessManagerDefinition)',
+    )
   }
 
   // ---- per-kind registration (private; reached via `register()`) ----
@@ -394,13 +372,11 @@ export class Instructed {
     def: AggregateDefinition<S, C, E>,
   ): this {
     if (this.aggregates.has(def.type)) {
-      throw new Error(
-        `Instructed.register: aggregate type "${def.type}" already registered`,
-      );
+      throw new Error(`Instructed.register: aggregate type "${def.type}" already registered`)
     }
-    this.aggregates.set(def.type, def);
-    this.logger_.info(`registered aggregate "${def.type}"`);
-    return this;
+    this.aggregates.set(def.type, def)
+    this.logger_.info(`registered aggregate "${def.type}"`)
+    return this
   }
 
   private registerProjection<E extends Event = Event>(
@@ -410,15 +386,15 @@ export class Instructed {
     if (def.partitionBy !== undefined && def.routeFn !== undefined) {
       throw new Error(
         `Instructed.register("${def.type}"): \`partitionBy\` and \`routeFn\` are mutually exclusive`,
-      );
+      )
     }
     this.projections.push({
-      stream: def.stream ?? "$all",
+      stream: def.stream ?? '$all',
       def,
       opts,
-    });
-    this.logger_.info(`registered projection "${def.type}"`);
-    return this;
+    })
+    this.logger_.info(`registered projection "${def.type}"`)
+    return this
   }
 
   private registerProcessManager<S, E extends Event = Event>(
@@ -426,23 +402,21 @@ export class Instructed {
     opts: RegistrationOptions = {},
   ): this {
     this.processManagers.push({
-      stream: def.stream ?? "$all",
+      stream: def.stream ?? '$all',
       def,
       opts,
-    });
-    this.logger_.info(`registered process manager "${def.type}"`);
-    return this;
+    })
+    this.logger_.info(`registered process manager "${def.type}"`)
+    return this
   }
 
   private registerCommandRouter(router: CommandRouter): this {
     if (this.commandRouter_ !== null) {
-      throw new Error(
-        "Instructed.register: a command router is already registered",
-      );
+      throw new Error('Instructed.register: a command router is already registered')
     }
-    this.commandRouter_ = router;
-    this.logger_.info("registered command router");
-    return this;
+    this.commandRouter_ = router
+    this.logger_.info('registered command router')
+    return this
   }
 
   // ---- dispatch ----
@@ -462,61 +436,53 @@ export class Instructed {
    * {@link prefixType}). Application code identifies aggregates
    * by `(type, id)`; stream names are a storage-layer concern.
    */
-  dispatch<C extends Command>(
-    command: C,
-    opts?: DispatchOptions,
-  ): Promise<AppendedEvent[]>;
+  dispatch<C extends Command>(command: C, opts?: DispatchOptions): Promise<AppendedEvent[]>
   dispatch<C>(
     aggregateType: string,
     id: string,
     command: C,
     opts?: DispatchOptions,
-  ): Promise<AppendedEvent[]>;
-  async dispatch(
-    a: unknown,
-    b?: unknown,
-    c?: unknown,
-    d?: unknown,
-  ): Promise<AppendedEvent[]> {
-    let aggregateType: string;
-    let id: string;
-    let command: unknown;
-    let opts: DispatchOptions;
+  ): Promise<AppendedEvent[]>
+  async dispatch(a: unknown, b?: unknown, c?: unknown, d?: unknown): Promise<AppendedEvent[]> {
+    let aggregateType: string
+    let id: string
+    let command: unknown
+    let opts: DispatchOptions
 
-    if (typeof a === "string") {
+    if (typeof a === 'string') {
       // Explicit overload: dispatch(type, id, command, opts?)
-      aggregateType = a;
-      id = b as string;
-      command = c;
-      opts = (d as DispatchOptions | undefined) ?? {};
+      aggregateType = a
+      id = b as string
+      command = c
+      opts = (d as DispatchOptions | undefined) ?? {}
     } else {
       // Lean overload: dispatch(command, opts?). Route via router.
       if (!this.commandRouter_) {
         throw new Error(
-          "Instructed.dispatch: no command router registered. Call " +
-            "`register(router)` first, or use the explicit " +
-            "`dispatch(aggregateType, id, command, opts?)` overload.",
-        );
+          'Instructed.dispatch: no command router registered. Call ' +
+            '`register(router)` first, or use the explicit ' +
+            '`dispatch(aggregateType, id, command, opts?)` overload.',
+        )
       }
-      const dispatchCtx: DispatchContext = { logger: this.logger_ };
-      const route = this.commandRouter_(a as Command, dispatchCtx);
-      aggregateType = route.aggregateType;
-      id = route.aggregateId;
-      command = a;
-      opts = (b as DispatchOptions | undefined) ?? {};
+      const dispatchCtx: DispatchContext = { logger: this.logger_ }
+      const route = this.commandRouter_(a as Command, dispatchCtx)
+      aggregateType = route.aggregateType
+      id = route.aggregateId
+      command = a
+      opts = (b as DispatchOptions | undefined) ?? {}
     }
 
-    const def = this.aggregates.get(aggregateType);
-    if (!def) throw new UnknownAggregateType(aggregateType);
+    const def = this.aggregates.get(aggregateType)
+    if (!def) throw new UnknownAggregateType(aggregateType)
 
-    const streamUuid = (def.streamName ?? prefixType(def.type))(id);
+    const streamUuid = (def.streamName ?? prefixType(def.type))(id)
 
     const runOpts: RunCommandOptions = {
       retryBudget: opts.retryBudget ?? DEFAULT_RETRY_BUDGET,
       ctx: { logger: this.logger_ },
-    };
+    }
     if (opts.expectedVersion !== undefined) {
-      runOpts.expectedVersion = opts.expectedVersion;
+      runOpts.expectedVersion = opts.expectedVersion
     }
     const appended = await runCommandWithSnapshots(
       this.persistClient_,
@@ -524,15 +490,15 @@ export class Instructed {
       streamUuid,
       command,
       runOpts,
-    );
+    )
 
     if (opts.consistency && opts.consistency.length > 0 && appended.length > 0) {
-      const refs = normaliseConsistency(opts.consistency);
+      const refs = normaliseConsistency(opts.consistency)
       await waitForProjection(this.persistClient_, appended, refs, {
         timeout: opts.consistencyTimeout,
-      });
+      })
     }
-    return appended;
+    return appended
   }
 
   // ---- worker ----
@@ -555,9 +521,7 @@ export class Instructed {
    */
   async poll(opts: PollOptions = {}): Promise<RunningWorker> {
     if (this.projections.length === 0 && this.processManagers.length === 0) {
-      throw new Error(
-        "Instructed.poll: no projections or process managers registered",
-      );
+      throw new Error('Instructed.poll: no projections or process managers registered')
     }
 
     // Validate `workers` keys against registered types so typos
@@ -566,12 +530,12 @@ export class Instructed {
       const known = new Set<string>([
         ...this.projections.map((p) => p.def.type),
         ...this.processManagers.map((pm) => pm.def.type),
-      ]);
+      ])
       for (const name of Object.keys(opts.workers)) {
         if (!known.has(name)) {
           throw new Error(
             `Instructed.poll: workers["${name}"] does not match any registered projection or process manager`,
-          );
+          )
         }
       }
     }
@@ -579,112 +543,84 @@ export class Instructed {
     // Mint one workerId for this whole `poll()` call so all the
     // workers in this process share an identity (matches the
     // intended HA model: one workerId per process, many subs).
-    const workerId = opts.workerId ?? defaultWorkerId();
+    const workerId = opts.workerId ?? defaultWorkerId()
 
-    const workers: RunningWorker[] = [];
+    const workers: RunningWorker[] = []
 
     // Projections: one routing worker + one processing worker per
     // registration. Both honour the same resolved per-worker tuning.
     for (const p of this.projections) {
-      const routeFn = this.resolveProjectionRouteFn(p);
-      const resolved = this.resolveWorkerOptionsWithSources(p.def.type, opts);
-      const workerLogger = this.logger_.child(
-        `[${workerId}#${p.def.type}]`,
-      );
-      this.logInfoStarting(workerLogger, "projection", p.def.type, resolved);
-      const routingOpts = this.routingOpts(
-        resolved.tuning,
-        p.opts,
-        workerId,
-        workerLogger,
-      );
-      const processingOpts = this.processingOpts(
-        resolved.tuning,
-        p.opts,
-        workerId,
-        workerLogger,
-      );
-      const routing = startRoutingWorker(this.persistClient_, {
-        name: p.def.type,
-        stream: p.stream,
-        routeFn,
-        ...(p.def.startFrom !== undefined
-          ? { startFrom: p.def.startFrom }
-          : {}),
-      }, routingOpts);
-      const processing = startProjectionWorker(this.persistClient_, {
-        name: p.def.type,
-        stream: p.stream,
-        handler: p.def.handler,
-        ...(p.def.errorPolicy !== undefined
-          ? { errorPolicy: p.def.errorPolicy }
-          : {}),
-      }, processingOpts);
-      this.logStopWhenDone(workerLogger, p.def.type, routing, processing);
-      workers.push(routing, processing);
+      const routeFn = this.resolveProjectionRouteFn(p)
+      const resolved = this.resolveWorkerOptionsWithSources(p.def.type, opts)
+      const workerLogger = this.logger_.child(`[${workerId}#${p.def.type}]`)
+      this.logInfoStarting(workerLogger, 'projection', p.def.type, resolved)
+      const routingOpts = this.routingOpts(resolved.tuning, p.opts, workerId, workerLogger)
+      const processingOpts = this.processingOpts(resolved.tuning, p.opts, workerId, workerLogger)
+      const routing = startRoutingWorker(
+        this.persistClient_,
+        {
+          name: p.def.type,
+          stream: p.stream,
+          routeFn,
+          ...(p.def.startFrom !== undefined ? { startFrom: p.def.startFrom } : {}),
+        },
+        routingOpts,
+      )
+      const processing = startProjectionWorker(
+        this.persistClient_,
+        {
+          name: p.def.type,
+          stream: p.stream,
+          handler: p.def.handler,
+          ...(p.def.errorPolicy !== undefined ? { errorPolicy: p.def.errorPolicy } : {}),
+        },
+        processingOpts,
+      )
+      this.logStopWhenDone(workerLogger, p.def.type, routing, processing)
+      workers.push(routing, processing)
     }
 
     // PMs: one routing worker + one processing worker per registration.
     // The processing worker takes the dispatch client too (D-0011).
     for (const pm of this.processManagers) {
-      const resolved = this.resolveWorkerOptionsWithSources(pm.def.type, opts);
-      const workerLogger = this.logger_.child(
-        `[${workerId}#${pm.def.type}]`,
-      );
-      this.logInfoStarting(workerLogger, "process manager", pm.def.type, resolved);
-      const routingOpts = this.routingOpts(
-        resolved.tuning,
-        pm.opts,
-        workerId,
-        workerLogger,
-      );
-      const processingOpts = this.processingOpts(
-        resolved.tuning,
-        pm.opts,
-        workerId,
-        workerLogger,
-      );
-      const routing = startRoutingWorker(this.persistClient_, {
-        name: pm.def.type,
-        stream: pm.stream,
-        routeFn: pm.def.routeFn,
-        ...(pm.def.startFrom !== undefined
-          ? { startFrom: pm.def.startFrom }
-          : {}),
-      }, routingOpts);
+      const resolved = this.resolveWorkerOptionsWithSources(pm.def.type, opts)
+      const workerLogger = this.logger_.child(`[${workerId}#${pm.def.type}]`)
+      this.logInfoStarting(workerLogger, 'process manager', pm.def.type, resolved)
+      const routingOpts = this.routingOpts(resolved.tuning, pm.opts, workerId, workerLogger)
+      const processingOpts = this.processingOpts(resolved.tuning, pm.opts, workerId, workerLogger)
+      const routing = startRoutingWorker(
+        this.persistClient_,
+        {
+          name: pm.def.type,
+          stream: pm.stream,
+          routeFn: pm.def.routeFn,
+          ...(pm.def.startFrom !== undefined ? { startFrom: pm.def.startFrom } : {}),
+        },
+        routingOpts,
+      )
       const pmDef: PmDefinition<unknown, Event> = {
         type: pm.def.type,
         stream: pm.stream,
         initialState: pm.def.initialState,
         apply: pm.def.apply,
         handle: pm.def.handle,
-        ...(pm.def.streamName !== undefined
-          ? { streamName: pm.def.streamName }
-          : {}),
+        ...(pm.def.streamName !== undefined ? { streamName: pm.def.streamName } : {}),
         ...(pm.def.snapshotModuleVersion !== undefined
           ? { snapshotModuleVersion: pm.def.snapshotModuleVersion }
           : {}),
-        ...(pm.def.errorPolicy !== undefined
-          ? { errorPolicy: pm.def.errorPolicy }
-          : {}),
-      };
+        ...(pm.def.errorPolicy !== undefined ? { errorPolicy: pm.def.errorPolicy } : {}),
+      }
       // Wire the L3 routing helpers in so PM `handle` can return
       // lean commands (bare `Command`s) that the worker resolves
       // via the registered router + aggregate registry.
       const pmOpts = {
         ...processingOpts,
-        ...(this.commandRouter_ !== null
-          ? { router: this.commandRouter_ }
-          : {}),
+        ...(this.commandRouter_ !== null ? { router: this.commandRouter_ } : {}),
         aggregates: this.aggregates,
-      };
-      const processing = startPmWorker(
-        this.persistClient_,
-        pmDef,
-        pmOpts,
-      );
-      this.logStopWhenDone(workerLogger, pm.def.type, routing, processing);
-      workers.push(routing, processing);
+      }
+      const processing = startPmWorker(this.persistClient_, pmDef, pmOpts)
+      this.logStopWhenDone(workerLogger, pm.def.type, routing, processing)
+      workers.push(routing, processing)
     }
 
     return {
@@ -694,26 +630,23 @@ export class Instructed {
         // same observable behaviour as a crash (ML-0012); processing
         // workers honour the AbortSignal and finish their in-flight
         // item before exiting.
-        await Promise.all(workers.map((w) => w.stop()));
+        await Promise.all(workers.map((w) => w.stop()))
       },
-    };
+    }
   }
 
   // ---- escape hatches ----
 
   client(): Client {
-    return this.persistClient_;
+    return this.persistClient_
   }
 
   // ---- internals ----
 
-  private resolveProjectionRouteFn(
-    p: RegisteredProjection,
-  ): RoutingFn {
-    if (p.def.routeFn) return p.def.routeFn;
-    const pb: PartitionBy =
-      p.def.partitionBy ?? { kind: "sequential" };
-    return routingFnForPartitionBy(pb);
+  private resolveProjectionRouteFn(p: RegisteredProjection): RoutingFn {
+    if (p.def.routeFn) return p.def.routeFn
+    const pb: PartitionBy = p.def.partitionBy ?? { kind: 'sequential' }
+    return routingFnForPartitionBy(pb)
   }
 
   /**
@@ -732,35 +665,35 @@ export class Instructed {
     name: string,
     opts: PollOptions,
   ): {
-    tuning: WorkerOptions;
-    sources: Record<keyof WorkerOptions, ProvenanceTag>;
+    tuning: WorkerOptions
+    sources: Record<keyof WorkerOptions, ProvenanceTag>
   } {
     const fields: (keyof WorkerOptions)[] = [
-      "batchSize",
-      "leaseSeconds",
-      "heartbeatInterval",
-      "pollInterval",
-    ];
-    const tuning: WorkerOptions = {};
-    const sources = {} as Record<keyof WorkerOptions, ProvenanceTag>;
+      'batchSize',
+      'leaseSeconds',
+      'heartbeatInterval',
+      'pollInterval',
+    ]
+    const tuning: WorkerOptions = {}
+    const sources = {} as Record<keyof WorkerOptions, ProvenanceTag>
     for (const f of fields) {
-      const wv = opts.workers?.[name]?.[f];
-      const dv = opts.defaults?.[f];
-      const sv = DEFAULT_WORKER_OPTIONS[f];
+      const wv = opts.workers?.[name]?.[f]
+      const dv = opts.defaults?.[f]
+      const sv = DEFAULT_WORKER_OPTIONS[f]
       if (wv !== undefined) {
-        tuning[f] = wv;
-        sources[f] = "workers";
+        tuning[f] = wv
+        sources[f] = 'workers'
       } else if (dv !== undefined) {
-        tuning[f] = dv;
-        sources[f] = "defaults";
+        tuning[f] = dv
+        sources[f] = 'defaults'
       } else if (sv !== undefined) {
-        tuning[f] = sv;
-        sources[f] = "sdk";
+        tuning[f] = sv
+        sources[f] = 'sdk'
       } else {
-        sources[f] = "auto";
+        sources[f] = 'auto'
       }
     }
-    return { tuning, sources };
+    return { tuning, sources }
   }
 
   private logInfoStarting(
@@ -768,29 +701,27 @@ export class Instructed {
     kind: string,
     name: string,
     resolved: {
-      tuning: WorkerOptions;
-      sources: Record<keyof WorkerOptions, ProvenanceTag>;
+      tuning: WorkerOptions
+      sources: Record<keyof WorkerOptions, ProvenanceTag>
     },
   ): void {
-    workerLogger.info(
-      () => {
-        const fmt = (f: keyof WorkerOptions, unit: string) => {
-          const src = resolved.sources[f];
-          const v = resolved.tuning[f];
-          if (src === "auto") return `${f}=auto (derived)`;
-          return `${f}=${v}${unit} (${src === "sdk" ? "sdk default" : src === "workers" ? `workers.${name}` : "defaults"})`;
-        };
-        return (
-          `starting ${kind} worker; ` +
-          [
-            fmt("pollInterval", "ms"),
-            fmt("leaseSeconds", "s"),
-            fmt("batchSize", ""),
-            fmt("heartbeatInterval", "ms"),
-          ].join(", ")
-        );
-      },
-    );
+    workerLogger.info(() => {
+      const fmt = (f: keyof WorkerOptions, unit: string) => {
+        const src = resolved.sources[f]
+        const v = resolved.tuning[f]
+        if (src === 'auto') return `${f}=auto (derived)`
+        return `${f}=${v}${unit} (${src === 'sdk' ? 'sdk default' : src === 'workers' ? `workers.${name}` : 'defaults'})`
+      }
+      return (
+        `starting ${kind} worker; ` +
+        [
+          fmt('pollInterval', 'ms'),
+          fmt('leaseSeconds', 's'),
+          fmt('batchSize', ''),
+          fmt('heartbeatInterval', 'ms'),
+        ].join(', ')
+      )
+    })
   }
 
   private logStopWhenDone(
@@ -802,8 +733,8 @@ export class Instructed {
     // Fire the stop log once both halves have wound down. Don't
     // await: this runs as a side observer of the running worker.
     void Promise.all([routing.stopped, processing.stopped]).then(() => {
-      workerLogger.info(`stopped worker for "${name}"`);
-    });
+      workerLogger.info(`stopped worker for "${name}"`)
+    })
   }
 
   private routingOpts(
@@ -812,14 +743,14 @@ export class Instructed {
     workerId: string,
     logger: Logger,
   ) {
-    const out: Parameters<typeof startRoutingWorker>[2] = { workerId, logger };
-    if (tuning.batchSize !== undefined) out.batchSize = tuning.batchSize;
-    if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds;
-    if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval;
+    const out: Parameters<typeof startRoutingWorker>[2] = { workerId, logger }
+    if (tuning.batchSize !== undefined) out.batchSize = tuning.batchSize
+    if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds
+    if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval
     // Note: `heartbeatInterval` is intentionally ignored for routing
     // workers under D-0025 (per-batch claim/release; no heartbeat).
-    if (reg.onError !== undefined) out.onError = reg.onError;
-    return out;
+    if (reg.onError !== undefined) out.onError = reg.onError
+    return out
   }
 
   private processingOpts(
@@ -830,28 +761,19 @@ export class Instructed {
   ) {
     // The processing worker has no `batchSize` knob (it claims one
     // item at a time); the other knobs map 1:1.
-    const out: Parameters<typeof startProjectionWorker>[2] = { workerId, logger };
-    if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds;
-    if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval;
+    const out: Parameters<typeof startProjectionWorker>[2] = { workerId, logger }
+    if (tuning.leaseSeconds !== undefined) out.leaseSeconds = tuning.leaseSeconds
+    if (tuning.pollInterval !== undefined) out.pollInterval = tuning.pollInterval
     if (tuning.heartbeatInterval !== undefined) {
-      out.heartbeatInterval = tuning.heartbeatInterval;
+      out.heartbeatInterval = tuning.heartbeatInterval
     }
-    if (reg.onError !== undefined) out.onError = reg.onError;
-    return out;
+    if (reg.onError !== undefined) out.onError = reg.onError
+    return out
   }
-
 }
 
-type ProvenanceTag = "workers" | "defaults" | "sdk" | "auto";
+type ProvenanceTag = 'workers' | 'defaults' | 'sdk' | 'auto'
 
-function normaliseConsistency(
-  list: string[] | SubscriptionRef[],
-): SubscriptionRef[] {
-  return list.map((entry) =>
-    typeof entry === "string"
-      ? ({ stream: "$all", name: entry })
-      : entry,
-  );
+function normaliseConsistency(list: string[] | SubscriptionRef[]): SubscriptionRef[] {
+  return list.map((entry) => (typeof entry === 'string' ? { stream: '$all', name: entry } : entry))
 }
-
-

@@ -21,39 +21,41 @@
  * idempotency guarantee.
  */
 
-import { after, before, beforeEach, describe, test } from "node:test";
-import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
-import { closePool, getPool, truncateAll } from "./fixtures.ts";
-import { Client, expected } from "../src/index.ts";
-import { startRoutingWorker } from "../src/workers/routing/index.ts";
+import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
+import { after, before, beforeEach, describe, test } from 'node:test'
+
+import type pg from 'pg'
+
+import { SNAPSHOT_MODULE_VERSION_KEY } from '../src/aggregate/index.ts'
+import type { AggregateDefinition, DomainEvent } from '../src/aggregate/index.ts'
+import { Client, expected } from '../src/index.ts'
+import type { RunningWorker } from '../src/internal/running-worker.ts'
+import type { RecordedEvent } from '../src/types/index.ts'
 import {
   startPmWorker,
   type DispatchedCommand,
   type PmDefinition,
-} from "../src/workers/pm/index.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "../src/aggregate/index.ts";
-import type { AggregateDefinition, DomainEvent } from "../src/aggregate/index.ts";
-import type { RecordedEvent } from "../src/types/index.ts";
-import type pg from "pg";
-import type { RunningWorker } from "../src/internal/running-worker.ts";
+} from '../src/workers/pm/index.ts'
+import { startRoutingWorker } from '../src/workers/routing/index.ts'
+import { closePool, getPool, truncateAll } from './fixtures.ts'
 
-let pool: pg.Pool;
-let client: Client;
+let pool: pg.Pool
+let client: Client
 
 before(async () => {
-  pool = await getPool();
-  client = new Client(pool);
-});
+  pool = await getPool()
+  client = new Client(pool)
+})
 
 after(async () => {
-  await closePool();
-});
+  await closePool()
+})
 
 beforeEach(async () => {
-  await truncateAll(pool);
-  seen.length = 0;
-});
+  await truncateAll(pool)
+  seen.length = 0
+})
 
 // -- helpers -----------------------------------------------------------------
 
@@ -61,61 +63,59 @@ async function appendN(
   streamPrefix: string,
   events: Array<{ type: string; data: unknown }>,
 ): Promise<{ stream: string; ens: bigint[] }> {
-  const stream = `${streamPrefix}-${randomUUID().slice(0, 8)}`;
+  const stream = `${streamPrefix}-${randomUUID().slice(0, 8)}`
   const rows = await client.appendToStream(
     stream,
     expected.any,
     events.map((e) => ({ type: e.type, data: e.data })),
-  );
-  return { stream, ens: rows.map((r) => r.event_number) };
+  )
+  return { stream, ens: rows.map((r) => r.event_number) }
 }
 
 async function waitFor<T>(
   predicate: () => Promise<T | null | undefined>,
   timeoutMs = 5_000,
 ): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const v = await predicate();
-    if (v) return v;
-    await new Promise((r) => setTimeout(r, 25));
+    const v = await predicate()
+    if (v) return v
+    await new Promise((r) => setTimeout(r, 25))
   }
-  throw new Error(`waitFor: timed out after ${timeoutMs}ms`);
+  throw new Error(`waitFor: timed out after ${timeoutMs}ms`)
 }
 
 async function listWorkItems(
   name: string,
-): Promise<
-  Array<{ partition_key: string; event_number: string; state: string }>
-> {
+): Promise<Array<{ partition_key: string; event_number: string; state: string }>> {
   const r = await pool.query<{
-    partition_key: string;
-    event_number: string;
-    state: string;
+    partition_key: string
+    event_number: string
+    state: string
   }>(
     `SELECT partition_key, event_number::text AS event_number, state
        FROM instructed.subscription_work_items
       WHERE subscription_name = $1
       ORDER BY event_number`,
     [name],
-  );
-  return r.rows;
+  )
+  return r.rows
 }
 
 async function snapshotRow(
   sourceUuid: string,
 ): Promise<{ data: unknown; metadata: unknown; source_version: string } | null> {
   const r = await pool.query<{
-    data: unknown;
-    metadata: unknown;
-    source_version: string;
+    data: unknown
+    metadata: unknown
+    source_version: string
   }>(
     `SELECT data, metadata, source_version::text AS source_version
        FROM instructed.snapshots WHERE source_uuid = $1`,
     [sourceUuid],
-  );
-  if (r.rowCount === 0) return null;
-  return r.rows[0];
+  )
+  if (r.rowCount === 0) return null
+  return r.rows[0]
 }
 
 // A minimal aggregate the PM dispatches commands at. The handler
@@ -123,35 +123,31 @@ async function snapshotRow(
 // `from` is a stringified event-number because event payloads are
 // jsonb and JSON has no bigint; tests model the application's encoding.
 interface NoteState {
-  count: number;
+  count: number
 }
-type NoteCommand = { kind: "note"; from: string; tag: string };
+type NoteCommand = { kind: 'note'; from: string; tag: string }
 interface NoteEvent extends DomainEvent {
-  type: "Noted";
-  data: { from: string; tag: string };
+  type: 'Noted'
+  data: { from: string; tag: string }
 }
-const seen: NoteEvent[] = [];
+const seen: NoteEvent[] = []
 
-function noteAggregate(): AggregateDefinition<
-  NoteState,
-  NoteCommand,
-  NoteEvent
-> {
+function noteAggregate(): AggregateDefinition<NoteState, NoteCommand, NoteEvent> {
   return {
-    type: "Note",
+    type: 'Note',
     initialState: () => ({ count: 0 }),
     execute(_state, c) {
       const ev: NoteEvent = {
-        type: "Noted",
+        type: 'Noted',
         data: { from: c.from, tag: c.tag },
-      };
-      seen.push(ev);
-      return { type: ev.type, data: ev.data };
+      }
+      seen.push(ev)
+      return { type: ev.type, data: ev.data }
     },
     apply(s, _e) {
-      return { count: s.count + 1 };
+      return { count: s.count + 1 }
     },
-  };
+  }
 }
 
 interface PmState {
@@ -159,7 +155,7 @@ interface PmState {
   // can't serialise bigint and snapshot data is jsonb. Applications
   // pick their own encoding; we use strings throughout the test for
   // clean equality.
-  applied: string[];
+  applied: string[]
 }
 
 function pmDef(
@@ -177,7 +173,7 @@ function pmDef(
     }),
     handle: () => ({}),
     ...overrides,
-  };
+  }
 }
 
 /** Start a routing worker that puts every event in partition `pk`. */
@@ -186,92 +182,93 @@ function startRouter(name: string, stream: string, pk: string): RunningWorker {
     name,
     stream,
     routeFn: () => ({ partitionKey: pk }),
-    startFrom: "origin",
-  });
+    startFrom: 'origin',
+  })
 }
 
 // ============================================================================
 // Happy path: snapshot present, non-terminal complete
 // ============================================================================
 
-describe("startPmWorker — non-terminal complete", () => {
+describe('startPmWorker — non-terminal complete', () => {
   test("UPDATE work-item to 'done' and UPSERT snapshot in one logical step", async () => {
-    const name = `pm-happy-${randomUUID().slice(0, 8)}`;
-    const { stream, ens } = await appendN("ev", [
-      { type: "T", data: { tag: "a" } },
-      { type: "T", data: { tag: "b" } },
-    ]);
+    const name = `pm-happy-${randomUUID().slice(0, 8)}`
+    const { stream, ens } = await appendN('ev', [
+      { type: 'T', data: { tag: 'a' } },
+      { type: 'T', data: { tag: 'b' } },
+    ])
 
-    const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, pmDef(name, { stream }));
+    const router = startRouter(name, stream, 'p1')
+    const worker = startPmWorker(client, pmDef(name, { stream }))
 
     try {
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.length === 2 && rows.every((r) => r.state === "done")
-          ? true
-          : null;
-      });
+        const rows = await listWorkItems(name)
+        return rows.length === 2 && rows.every((r) => r.state === 'done') ? true : null
+      })
       // Both events are now `done` and a snapshot exists for the
       // partition's source_uuid.
-      const snap = await snapshotRow(`${name}-p1`);
-      assert.ok(snap, "snapshot should exist");
-      const snapData = snap.data as PmState;
+      const snap = await snapshotRow(`${name}-p1`)
+      assert.ok(snap, 'snapshot should exist')
+      const snapData = snap.data as PmState
       // apply was run on every routed event, in event-number order.
-      assert.deepEqual(snapData.applied, ens.map((n) => n.toString()));
+      assert.deepEqual(
+        snapData.applied,
+        ens.map((n) => n.toString()),
+      )
       // sourceVersion = the most recently processed event's number.
-      assert.equal(snap.source_version, ens[1].toString());
+      assert.equal(snap.source_version, ens[1].toString())
     } finally {
-      await Promise.all([router.stop(), worker.stop()]);
+      await Promise.all([router.stop(), worker.stop()])
     }
-  });
-});
+  })
+})
 
 // ============================================================================
 // Multi-command dispatch in declaration order
 // ============================================================================
 
-describe("startPmWorker — multi-command dispatch", () => {
-  test("commands dispatch in declaration order; causation = triggering event_id", async () => {
-    const name = `pm-cmds-${randomUUID().slice(0, 8)}`;
-    const aggStream = `agg-${randomUUID().slice(0, 8)}`;
-    const { stream } = await appendN("trig", [{ type: "T", data: { tag: "x" } }]);
+describe('startPmWorker — multi-command dispatch', () => {
+  test('commands dispatch in declaration order; causation = triggering event_id', async () => {
+    const name = `pm-cmds-${randomUUID().slice(0, 8)}`
+    const aggStream = `agg-${randomUUID().slice(0, 8)}`
+    const { stream } = await appendN('trig', [{ type: 'T', data: { tag: 'x' } }])
 
-    let triggeringEventId = "";
+    let triggeringEventId = ''
     const def: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       handle: (_state, event) => {
-        triggeringEventId = event.event_id;
-        const from = event.event_number.toString();
+        triggeringEventId = event.event_id
+        const from = event.event_number.toString()
         return {
           commands: [
             {
               streamUuid: aggStream,
               aggregate: noteAggregate(),
-              command: { kind: "note", from, tag: "first" } as NoteCommand,
+              command: { kind: 'note', from, tag: 'first' } as NoteCommand,
             },
             {
               streamUuid: aggStream,
               aggregate: noteAggregate(),
-              command: { kind: "note", from, tag: "second" } as NoteCommand,
+              command: { kind: 'note', from, tag: 'second' } as NoteCommand,
             },
             {
               streamUuid: aggStream,
               aggregate: noteAggregate(),
-              command: { kind: "note", from, tag: "third" } as NoteCommand,
+              command: { kind: 'note', from, tag: 'third' } as NoteCommand,
             },
           ],
-        };
+        }
       },
-    };
+    }
 
-    const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, def);
+    const router = startRouter(name, stream, 'p1')
+    const worker = startPmWorker(client, def)
 
     try {
-      await waitFor(async () => (seen.length >= 3 ? true : null));
-      const tags = seen.map((s) => s.data.tag);
-      assert.deepEqual(tags, ["first", "second", "third"]);
+      await waitFor(async () => (seen.length >= 3 ? true : null))
+      const tags = seen.map((s) => s.data.tag)
+      assert.deepEqual(tags, ['first', 'second', 'third'])
 
       // Causation: the appended Noted events should carry the
       // triggering event's id as their causation_id.
@@ -280,40 +277,40 @@ describe("startPmWorker — multi-command dispatch", () => {
            FROM instructed.events
           WHERE event_type = 'Noted'
           ORDER BY event_id`,
-      );
+      )
       for (const row of r.rows) {
-        assert.equal(row.causation_id, triggeringEventId);
+        assert.equal(row.causation_id, triggeringEventId)
       }
     } finally {
-      await Promise.all([router.stop(), worker.stop()]);
+      await Promise.all([router.stop(), worker.stop()])
     }
-  });
-});
+  })
+})
 
 // ============================================================================
 // Terminal complete (PM-F `complete: true`)
 // ============================================================================
 
-describe("startPmWorker — complete: true (PM-F terminal)", () => {
-  test("DELETEs both the snapshot AND every work-item for the partition", async () => {
-    const name = `pm-term-${randomUUID().slice(0, 8)}`;
-    const { stream, ens } = await appendN("trig", [
-      { type: "T", data: { tag: "a" } },
-      { type: "T", data: { tag: "b" } },
-      { type: "T", data: { tag: "TERM" } },
-    ]);
+describe('startPmWorker — complete: true (PM-F terminal)', () => {
+  test('DELETEs both the snapshot AND every work-item for the partition', async () => {
+    const name = `pm-term-${randomUUID().slice(0, 8)}`
+    const { stream, ens } = await appendN('trig', [
+      { type: 'T', data: { tag: 'a' } },
+      { type: 'T', data: { tag: 'b' } },
+      { type: 'T', data: { tag: 'TERM' } },
+    ])
     const def: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       handle: (_s, event) => {
-        if ((event.data as { tag: string }).tag === "TERM") {
-          return { complete: true };
+        if ((event.data as { tag: string }).tag === 'TERM') {
+          return { complete: true }
         }
-        return {};
+        return {}
       },
-    };
+    }
 
-    const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, def);
+    const router = startRouter(name, stream, 'p1')
+    const worker = startPmWorker(client, def)
 
     try {
       // Two-stage wait so we don't spuriously satisfy `length === 0`
@@ -327,149 +324,142 @@ describe("startPmWorker — complete: true (PM-F terminal)", () => {
              JOIN instructed.streams st USING(stream_id)
             WHERE s.subscription_name = $1 AND st.stream_uuid = $2`,
           [name, stream],
-        );
-        return sub.rowCount === 1 && BigInt(sub.rows[0].last_seen) >= ens[2]
-          ? true
-          : null;
-      });
+        )
+        return sub.rowCount === 1 && BigInt(sub.rows[0].last_seen) >= ens[2] ? true : null
+      })
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.length === 0 ? true : null;
-      });
+        const rows = await listWorkItems(name)
+        return rows.length === 0 ? true : null
+      })
       // Snapshot gone, every work-item gone.
-      assert.equal(await snapshotRow(`${name}-p1`), null);
-      assert.deepEqual(await listWorkItems(name), []);
+      assert.equal(await snapshotRow(`${name}-p1`), null)
+      assert.deepEqual(await listWorkItems(name), [])
     } finally {
-      await Promise.all([router.stop(), worker.stop()]);
+      await Promise.all([router.stop(), worker.stop()])
     }
-  });
-});
+  })
+})
 
 // ============================================================================
 // Rebuild path: no snapshot
 // ============================================================================
 
-describe("startPmWorker — rebuild on missing snapshot", () => {
-  test("folds prior `done` events through apply before staging the claimed event", async () => {
-    const name = `pm-rebuild-${randomUUID().slice(0, 8)}`;
+describe('startPmWorker — rebuild on missing snapshot', () => {
+  test('folds prior `done` events through apply before staging the claimed event', async () => {
+    const name = `pm-rebuild-${randomUUID().slice(0, 8)}`
     // Phase 1: append two events; PM processes them; snapshot + 2
     // `done` rows result. Worker closed before phase 2.
-    const { stream, ens: ens1 } = await appendN("e", [
-      { type: "T", data: { tag: "a" } },
-      { type: "T", data: { tag: "b" } },
-    ]);
+    const { stream, ens: ens1 } = await appendN('e', [
+      { type: 'T', data: { tag: 'a' } },
+      { type: 'T', data: { tag: 'b' } },
+    ])
 
-    const r1 = startRouter(name, stream, "p1");
-    const w1 = startPmWorker(client, pmDef(name, { stream }));
+    const r1 = startRouter(name, stream, 'p1')
+    const w1 = startPmWorker(client, pmDef(name, { stream }))
     try {
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.filter((x) => x.state === "done").length >= 2 ? true : null;
-      });
+        const rows = await listWorkItems(name)
+        return rows.filter((x) => x.state === 'done').length >= 2 ? true : null
+      })
     } finally {
-      await w1.stop();
-      await r1.stop();
+      await w1.stop()
+      await r1.stop()
     }
 
     // Phase 2: simulate a snapshot loss (operator drop, or first
     // module-version mismatch handled via rebuild). Delete the
     // snapshot row directly.
-    await pool.query(
-      `DELETE FROM instructed.snapshots WHERE source_uuid = $1`,
-      [`${name}-p1`],
-    );
+    await pool.query(`DELETE FROM instructed.snapshots WHERE source_uuid = $1`, [`${name}-p1`])
     // Confirm the snapshot really is gone before phase 3 starts.
-    assert.equal(await snapshotRow(`${name}-p1`), null);
+    assert.equal(await snapshotRow(`${name}-p1`), null)
 
     // Phase 3: append a third event to the same stream, then start a
     // fresh PM worker. Because no snapshot exists, the worker MUST
     // rebuild state by folding the two prior `done` events through
     // `apply` before staging the third claimed event.
     const more = await client.appendToStream(stream, expected.any, [
-      { type: "T", data: { tag: "c" } },
-    ]);
-    const e3 = more[0].event_number;
+      { type: 'T', data: { tag: 'c' } },
+    ])
+    const e3 = more[0].event_number
 
     const def2: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       apply: (s, ev) => ({
         applied: [...s.applied, ev.event_number.toString()],
       }),
-    };
-    const r2 = startRouter(name, stream, "p1");
-    const w2 = startPmWorker(client, def2);
+    }
+    const r2 = startRouter(name, stream, 'p1')
+    const w2 = startPmWorker(client, def2)
     try {
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.filter((x) => x.state === "done").length >= 3 ? true : null;
-      });
+        const rows = await listWorkItems(name)
+        return rows.filter((x) => x.state === 'done').length >= 3 ? true : null
+      })
     } finally {
-      await w2.stop();
-      await r2.stop();
+      await w2.stop()
+      await r2.stop()
     }
 
     // The third event's stage state should reflect ALL three event
     // numbers having been apply'd (two via rebuild, one as the
     // claimed event).
-    const finalSnap = await snapshotRow(`${name}-p1`);
-    assert.ok(finalSnap, "snapshot should be rebuilt");
+    const finalSnap = await snapshotRow(`${name}-p1`)
+    assert.ok(finalSnap, 'snapshot should be rebuilt')
     assert.deepEqual(
       (finalSnap.data as PmState).applied,
       [...ens1, e3].map((n) => n.toString()),
-    );
-  });
-});
+    )
+  })
+})
 
 // ============================================================================
 // Rebuild path: snapshotModuleVersion mismatch
 // ============================================================================
 
-describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => {
-  test("snapshot exists but version tag differs => rebuild via apply matches", async () => {
-    const name = `pm-mod-${randomUUID().slice(0, 8)}`;
-    const { stream, ens } = await appendN("e", [
-      { type: "T", data: { tag: "a" } },
-      { type: "T", data: { tag: "b" } },
-    ]);
+describe('startPmWorker — rebuild on snapshot_module_version mismatch', () => {
+  test('snapshot exists but version tag differs => rebuild via apply matches', async () => {
+    const name = `pm-mod-${randomUUID().slice(0, 8)}`
+    const { stream, ens } = await appendN('e', [
+      { type: 'T', data: { tag: 'a' } },
+      { type: 'T', data: { tag: 'b' } },
+    ])
 
     // Phase 1: writer tags snapshots with version "v1".
     const defV1: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
-      snapshotModuleVersion: "v1",
-    };
-    const r1 = startRouter(name, stream, "p1");
-    const w1 = startPmWorker(client, defV1);
+      snapshotModuleVersion: 'v1',
+    }
+    const r1 = startRouter(name, stream, 'p1')
+    const w1 = startPmWorker(client, defV1)
     try {
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.filter((x) => x.state === "done").length >= 2 ? true : null;
-      });
+        const rows = await listWorkItems(name)
+        return rows.filter((x) => x.state === 'done').length >= 2 ? true : null
+      })
     } finally {
-      await w1.stop();
-      await r1.stop();
+      await w1.stop()
+      await r1.stop()
     }
 
-    const v1Snap = await snapshotRow(`${name}-p1`);
-    assert.ok(v1Snap, "v1 snapshot should exist");
+    const v1Snap = await snapshotRow(`${name}-p1`)
+    assert.ok(v1Snap, 'v1 snapshot should exist')
     assert.deepEqual(
-      (v1Snap.metadata as Record<string, unknown>)[
-        SNAPSHOT_MODULE_VERSION_KEY
-      ],
-      "v1",
-    );
+      (v1Snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY],
+      'v1',
+    )
 
     // Phase 2: append one more event; reader announces module version
     // "v2", which should cause it to rebuild via apply from origin
     // rather than trusting the v1 snapshot's data.
     const more = await client.appendToStream(stream, expected.any, [
-      { type: "T", data: { tag: "c" } },
-    ]);
-    const e3 = more[0].event_number;
+      { type: 'T', data: { tag: 'c' } },
+    ])
+    const e3 = more[0].event_number
 
-    let loadedFromSnapshot = false;
+    let loadedFromSnapshot = false
     const defV2: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
-      snapshotModuleVersion: "v2",
+      snapshotModuleVersion: 'v2',
       apply: (s, ev) => ({
         applied: [...s.applied, ev.event_number.toString()],
       }),
@@ -477,67 +467,62 @@ describe("startPmWorker — rebuild on snapshot_module_version mismatch", () => 
         // After rebuild + staging, applied should hold all three
         // event_numbers. If the v1 snapshot's data had been wrongly
         // trusted, applied would only contain e3 when handle runs.
-        if (
-          state.applied.length === 1 &&
-          state.applied[0] === e3.toString()
-        ) {
-          loadedFromSnapshot = true;
+        if (state.applied.length === 1 && state.applied[0] === e3.toString()) {
+          loadedFromSnapshot = true
         }
-        return {};
+        return {}
       },
-    };
-    const r2 = startRouter(name, stream, "p1");
-    const w2 = startPmWorker(client, defV2);
+    }
+    const r2 = startRouter(name, stream, 'p1')
+    const w2 = startPmWorker(client, defV2)
     try {
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.filter((x) => x.state === "done").length >= 3 ? true : null;
-      });
+        const rows = await listWorkItems(name)
+        return rows.filter((x) => x.state === 'done').length >= 3 ? true : null
+      })
     } finally {
-      await w2.stop();
-      await r2.stop();
+      await w2.stop()
+      await r2.stop()
     }
     assert.equal(
       loadedFromSnapshot,
       false,
-      "v2 reader must rebuild via apply, not use the v1 snapshot",
-    );
-    const finalSnap = await snapshotRow(`${name}-p1`);
-    assert.ok(finalSnap);
+      'v2 reader must rebuild via apply, not use the v1 snapshot',
+    )
+    const finalSnap = await snapshotRow(`${name}-p1`)
+    assert.ok(finalSnap)
     assert.deepEqual(
       (finalSnap.data as PmState).applied,
       [...ens, e3].map((n) => n.toString()),
-    );
+    )
     // The v2 snapshot now carries v2 in its metadata.
     assert.deepEqual(
-      (finalSnap.metadata as Record<string, unknown>)[
-        SNAPSHOT_MODULE_VERSION_KEY
-      ],
-      "v2",
-    );
-  });
-});
+      (finalSnap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY],
+      'v2',
+    )
+  })
+})
 
 // ============================================================================
 // Failure during dispatch
 // ============================================================================
 
-describe("startPmWorker — dispatch failure leaves work-item claimed", () => {
-  test("dispatch throw -> handle throws -> retry-in; row stays `claimed`; lease retained", async () => {
-    const name = `pm-disp-fail-${randomUUID().slice(0, 8)}`;
-    const aggStream = `agg-${randomUUID().slice(0, 8)}`;
-    const { stream } = await appendN("e", [{ type: "T", data: { tag: "x" } }]);
+describe('startPmWorker — dispatch failure leaves work-item claimed', () => {
+  test('dispatch throw -> handle throws -> retry-in; row stays `claimed`; lease retained', async () => {
+    const name = `pm-disp-fail-${randomUUID().slice(0, 8)}`
+    const aggStream = `agg-${randomUUID().slice(0, 8)}`
+    const { stream } = await appendN('e', [{ type: 'T', data: { tag: 'x' } }])
 
-    let attempts = 0;
+    let attempts = 0
     const exploder: AggregateDefinition<NoteState, NoteCommand, NoteEvent> = {
-      type: "Note",
+      type: 'Note',
       initialState: () => ({ count: 0 }),
       execute() {
-        attempts += 1;
-        throw new Error("synthetic-dispatch-failure");
+        attempts += 1
+        throw new Error('synthetic-dispatch-failure')
       },
       apply: (s) => s,
-    };
+    }
     const def: PmDefinition<PmState, NoteEvent> = {
       ...pmDef(name, { stream }),
       handle: (_state, event) => ({
@@ -546,62 +531,62 @@ describe("startPmWorker — dispatch failure leaves work-item claimed", () => {
             streamUuid: aggStream,
             aggregate: exploder,
             command: {
-              kind: "note",
+              kind: 'note',
               from: event.event_number.toString(),
-              tag: "boom",
+              tag: 'boom',
             } as NoteCommand,
           },
         ],
       }),
       // Fast retries so we observe multiple attempts.
       errorPolicy: () => ({
-        decision: { kind: "retry-in", delayMs: 30 },
+        decision: { kind: 'retry-in', delayMs: 30 },
         state: undefined,
       }),
-    };
+    }
 
-    const router = startRouter(name, stream, "p1");
-    const worker = startPmWorker(client, def);
+    const router = startRouter(name, stream, 'p1')
+    const worker = startPmWorker(client, def)
 
     try {
-      await waitFor(async () => (attempts >= 3 ? true : null));
+      await waitFor(async () => (attempts >= 3 ? true : null))
       // While retries continue, the work item must remain `claimed`
       // and the snapshot must NOT have been written.
-      const rows = await listWorkItems(name);
-      assert.equal(rows.length, 1);
-      assert.equal(rows[0].state, "claimed");
-      assert.equal(await snapshotRow(`${name}-p1`), null);
+      const rows = await listWorkItems(name)
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].state, 'claimed')
+      assert.equal(await snapshotRow(`${name}-p1`), null)
     } finally {
-      await Promise.all([router.stop(), worker.stop()]);
+      await Promise.all([router.stop(), worker.stop()])
     }
-  });
-});
+  })
+})
 
 // ============================================================================
 // Empty handle result is valid (no commands, no complete)
 // ============================================================================
 
-describe("startPmWorker — empty handle result", () => {
-  test("{}: still records staged_state and marks the work-item done", async () => {
-    const name = `pm-empty-${randomUUID().slice(0, 8)}`;
-    const { stream } = await appendN("e", [{ type: "T", data: { tag: "z" } }]);
-    const router = startRouter(name, stream, "p1");
+describe('startPmWorker — empty handle result', () => {
+  test('{}: still records staged_state and marks the work-item done', async () => {
+    const name = `pm-empty-${randomUUID().slice(0, 8)}`
+    const { stream } = await appendN('e', [{ type: 'T', data: { tag: 'z' } }])
+    const router = startRouter(name, stream, 'p1')
     const worker = startPmWorker(client, {
       ...pmDef(name, { stream }),
       handle: () => ({}),
-    });
+    })
     try {
       await waitFor(async () => {
-        const rows = await listWorkItems(name);
-        return rows.length === 1 && rows[0].state === "done" ? true : null;
-      });
-      assert.ok(await snapshotRow(`${name}-p1`));
+        const rows = await listWorkItems(name)
+        return rows.length === 1 && rows[0].state === 'done' ? true : null
+      })
+      assert.ok(await snapshotRow(`${name}-p1`))
     } finally {
-      await Promise.all([router.stop(), worker.stop()]);
+      await Promise.all([router.stop(), worker.stop()])
     }
-  });
-});
+  })
+})
 
 // Silence unused-import linter for type-only references kept for clarity.
-void (null as unknown as DispatchedCommand);
-void (null as unknown as RecordedEvent);
+void (null as unknown as DispatchedCommand)
+void (null as unknown as RecordedEvent)

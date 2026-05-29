@@ -28,10 +28,10 @@
  * unconstrained (route to pino / winston / console / nothing).
  */
 export interface ILoggerImpl {
-  info?(msg: string): void;
-  warn?(msg: string): void;
-  error?(msg: string): void;
-  trace?(msg: string): void;
+  info?(msg: string): void
+  warn?(msg: string): void
+  error?(msg: string): void
+  trace?(msg: string): void
 }
 
 /**
@@ -43,7 +43,7 @@ export interface ILoggerImpl {
  * interpolation with multiple substitutions, `JSON.stringify`,
  * iterating a collection, etc.).
  */
-export type LogMessage = string | (() => string);
+export type LogMessage = string | (() => string)
 
 /**
  * Concrete logger handed to the SDK and to user handlers via
@@ -61,21 +61,21 @@ export type LogMessage = string | (() => string);
  *     tests and for synthesising a `ctx` without a real sink.
  */
 export class Logger {
-  readonly info: (msg: LogMessage) => void;
-  readonly warn: (msg: LogMessage) => void;
-  readonly error: (msg: LogMessage) => void;
-  readonly trace: (msg: LogMessage) => void;
+  readonly info: (msg: LogMessage) => void
+  readonly warn: (msg: LogMessage) => void
+  readonly error: (msg: LogMessage) => void
+  readonly trace: (msg: LogMessage) => void
 
-  private readonly impl: ILoggerImpl | undefined;
-  private readonly prefix: string | undefined;
+  private readonly impl: ILoggerImpl | undefined
+  private readonly prefix: string | undefined
 
   private constructor(impl: ILoggerImpl | undefined, prefix?: string) {
-    this.impl = impl;
-    this.prefix = prefix;
-    this.info = bind(impl, "info", prefix);
-    this.warn = bind(impl, "warn", prefix);
-    this.error = bind(impl, "error", prefix);
-    this.trace = bind(impl, "trace", prefix);
+    this.impl = impl
+    this.prefix = prefix
+    this.info = bind(impl, 'info', prefix)
+    this.warn = bind(impl, 'warn', prefix)
+    this.error = bind(impl, 'error', prefix)
+    this.trace = bind(impl, 'trace', prefix)
   }
 
   /**
@@ -85,7 +85,7 @@ export class Logger {
    * the message thunk (if used) is not invoked.
    */
   static fromImpl(impl: ILoggerImpl | undefined, prefix?: string): Logger {
-    return new Logger(impl, prefix);
+    return new Logger(impl, prefix)
   }
 
   /**
@@ -96,7 +96,7 @@ export class Logger {
    * lets the facade build the `Logger`.
    */
   static noop(): Logger {
-    return new Logger(undefined, undefined);
+    return new Logger(undefined, undefined)
   }
 
   /**
@@ -105,8 +105,8 @@ export class Logger {
    * bound-method set over the same underlying {@link ILoggerImpl}.
    */
   child(extra: string): Logger {
-    const next = this.prefix ? `${this.prefix} ${extra}` : extra;
-    return new Logger(this.impl, next);
+    const next = this.prefix ? `${this.prefix} ${extra}` : extra
+    return new Logger(this.impl, next)
   }
 }
 
@@ -125,7 +125,7 @@ export const DEFAULT_LOGGER_IMPL: ILoggerImpl = {
   warn: (msg) => console.warn(msg),
   // eslint-disable-next-line no-console
   error: (msg) => console.error(msg),
-};
+}
 
 /**
  * A fully-silent {@link ILoggerImpl}. No method is defined, so a
@@ -139,24 +139,24 @@ export const DEFAULT_LOGGER_IMPL: ILoggerImpl = {
  *   - L2 direct callers: `{ logger: Logger.fromImpl(NOOP_LOGGER_IMPL) }`
  *     as `opts.ctx` on `runCommand` etc.
  */
-export const NOOP_LOGGER_IMPL: ILoggerImpl = {};
+export const NOOP_LOGGER_IMPL: ILoggerImpl = {}
 
 const NOOP: (m: LogMessage) => void = () => {
   /* unwired level: thunk argument is intentionally not evaluated */
-};
+}
 
 function bind(
   impl: ILoggerImpl | undefined,
-  level: "info" | "warn" | "error" | "trace",
+  level: 'info' | 'warn' | 'error' | 'trace',
   prefix: string | undefined,
 ): (msg: LogMessage) => void {
-  const fn = impl?.[level];
-  if (!fn) return NOOP;
+  const fn = impl?.[level]
+  if (!fn) return NOOP
   // Bind to `impl` so methods that rely on `this` (e.g. a class
   // method delegating to internal state) work as expected.
-  const bound = fn.bind(impl);
+  const bound = fn.bind(impl)
   if (prefix === undefined) {
-    return (m) => bound(typeof m === "function" ? m() : m);
+    return (m) => bound(typeof m === 'function' ? m() : m)
   }
-  return (m) => bound(`${prefix} ${typeof m === "function" ? m() : m}`);
+  return (m) => bound(`${prefix} ${typeof m === 'function' ? m() : m}`)
 }

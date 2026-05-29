@@ -9,20 +9,20 @@
  * drift in column order/shape.
  */
 
-import type { Event, RecordedEvent } from "../types/index.ts";
+import type { Event, RecordedEvent } from '../types/index.ts'
 
 /** Some Postgres ints (int8) come back as strings. Coerce to bigint. */
 export function toBigInt(v: unknown): bigint {
-  if (typeof v === "bigint") return v;
-  if (typeof v === "number") return BigInt(v);
-  if (typeof v === "string") return BigInt(v);
-  throw new Error(`expected bigint-like, got ${typeof v}: ${String(v)}`);
+  if (typeof v === 'bigint') return v
+  if (typeof v === 'number') return BigInt(v)
+  if (typeof v === 'string') return BigInt(v)
+  throw new Error(`expected bigint-like, got ${typeof v}: ${String(v)}`)
 }
 
 export function toDate(v: unknown): Date {
-  if (v instanceof Date) return v;
-  if (typeof v === "string") return new Date(v);
-  throw new Error(`expected Date, got ${typeof v}`);
+  if (v instanceof Date) return v
+  if (typeof v === 'string') return new Date(v)
+  throw new Error(`expected Date, got ${typeof v}`)
 }
 
 /**
@@ -31,25 +31,23 @@ export function toDate(v: unknown): Date {
  * and {@link mapRecordedEvent}.
  */
 export const READ_EVENT_COLUMNS =
-  "event_id, event_number, stream_uuid, stream_version, " +
-  "event_type, causation_id, correlation_id, data, metadata, created_at";
+  'event_id, event_number, stream_uuid, stream_version, ' +
+  'event_type, causation_id, correlation_id, data, metadata, created_at'
 
 export interface RawEventRow {
-  event_id: string;
-  event_number: string | number;
-  stream_uuid: string;
-  stream_version: string | number;
-  event_type: string;
-  causation_id: string | null;
-  correlation_id: string | null;
-  data: unknown;
-  metadata: unknown;
-  created_at: Date | string;
+  event_id: string
+  event_number: string | number
+  stream_uuid: string
+  stream_version: string | number
+  event_type: string
+  causation_id: string | null
+  correlation_id: string | null
+  data: unknown
+  metadata: unknown
+  created_at: Date | string
 }
 
-export function mapRecordedEvent<E extends Event>(
-  row: RawEventRow,
-): RecordedEvent<E> {
+export function mapRecordedEvent<E extends Event>(row: RawEventRow): RecordedEvent<E> {
   // L1 → L2 boundary: SQL `event_type` becomes TS `type`. See
   // `packEvent` (pack-event.ts) for the inverse direction.
   //
@@ -70,5 +68,5 @@ export function mapRecordedEvent<E extends Event>(
     data: row.data,
     metadata: row.metadata,
     created_at: toDate(row.created_at),
-  } as RecordedEvent<E>;
+  } as RecordedEvent<E>
 }

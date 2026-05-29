@@ -29,8 +29,8 @@
  * and the event's TypeScript type (in type position).
  */
 export interface Event<T extends string = string, D = unknown> {
-  type: T;
-  data: D;
+  type: T
+  data: D
 }
 
 /**
@@ -51,12 +51,12 @@ export interface Event<T extends string = string, D = unknown> {
  * L1 wire / SQL column unchanged).
  */
 export interface NewEvent<E = unknown> {
-  event_id?: string;
-  type: string;
-  data: E;
-  metadata?: unknown;
-  causation_id?: string;
-  correlation_id?: string;
+  event_id?: string
+  type: string
+  data: E
+  metadata?: unknown
+  causation_id?: string
+  correlation_id?: string
 }
 
 /** One row returned by `append_to_stream`, in append order.
@@ -66,25 +66,25 @@ export interface NewEvent<E = unknown> {
  *  load-bearing for the CON-B cross-stream guard in
  *  `waitForProjection`. */
 export interface AppendedEvent {
-  event_id: string;
-  stream_uuid: string;
-  stream_version: bigint;
-  event_number: bigint;
-  created_at: Date;
+  event_id: string
+  stream_uuid: string
+  stream_version: bigint
+  event_number: bigint
+  created_at: Date
 }
 
 /** Bookkeeping fields shared by every recorded event, independent of
  *  the domain payload. Internal building block for {@link RecordedEvent};
  *  not part of the porting-checklist surface. */
 export interface RecordedEventFields {
-  event_id: string;
-  event_number: bigint;
-  stream_uuid: string;
-  stream_version: bigint;
-  causation_id: string | null;
-  correlation_id: string | null;
-  metadata: unknown;
-  created_at: Date;
+  event_id: string
+  event_number: bigint
+  stream_uuid: string
+  stream_version: bigint
+  causation_id: string | null
+  correlation_id: string | null
+  metadata: unknown
+  created_at: Date
 }
 
 /** A recorded event row, the shape returned by read_stream / read_all /
@@ -99,8 +99,8 @@ export interface RecordedEventFields {
  *
  *  Note: `type` (not `event_type`) — see {@link NewEvent}. */
 export type RecordedEvent<E extends Event = Event> = E extends Event
-  ? RecordedEventFields & { type: E["type"]; data: E["data"] }
-  : never;
+  ? RecordedEventFields & { type: E['type']; data: E['data'] }
+  : never
 
 /** Options for `append_to_stream`. v1 has no recognised keys. */
 export interface AppendOptions {

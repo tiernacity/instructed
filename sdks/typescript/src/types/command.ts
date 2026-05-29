@@ -6,5 +6,5 @@
  * accept commands type-check the user's union against this shape.
  */
 export interface Command<T extends string = string> {
-  type: T;
+  type: T
 }

@@ -13,10 +13,7 @@
  * not from `instructed-sdk/core`.
  */
 
-export {
-  Instructed,
-  DEFAULT_WORKER_OPTIONS,
-} from "./instructed.ts";
+export { Instructed, DEFAULT_WORKER_OPTIONS } from './instructed.ts'
 export type {
   InstructedOptions,
   RegistrationOptions,
@@ -25,15 +22,12 @@ export type {
   ProjectionDefinition,
   ProcessManagerDefinition,
   DispatchOptions,
-} from "./instructed.ts";
+} from './instructed.ts'
 
-export { commandRouter } from "./command-router.ts";
-export type { CommandRouter, CommandRoute } from "./command-router.ts";
+export { commandRouter } from './command-router.ts'
+export type { CommandRouter, CommandRoute } from './command-router.ts'
 
-export {
-  routingFnForPartitionBy,
-  SEQUENTIAL_PARTITION_KEY,
-} from "./partition-by.ts";
-export type { PartitionBy } from "./partition-by.ts";
+export { routingFnForPartitionBy, SEQUENTIAL_PARTITION_KEY } from './partition-by.ts'
+export type { PartitionBy } from './partition-by.ts'
 
-export { onlyTypes } from "./routing-helpers.ts";
+export { onlyTypes } from './routing-helpers.ts'

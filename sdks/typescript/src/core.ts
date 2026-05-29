@@ -36,7 +36,7 @@
 // L1 \u2014 procedure bindings
 // ----------------------------------------------------------------------------
 
-export { Client, type ClientOptions } from "./client/index.ts";
+export { Client, type ClientOptions } from './client/index.ts'
 
 // L1 \u2014 SQLSTATE-bound error classes. `RetryBudgetExhausted` (L2) is
 // re-exported below in the L2 group; the L3 error classes are not
@@ -63,10 +63,10 @@ export {
   WorkItemLeaseLost,
   // 22023
   InvalidParameterValue,
-} from "./errors/index.ts";
+} from './errors/index.ts'
 
 // L1 \u2014 wire-shape contracts.
-export * from "./types/index.ts";
+export * from './types/index.ts'
 
 // ----------------------------------------------------------------------------
 // L2 \u2014 core behaviours
@@ -96,7 +96,7 @@ export {
   type RunCommandOptions,
   type SnapshotPolicy,
   type DomainEvent,
-} from "./aggregate/index.ts";
+} from './aggregate/index.ts'
 
 // Pluggable logger surface (TODO #16). The contract is required
 // core (porters reproduce the four optional-method shape and the
@@ -109,10 +109,10 @@ export {
   NOOP_LOGGER_IMPL,
   type ILoggerImpl,
   type LogMessage,
-} from "./logger/index.ts";
+} from './logger/index.ts'
 
 // L2 retry-exhaustion class (emitted by `runCommand`).
-export { RetryBudgetExhausted } from "./errors/index.ts";
+export { RetryBudgetExhausted } from './errors/index.ts'
 
 // Routing worker (D-0025 per-batch claim/release).
 export {
@@ -124,7 +124,7 @@ export {
   type RoutingFn,
   type RoutingDefinition,
   type RoutingWorkerOptions,
-} from "./workers/routing/index.ts";
+} from './workers/routing/index.ts'
 
 // Processing worker (kind-agnostic poll loop + SUB-B error policy).
 //
@@ -147,7 +147,7 @@ export {
   type ErrorPolicyDecision,
   type ErrorPolicyContext,
   type ErrorPolicyResult,
-} from "./workers/processing/index.ts";
+} from './workers/processing/index.ts'
 
 // Projection processing-worker adapter. The `PartitionBy` sugar
 // (`routingFnForPartitionBy`, `SEQUENTIAL_PARTITION_KEY`, `PartitionBy`)
@@ -159,7 +159,7 @@ export {
   type ProjectionHandlerContext,
   type ProjectionWorkerDefinition,
   type ProjectionWorkerOptions,
-} from "./workers/projection/index.ts";
+} from './workers/projection/index.ts'
 
 // PM substrate (L2): snapshot+ack lifecycle, rebuild on snapshot
 // miss / module-version mismatch, lease management. The substrate's
@@ -173,14 +173,14 @@ export {
   type PmSubstrateHandleResult,
   type PmSubstrateHandlerContext,
   type PmSubstrateOptions,
-} from "./workers/pm/index.ts";
+} from './workers/pm/index.ts'
 
 // SNAP-002 — the SDK-reserved metadata key both aggregates and PMs
 // use for snapshot module versioning. Part of the porting checklist:
 // every conformant port reproduces the same key string so cross-SDK
 // snapshot reads work.
-export { SNAPSHOT_MODULE_VERSION_KEY } from "./aggregate/index.ts";
+export { SNAPSHOT_MODULE_VERSION_KEY } from './aggregate/index.ts'
 
 // Shared worker handle (L2 interface; the loop functions above all
 // return one).
-export type { RunningWorker } from "./internal/running-worker.ts";
+export type { RunningWorker } from './internal/running-worker.ts'

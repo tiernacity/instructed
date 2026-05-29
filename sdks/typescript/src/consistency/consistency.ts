@@ -48,31 +48,27 @@
  * `$all` refs are exempt; they validly observe every append.
  */
 
-import type { Client } from "../client/index.ts";
-import {
-  ConsistencyTargetError,
-  ConsistencyTimeout,
-  InstructedError,
-} from "../errors/index.ts";
-import type { AppendedEvent } from "../types/index.ts";
-import { sleep } from "../internal/sleep.ts";
+import type { Client } from '../client/index.ts'
+import { ConsistencyTargetError, ConsistencyTimeout, InstructedError } from '../errors/index.ts'
+import { sleep } from '../internal/sleep.ts'
+import type { AppendedEvent } from '../types/index.ts'
 
 export interface WaitForProjectionOptions {
   /** Poll interval in ms. Default 25. */
-  pollInterval?: number;
+  pollInterval?: number
   /** Total budget in ms before throwing. Default 5_000. */
-  timeout?: number;
+  timeout?: number
 }
 
 export interface SubscriptionRef {
   /** Stream the subscription is bound to. `$all` for cross-stream. */
-  stream: string;
+  stream: string
   /** Subscription name. */
-  name: string;
+  name: string
 }
 
-export const DEFAULT_WAIT_POLL_INTERVAL_MS = 25;
-export const DEFAULT_WAIT_TIMEOUT_MS = 5_000;
+export const DEFAULT_WAIT_POLL_INTERVAL_MS = 25
+export const DEFAULT_WAIT_TIMEOUT_MS = 5_000
 
 /**
  * Wait for every named subscription to be caught up past the appended
@@ -90,23 +86,23 @@ export async function waitForProjection(
   subscriptions: SubscriptionRef[],
   opts: WaitForProjectionOptions = {},
 ): Promise<void> {
-  const rows = Array.isArray(appended) ? appended : [appended];
-  if (rows.length === 0) return;
-  if (subscriptions.length === 0) return;
+  const rows = Array.isArray(appended) ? appended : [appended]
+  if (rows.length === 0) return
+  if (subscriptions.length === 0) return
 
   // CON-B: cross-stream guard. Reject per-stream refs that don't
   // match any appended stream BEFORE the polling loop. Throwing
   // synchronously (no preceding await) means the caller sees the
   // error immediately, not after `pollInterval` ms.
-  const appendedStreams = new Set<string>();
-  for (const r of rows) appendedStreams.add(r.stream_uuid);
+  const appendedStreams = new Set<string>()
+  for (const r of rows) appendedStreams.add(r.stream_uuid)
   for (const sub of subscriptions) {
-    if (sub.stream === "$all") continue;
+    if (sub.stream === '$all') continue
     if (!appendedStreams.has(sub.stream)) {
       throw new ConsistencyTargetError(
         `waitForProjection: per-stream subscription target ` +
           `"${sub.stream}::${sub.name}" cannot wait on an append to ` +
-          `[${[...appendedStreams].join(", ")}]. ` +
+          `[${[...appendedStreams].join(', ')}]. ` +
           `A per-stream subscription on stream X can only wait on ` +
           `appends to stream X. Use { stream: "$all", name } if the ` +
           `subscription is cross-stream.`,
@@ -115,52 +111,45 @@ export async function waitForProjection(
           subscriptionName: sub.name,
           appendedStreams: [...appendedStreams],
         },
-      );
+      )
     }
   }
 
-  const pollInterval = opts.pollInterval ?? DEFAULT_WAIT_POLL_INTERVAL_MS;
-  const timeout = opts.timeout ?? DEFAULT_WAIT_TIMEOUT_MS;
+  const pollInterval = opts.pollInterval ?? DEFAULT_WAIT_POLL_INTERVAL_MS
+  const timeout = opts.timeout ?? DEFAULT_WAIT_TIMEOUT_MS
 
   const target = rows.reduce(
     (m, r) => (r.event_number > m ? r.event_number : m),
     rows[0].event_number,
-  );
+  )
 
-  const deadline = Date.now() + timeout;
-  const remaining = new Map<string, SubscriptionRef>();
+  const deadline = Date.now() + timeout
+  const remaining = new Map<string, SubscriptionRef>()
   for (const s of subscriptions) {
-    remaining.set(refKey(s), s);
+    remaining.set(refKey(s), s)
   }
 
   while (remaining.size > 0) {
     for (const [k, sub] of [...remaining]) {
-      let caughtUp = false;
+      let caughtUp = false
       try {
-        caughtUp = await client.isSubscriptionCaughtUp(
-          sub.stream,
-          sub.name,
-          target,
-        );
+        caughtUp = await client.isSubscriptionCaughtUp(sub.stream, sub.name, target)
       } catch (err) {
         // A subscription that doesn't exist yet (no routing worker
         // has created it) is "not caught up"; keep polling until it
         // does, or the timeout fires. Other contract errors surface
         // immediately.
-        if (
-          err instanceof InstructedError &&
-          (err as { code?: string }).code === "IS020"
-        ) {
-          caughtUp = false;
+        if (err instanceof InstructedError && (err as { code?: string }).code === 'IS020') {
+          caughtUp = false
         } else {
-          throw err;
+          throw err
         }
       }
-      if (caughtUp) remaining.delete(k);
+      if (caughtUp) remaining.delete(k)
     }
-    if (remaining.size === 0) return;
+    if (remaining.size === 0) return
 
-    const now = Date.now();
+    const now = Date.now()
     if (now >= deadline) {
       throw new ConsistencyTimeout(
         `waitForProjection: timed out after ${timeout}ms waiting for ${remaining.size} subscription(s)`,
@@ -168,13 +157,13 @@ export async function waitForProjection(
           waitedMs: timeout,
           missing: [...remaining.values()].map(refKey),
         },
-      );
+      )
     }
-    const sleepMs = Math.min(pollInterval, deadline - now);
-    await sleep(sleepMs);
+    const sleepMs = Math.min(pollInterval, deadline - now)
+    await sleep(sleepMs)
   }
 }
 
 function refKey(s: SubscriptionRef): string {
-  return `${s.stream}::${s.name}`;
+  return `${s.stream}::${s.name}`
 }

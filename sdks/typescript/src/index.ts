@@ -30,7 +30,7 @@
 // surface.
 // ----------------------------------------------------------------------------
 
-export * from "./core.ts";
+export * from './core.ts'
 
 // ----------------------------------------------------------------------------
 // L3 \u2014 conveniences
@@ -48,20 +48,20 @@ export {
   routingFnForPartitionBy,
   SEQUENTIAL_PARTITION_KEY,
   type PartitionBy,
-} from "./facade/index.ts";
+} from './facade/index.ts'
 
 // L3 routing-function combinators (composable wrappers over the L2
 // `RoutingFn`). `onlyTypes` is the type-set filter every projection
 // and PM seems to want; further combinators get added here if a
 // concrete use case demands them.
-export { onlyTypes } from "./facade/index.ts";
+export { onlyTypes } from './facade/index.ts'
 
 // `runCommandWithSnapshots`: L3 orchestrator that wraps the L2
 // `runCommandAndApply` primitive with best-effort snapshot writes
 // per `def.snapshotPolicy`. The `Instructed` facade and the PM
 // worker both delegate to this; direct callers who want snapshot
 // orchestration without the facade also use this entry.
-export { runCommandWithSnapshots } from "./aggregate/index.ts";
+export { runCommandWithSnapshots } from './aggregate/index.ts'
 
 // PM worker wrapper (L3): thin convenience over `startPmSubstrate`
 // (L2, exported from `instructed-sdk/core`) that interprets a
@@ -79,17 +79,13 @@ export {
   type PmWorkerOptions,
   type DispatchedCommand,
   type DispatchedCommandExplicit,
-} from "./workers/pm/index.ts";
+} from './workers/pm/index.ts'
 
 // Command router (L3). Resolves `Command`s to
 // `(aggregateType, aggregateId)`; consumed by `Instructed.dispatch`'s
 // lean overload and by `startPmWorker` for the lean
 // `DispatchedCommand` shape.
-export {
-  commandRouter,
-  type CommandRouter,
-  type CommandRoute,
-} from "./facade/index.ts";
+export { commandRouter, type CommandRouter, type CommandRoute } from './facade/index.ts'
 
 // Retry/error-policy standard library (L3). The contract
 // (`ErrorPolicy<PolicyState>`) and the observable default
@@ -103,7 +99,7 @@ export {
   retryUpTo,
   type ExponentialBackoffOptions,
   type LinearBackoffOptions,
-} from "./workers/processing/index.ts";
+} from './workers/processing/index.ts'
 
 // Consistency-on-dispatch wait (polls the L1 `is_subscription_caught_up`
 // predicate). ML-0002 may eventually rework the mechanism into
@@ -115,14 +111,10 @@ export {
   DEFAULT_WAIT_TIMEOUT_MS,
   type SubscriptionRef,
   type WaitForProjectionOptions,
-} from "./consistency/index.ts";
+} from './consistency/index.ts'
 
 // L3 error classes (emitted only by the facade / consistency helpers).
-export {
-  ConsistencyTimeout,
-  ConsistencyTargetError,
-  UnknownAggregateType,
-} from "./errors/index.ts";
+export { ConsistencyTimeout, ConsistencyTargetError, UnknownAggregateType } from './errors/index.ts'
 
 // The `Instructed` facade: by-name aggregate dispatch, projection / PM
 // registration, single `startWorker()`, single `close()`.
@@ -136,7 +128,7 @@ export {
   type ProjectionDefinition,
   type ProcessManagerDefinition,
   type DispatchOptions,
-} from "./facade/index.ts";
+} from './facade/index.ts'
 
 // Pluggable logger surface (TODO #16).
 export {
@@ -145,4 +137,4 @@ export {
   NOOP_LOGGER_IMPL,
   type ILoggerImpl,
   type LogMessage,
-} from "./logger/index.ts";
+} from './logger/index.ts'

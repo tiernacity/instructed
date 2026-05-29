@@ -17,8 +17,8 @@
  * idiomatic TS convenience.
  */
 
-import type { RoutingFn } from "../workers/routing/index.ts";
-import type { Event } from "../types/index.ts";
+import type { Event } from '../types/index.ts'
+import type { RoutingFn } from '../workers/routing/index.ts'
 
 /**
  * Filter a `RoutingFn` to a fixed set of event types. Events whose
@@ -42,10 +42,9 @@ import type { Event } from "../types/index.ts";
  *     );
  */
 export function onlyTypes<E extends Event>(
-  types: ReadonlyArray<E["type"]>,
+  types: ReadonlyArray<E['type']>,
   inner: RoutingFn<E>,
 ): RoutingFn<E> {
-  const allowed: ReadonlySet<E["type"]> = new Set(types);
-  return (event) =>
-    allowed.has(event.type as E["type"]) ? inner(event) : "ignore";
+  const allowed: ReadonlySet<E['type']> = new Set(types)
+  return (event) => (allowed.has(event.type as E['type']) ? inner(event) : 'ignore')
 }

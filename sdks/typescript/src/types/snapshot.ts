@@ -3,19 +3,19 @@
 
 /** Input to `record_snapshot`. */
 export interface SnapshotInput<S = unknown> {
-  sourceUuid: string;
-  sourceType: string;
-  sourceVersion: bigint;
-  data: S;
-  metadata?: unknown;
+  sourceUuid: string
+  sourceType: string
+  sourceVersion: bigint
+  data: S
+  metadata?: unknown
 }
 
 /** A snapshot row as returned by `read_snapshot`. */
 export interface Snapshot<S = unknown> {
-  sourceUuid: string;
-  sourceType: string;
-  sourceVersion: bigint;
-  data: S;
-  metadata: unknown;
-  createdAt: Date;
+  sourceUuid: string
+  sourceType: string
+  sourceVersion: bigint
+  data: S
+  metadata: unknown
+  createdAt: Date
 }

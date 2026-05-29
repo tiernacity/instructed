@@ -30,7 +30,7 @@
  * The layer split is wired in `src/core.ts` and `src/index.ts`.
  */
 
-export { InstructedError, InvalidParameterValue } from "./base.ts";
+export { InstructedError, InvalidParameterValue } from './base.ts'
 export {
   AppendError,
   WrongExpectedVersion,
@@ -39,20 +39,20 @@ export {
   DuplicateEvent,
   ReservedStreamUuid,
   AppendOnlyViolation,
-} from "./append.ts";
-export { SnapshotNotFound } from "./snapshot.ts";
+} from './append.ts'
+export { SnapshotNotFound } from './snapshot.ts'
 export {
   SubscriptionError,
   SubscriptionNotFound,
   SubscriptionAlreadyClaimed,
   SubscriptionLeaseLost,
-} from "./subscription.ts";
-export { WorkItemLeaseLost } from "./work-item.ts";
+} from './subscription.ts'
+export { WorkItemLeaseLost } from './work-item.ts'
 export {
   RetryBudgetExhausted,
   ConsistencyTimeout,
   ConsistencyTargetError,
   UnknownAggregateType,
-} from "./sdk.ts";
-export { mapPgError } from "./map-pg-error.ts";
-export type { MapPgErrorContext } from "./map-pg-error.ts";
+} from './sdk.ts'
+export { mapPgError } from './map-pg-error.ts'
+export type { MapPgErrorContext } from './map-pg-error.ts'

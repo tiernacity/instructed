@@ -18,7 +18,7 @@
  * primitive.
  */
 export interface SnapshotPolicy<S> {
-  shouldSnapshot(state: S, version: bigint, eventsSinceLast: number): boolean;
+  shouldSnapshot(state: S, version: bigint, eventsSinceLast: number): boolean
 }
 
 /**
@@ -29,9 +29,9 @@ export interface SnapshotPolicy<S> {
  */
 export function everyN<S>(n: number): SnapshotPolicy<S> {
   if (!Number.isFinite(n) || n <= 0) {
-    throw new RangeError(`everyN: n must be a positive integer, got ${n}`);
+    throw new RangeError(`everyN: n must be a positive integer, got ${n}`)
   }
   return {
     shouldSnapshot: (_s, _v, eventsSinceLast) => eventsSinceLast >= n,
-  };
+  }
 }
