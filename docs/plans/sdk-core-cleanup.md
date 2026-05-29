@@ -176,7 +176,7 @@ fixups; public barrels (`index.ts`, `core.ts`) keep the same exported
 surface so nothing downstream changes. Validate with `npm run
 type-check` + `npm test`.
 
-- [ ] **B1 — `types.ts` → `types/`.**
+- [x] **B1 — `types.ts` → `types/`.**
 - [ ] **B2 — `errors.ts` → `errors/`.**
 - [ ] **B3 — `client.ts` → `client/`** (+ `row-mappers.ts`, `pack-event.ts`).
       **MUST also do A6 here** (row-mapper consolidation): in the same
@@ -481,3 +481,21 @@ revert was for risk/context management, not because it was broken.
     (see note below) — performance-safe but modest centralisation
     value (covers read_all + list_pm_rebuild_events, NOT read_stream,
     which is keyed/projected differently). Left deferred.
+- 2026-05-29 — **B1** (`types.ts` → `types/`). Commit `dbc154b`.
+  Split the 260-line flat `types.ts` into seven files under `types/`
+  (`queryable`, `event`, `command`, `expected-version`, `snapshot`,
+  `subscription`, `work-item`) + a barrel `index.ts` that is nothing
+  but re-exports. 15 src importers + 3 test importers updated from
+  `./types.ts` to `./types/index.ts` (and `../` variants).
+  Surprises / notes:
+  * NodeNext + `allowImportingTsExtensions` means imports need the
+    explicit `./types/index.ts` path (no directory-import sugar), same
+    as the existing `internal/running-worker.ts` style.
+  * `JsonValue` has no obvious home in the plan's file list; parked it
+    in `queryable.ts` alongside `Queryable` as the two foundational
+    primitives.
+  * `expected` is the only runtime *value* export from types; verified
+    `core.ts` / `index.ts` runtime export sets are byte-identical
+    before/after (type-only exports covered by type-check).
+  * Gates: SDK 162/162 + type-check. (Conformance/SQL untouched by a
+    pure SDK move.)
