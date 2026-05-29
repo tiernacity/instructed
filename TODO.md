@@ -5,61 +5,6 @@ pick them up one at a time.
 
 ---
 
-## 2. SDK restructuring — core vs. idiomatic-convenience split
-
-**Why this exists.** Each SDK should have a small **core** that
-drives the SQL contract, plus
-one or more **convenience packages** that offer idiomatic APIs over that
-core. The split lets us be clear-eyed about what a new-language SDK port
-must reproduce (the core) vs. what can be idiomatic per language (the
-conveniences).
-
-**Core (every SDK must provide):**
-
-- Wrappers over the SQL procedures with SQLSTATE → typed-error translation.
-- The aggregate load-execute-append loop with OCC retry (the AGG-001..010
-  semantics; `runCommand` in the TS SDK).
-- A persistent-subscription worker loop with lease management and cursor
-  advance (the HND-* semantics; `startProjection` in the TS SDK). Under
-  [D-0025](docs/decisions.md#d-0025) the SDK's routing worker uses
-  per-batch claim/release rather than a long-lived lease + heartbeat;
-  processing workers still use a per-item lease + heartbeat.
-- Saga state persistence via the snapshot primitive.
-- A way to subscribe to the event stream.
-
-**Conveniences (each SDK may offer in whatever shape fits the language):**
-
-- Routing events to projectors / process managers / command handlers
-  (the TS SDK's `Instructed` facade with `registerAggregate` /
-  `registerProjection` / `registerProcessManager`).
-- Saga workflow conveniences — rollback / compensation / steps / tasks
-  on top of the PM primitive (currently we have none; D-0011 settled on
-  "compensation is just a command" but a convenience layer for the
-  common saga shapes is plausible).
-- PM `interested?` conveniences.
-- "Wait for strong consistency" on dispatch (currently the
-  `consistency: [...]` option on `Instructed.dispatch`; this is
-  convenience because `LISTEN/NOTIFY` may eventually change the
-  mechanism — see ML-0002).
-
-**What to do in the TS SDK.**
-
-- Decide whether to physically split into two packages
-  (`@instructed/core` + `@instructed/runtime` or similar) or keep one
-  package with documented sub-paths (`instructed-sdk/core` vs.
-  `instructed-sdk`).
-- Either way, get `src/index.ts` to re-export the core and the
-  conveniences separately so a port author can read just the core surface.
-- Update the SDK design doc (if one survives the tidy) to describe the
-  split.
-
-**Output.** A restructured TS SDK and a clear "porting checklist" for
-new-language SDKs. The checklist is what a Python/Go/Elixir port reads
-to know "what do I have to build to be a conforming SDK" — distinct
-from `tests/conformance/` which tests the *store*.
-
----
-
 ## 4. OCC enforcement in SQL — review the strength of what we enforce
 
 **Why this exists.** Conversation surfaced the question: optimistic
@@ -115,7 +60,9 @@ shape itself.
 - **Rust** — candidate if there's demand from systems-level
   workloads.
 
-**Depends on.** TODO #2 (SDK core vs. conveniences split). Each
+**Depends on.** The SDK core-vs-conveniences split (landed: the
+TypeScript SDK ships `instructed-sdk` and `instructed-sdk/core`, and
+`sdks/porting-checklist.md` is the porting surface). Each
 language SDK should implement the **core** in a shape idiomatic
 to its ecosystem; conveniences are optional and may differ per
 language. The core surface (procedure wrappers + aggregate loop
@@ -187,48 +134,6 @@ Postgres; does not depend on any application SDK.
 build instructions, and a short user guide. The tool should be
 able to do everything a production operator currently does by
 opening psql.
-
----
-
-## 8. Examples — reorganise by language and cross-language
-
-**Why this exists.** The current `examples/bank-account/` is
-TypeScript-only and lives flat at the top level. With more SDKs
-coming (TODO #6), we need an organising scheme.
-
-**What to do:**
-
-- **Re-shape to `examples/<language>/<example-name>/`.** Move
-  `examples/bank-account/` to `examples/typescript/bank-account/`.
-  Add equivalents for each new SDK as they land.
-- **Add cross-language / mixed-language examples** under
-  `examples/mixed/<scenario>/` for cases where two SDKs cooperate
-  through the same Postgres (typical workload: a TypeScript web
-  service dispatches commands; a Python worker runs a heavy
-  projection; a Go scheduler runs the process managers).
-- **Drop relative imports.** Currently `examples/bank-account/`
-  imports from `../../sdks/typescript/src/index.ts`. Move every
-  example to importing the SDK as a package
-  (`import { Instructed } from "instructed-sdk"`, or the
-  language-equivalent). This makes examples real consumer-style
-  references and removes the implicit tie to repo layout.
-- **Lean on docker where needed.** Mixed-language examples and
-  any example that needs multiple long-running processes should
-  ship a `docker-compose.yaml` of their own (or extend the
-  repo-root one), so running an example is one `docker compose
-  up`. The repo-root `docker-compose.yaml` stays as the test
-  database for the SDK and conformance suites.
-
-**Output.** Reorganised `examples/` tree, a top-level
-`examples/README.md` that indexes by scenario, and every example
-runnable with a documented one-liner. Each SDK's tests that
-currently import from `examples/` (e.g. `bank-account.test.ts`)
-move to using the SDK's own test fixtures and stop crossing the
-example boundary.
-
-**Depends on.** Publishing the SDK as a package (or at least
-workspace-linking it under a stable name) so examples can
-import without relative paths.
 
 ---
 
@@ -487,41 +392,3 @@ Item numbers are stable: closed items are removed from the body
 rather than renumbered, so existing in-tree references (e.g.
 `TODO #3a`, `TODO #10` in code comments and docs) keep their
 meaning. Gaps in the numbering are expected.
-
----
-
-## 16. Pluggable logger surface for the TypeScript SDK
-
-**Why this exists.** Surfaced during the TODO #2 SDK rework.
-The SDK currently uses `console.warn` directly for non-fatal
-observable events:
-
-  - Aggregate snapshot-write failure (L3
-    `aggregate-snapshots.ts`; D-0019 best-effort semantics).
-
-There is no pluggable logger interface, so applications can't
-route these to their own structured logger / aggregator / OTEL
-pipeline. The "best-effort" semantics are L2 / required-core;
-the "use `console.warn`" choice is TS-specific.
-
-**What to do.** Two shapes worth considering:
-
-  - **Minimal:** a `LoggerLike` interface with `warn` /
-    `info` / `error` methods, accepted via a top-level
-    SDK option (or per-worker option). Default = `console`.
-  - **Structured:** a single `onEvent` callback receiving
-    typed records (`{ kind: 'snapshot_write_failed',
-    streamUuid, error }` etc.). More work but better-typed.
-
-Today's single warn site is small; we can probably ship the
-minimal shape without much ceremony. Worth doing alongside
-TODO #7 (instructedctl observability) or whenever a concrete
-user complains.
-
-**Output.** A `LoggerLike`-style interface, a default that
-preserves today's `console.warn` behaviour, and the one
-existing warn site re-routed through it. Porting checklist
-notes that the choice of mechanism is idiomatic per language
-(a Python port might use `logging`, a Go port might use
-`slog`, etc.); the *observable events* are required-core.
-
