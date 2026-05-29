@@ -10,7 +10,12 @@
     "open-account": "node --conditions=development scripts/open-account.ts",
     "deposit": "node --conditions=development scripts/deposit.ts",
     "transfer": "node --conditions=development scripts/transfer.ts",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "format:check": "npx oxfmt --check .",
+    "format:fix": "npx oxfmt --write .",
+    "lint:check": "npx oxlint",
+    "lint:fix": "npx oxlint --fix",
+    "ci": "npm run format:check && npm run lint:check"
   },
   "dependencies": {
     "instructed-sdk": "file:../../../sdks/typescript",
@@ -19,6 +24,9 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
+    "oxfmt": "0.42.0",
+    "oxlint": "1.57.0",
+    "oxlint-tsgolint": "0.17.4",
     "typescript": "^5.9.3"
   },
   "engines": {

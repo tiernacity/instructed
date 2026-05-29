@@ -27,7 +27,12 @@
     "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
     "type-check": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 'test/*.test.ts'",
-    "test:watch": "node --test --test-concurrency=1 --watch 'test/*.test.ts'"
+    "test:watch": "node --test --test-concurrency=1 --watch 'test/*.test.ts'",
+    "format:check": "npx oxfmt --check .",
+    "format:fix": "npx oxfmt --write .",
+    "lint:check": "npx oxlint",
+    "lint:fix": "npx oxlint --fix",
+    "ci": "npm run format:check && npm run lint:check && npm run test"
   },
   "keywords": [
     "instructed",
@@ -43,6 +48,9 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
+    "oxfmt": "0.42.0",
+    "oxlint": "1.57.0",
+    "oxlint-tsgolint": "0.17.4",
     "pg": "^8.13.0",
     "typescript": "^5.9.3"
   },
