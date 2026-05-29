@@ -154,7 +154,7 @@ is final). Each slice ends green.
       + docs. Scripted transform; mind the terminator-semicolon and
       `claimSubscription` opts gotchas (§5). Largest single slice —
       keep it to *just* `shard`.
-- [ ] **A5 — (optional) SQL helper extraction.** `_require_subscription`
+- [~] **A5 — (optional) SQL helper extraction.** `_require_subscription`
       existence check first (cleanly uniform), then consider the
       recorded-event SELECT as a view and a shared snapshot-upsert.
       Pure refactor; conformance is SQLSTATE-checked so messages may
@@ -433,3 +433,27 @@ revert was for risk/context management, not because it was broken.
   * Gates: SQL installs clean (0 errors); SDK 162/162 + type-check;
     conformance 148/148 + type-check; coverage covered 66 /
     MISSING 0; soak type-check.
+- 2026-05-29 — **A5 (partial)** (SQL helper extraction — the
+  `_require_subscription` existence guard). Atomic, commit `adaebaf`.
+  Extracted the IS020 "no such subscription" check (repeated verbatim
+  across the seven work-item procedures: `claim_work_item`,
+  `complete_work_item_projection`, `complete_work_item_pm`,
+  `complete_pm_instance`, `fail_work_item`, `extend_work_item_claim`,
+  `list_pm_rebuild_events`) into an internal
+  `instructed._require_subscription(p_stream_id, p_subscription_name,
+  p_stream_uuid, p_proc)`. Each site collapses from a 10-line
+  `if not exists (…) raise … end if;` to a single `perform`. Added an
+  "Internal helpers" note to the header inventory.
+  Surprises / notes:
+  * Kept the calling-proc name in the raise message via `p_proc` so
+    operator-facing text is unchanged; the IS020 SQLSTATE (the
+    conformance-checked part) is identical, so no test churn at all —
+    pure SQL-internal refactor (no SDK/conformance/doc edits needed).
+  * `route_batch` is NOT among the seven: it surfaces IS020 via its
+    own `SELECT … FOR UPDATE` lease path, not the existence-only
+    guard. Left untouched.
+  * Still **open** under A5: the recorded-event projection SELECT as a
+    view, and a shared snapshot-upsert. Deferred (more invasive; low
+    appetite per the slice's own guidance).
+  * Gates: SQL installs clean (0 errors); SDK 162/162 + type-check;
+    conformance 148/148; coverage MISSING 0.
