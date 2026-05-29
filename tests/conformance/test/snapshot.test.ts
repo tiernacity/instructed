@@ -97,9 +97,9 @@ async function snapshotRowCount(): Promise<bigint> {
 // At-most-one + upsert (INV-SNAP-001, INV-SNAP-002, INV-SNAP-005)
 // =============================================================================
 
-describe('record_snapshot — at-most-one + wholesale upsert', () => {
+void describe('record_snapshot — at-most-one + wholesale upsert', () => {
   // INV-SNAP-001: at most one snapshot per source_uuid
-  test('a fresh source_uuid lands exactly one row', async () => {
+  void test('a fresh source_uuid lands exactly one row', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 5n, { balance: 100 })
     assert.equal(await snapshotRowCount(), 1n)
@@ -107,7 +107,7 @@ describe('record_snapshot — at-most-one + wholesale upsert', () => {
 
   // INV-SNAP-001 + INV-SNAP-005: re-recording does NOT create a second row
   //   (snapshots are not versioned history)
-  test('re-recording the same source_uuid keeps the row count at 1 (no history)', async () => {
+  void test('re-recording the same source_uuid keeps the row count at 1 (no history)', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 5n, { balance: 100 })
     await recordSnapshot(id, 'Account', 6n, { balance: 110 })
@@ -118,7 +118,7 @@ describe('record_snapshot — at-most-one + wholesale upsert', () => {
   // INV-SNAP-002: record_snapshot is a FULL-ROW upsert; every field is
   //   replaced wholesale, including source_type, source_version, data,
   //   metadata, AND created_at.
-  test('upsert replaces every field, including created_at', async () => {
+  void test('upsert replaces every field, including created_at', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 5n, { balance: 100 }, { v: 1 })
     const first = await readSnapshot(id)
@@ -149,7 +149,7 @@ describe('record_snapshot — at-most-one + wholesale upsert', () => {
   })
 
   // INV-SNAP-002: upsert from null metadata to a value, and back to null
-  test('upsert handles metadata transitions (null -> value -> null)', async () => {
+  void test('upsert handles metadata transitions (null -> value -> null)', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 1n, { x: 1 }, null)
     assert.equal((await readSnapshot(id)).metadata, null)
@@ -162,7 +162,7 @@ describe('record_snapshot — at-most-one + wholesale upsert', () => {
   })
 
   // INV-SNAP-001: different source_uuids are independent
-  test('distinct source_uuids land distinct rows', async () => {
+  void test('distinct source_uuids land distinct rows', async () => {
     const a = randomUUID()
     const b = randomUUID()
     await recordSnapshot(a, 'Account', 1n, { which: 'a' })
@@ -177,14 +177,14 @@ describe('record_snapshot — at-most-one + wholesale upsert', () => {
 // read_snapshot (INV-SNAP-003)
 // =============================================================================
 
-describe('read_snapshot — present and missing', () => {
+void describe('read_snapshot — present and missing', () => {
   // INV-SNAP-003: read of a missing source_uuid raises IS010 snapshot_not_found
-  test('reading a missing source_uuid raises IS010 snapshot_not_found', async () => {
+  void test('reading a missing source_uuid raises IS010 snapshot_not_found', async () => {
     await rejectsWithCode(() => readSnapshot(randomUUID()), 'IS010')
   })
 
   // INV-SNAP-002 + read: every field round-trips faithfully on read
-  test('read echoes every stored field verbatim', async () => {
+  void test('read echoes every stored field verbatim', async () => {
     const id = randomUUID()
     const data = { balance: 1234, holders: ['alice', 'bob'] }
     const meta = { snapshot_module_version: 3, tag: 'warm' }
@@ -203,10 +203,10 @@ describe('read_snapshot — present and missing', () => {
 // delete_snapshot (INV-SNAP-004)
 // =============================================================================
 
-describe('delete_snapshot — idempotent', () => {
+void describe('delete_snapshot — idempotent', () => {
   // INV-SNAP-004: deleting an existing snapshot removes it; subsequent
   //   read raises IS010.
-  test('delete removes the snapshot; subsequent read raises IS010', async () => {
+  void test('delete removes the snapshot; subsequent read raises IS010', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 1n, { x: 1 })
     await deleteSnapshot(id)
@@ -216,7 +216,7 @@ describe('delete_snapshot — idempotent', () => {
 
   // INV-SNAP-004: deleting a missing snapshot is a silent no-op
   //   (contrast delete_subscription, which raises IS020 per D-0009).
-  test('deleting a missing snapshot returns successfully (no IS010)', async () => {
+  void test('deleting a missing snapshot returns successfully (no IS010)', async () => {
     // Must not throw.
     await deleteSnapshot(randomUUID())
     // And the table is still empty.
@@ -225,7 +225,7 @@ describe('delete_snapshot — idempotent', () => {
 
   // INV-SNAP-004 (continued): the canonical record -> delete -> read
   //   sequence from the Commanded conformance suite
-  test('record -> delete -> read yields IS010 snapshot_not_found', async () => {
+  void test('record -> delete -> read yields IS010 snapshot_not_found', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 1n, { x: 1 })
     await deleteSnapshot(id)
@@ -233,7 +233,7 @@ describe('delete_snapshot — idempotent', () => {
   })
 
   // INV-SNAP-004: delete-then-delete (two deletes of the same key) is OK
-  test('double-delete is silent (idempotent twice)', async () => {
+  void test('double-delete is silent (idempotent twice)', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 1n, { x: 1 })
     await deleteSnapshot(id)
@@ -246,14 +246,14 @@ describe('delete_snapshot — idempotent', () => {
 // Advisory-only (INV-SNAP-006)
 // =============================================================================
 
-describe('snapshots are advisory (INV-SNAP-006)', () => {
+void describe('snapshots are advisory (INV-SNAP-006)', () => {
   // INV-SNAP-006: snapshots are NOT required for correct aggregate
   //   reconstruction; the event stream from version 0 is always the
   //   source of truth. The store enforces no relationship between
   //   `source_uuid` and any stream; recording a snapshot for a
   //   non-existent aggregate is permitted (it is the SDK's job to
   //   keep the two in sync; see AGG-001/003 in mapping.md).
-  test('a snapshot may be recorded for a source_uuid with no events / no stream', async () => {
+  void test('a snapshot may be recorded for a source_uuid with no events / no stream', async () => {
     const id = randomUUID()
     await recordSnapshot(id, 'Account', 99n, { balance: 0 })
     const got = await readSnapshot(id)
@@ -266,7 +266,7 @@ describe('snapshots are advisory (INV-SNAP-006)', () => {
   // INV-SNAP-006: the store does not validate snapshot.source_version
   //   against any stream's current version. The SDK is responsible for
   //   that check on read; the contract here is "stores what it is given".
-  test('snapshot source_version is not validated against any stream', async () => {
+  void test('snapshot source_version is not validated against any stream', async () => {
     const id = randomUUID()
     // Record a snapshot at version 1_000_000 with no underlying events.
     await recordSnapshot(id, 'Account', 1_000_000n, { wild: true })

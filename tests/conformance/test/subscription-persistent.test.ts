@@ -174,9 +174,9 @@ async function seedStream(n: number): Promise<string> {
 // Identity and idempotent re-subscribe (INV-SUB-P-001, 002)
 // =============================================================================
 
-describe('subscriptions — identity and re-subscribe', () => {
+void describe('subscriptions — identity and re-subscribe', () => {
   // INV-SUB-P-001: identity is (stream_uuid, subscription_name)
-  test('first claim on a fresh (stream, name) creates the row and returns last_seen = 0', async () => {
+  void test('first claim on a fresh (stream, name) creates the row and returns last_seen = 0', async () => {
     const s = await seedStream(3)
     const r = await claim(s, 'handler-a', 'worker-1')
     assert.equal(r.result, 'claimed')
@@ -186,7 +186,7 @@ describe('subscriptions — identity and re-subscribe', () => {
   })
 
   // INV-SUB-P-002: re-claim by the same worker is idempotent — cursor preserved
-  test('re-claim by the same worker preserves last_seen and extends the lease', async () => {
+  void test('re-claim by the same worker preserves last_seen and extends the lease', async () => {
     const s = await seedStream(3)
     const first = await claim(s, 'handler-a', 'worker-1')
     // Advance the cursor so the second claim's last_seen is observably non-zero.
@@ -202,14 +202,14 @@ describe('subscriptions — identity and re-subscribe', () => {
   })
 
   // INV-SUB-P-001: subscription on '$all' is permitted (stream_id = 0)
-  test("a subscription on '$all' is permitted and starts at last_seen = 0", async () => {
+  void test("a subscription on '$all' is permitted and starts at last_seen = 0", async () => {
     const r = await claim('$all', 'all-handler', 'worker-1')
     assert.equal(r.result, 'claimed')
     assert.equal(r.last_seen, 0n)
   })
 
   // INV-SUB-P-001 (negative): the target stream must exist (and is not $all)
-  test('claim on a non-existent stream raises IS003 stream_not_found', async () => {
+  void test('claim on a non-existent stream raises IS003 stream_not_found', async () => {
     await rejectsWithCode(() => claim(randomUUID(), 'handler-a', 'worker-1'), 'IS003')
   })
 })
@@ -218,16 +218,16 @@ describe('subscriptions — identity and re-subscribe', () => {
 // start_from semantics (INV-SUB-P-020, 021)
 // =============================================================================
 
-describe('subscriptions — start_from on first vs subsequent claim', () => {
+void describe('subscriptions — start_from on first vs subsequent claim', () => {
   // INV-SUB-P-020: default start_from = 'origin' → last_seen = 0
-  test("default start_from is 'origin' (last_seen = 0)", async () => {
+  void test("default start_from is 'origin' (last_seen = 0)", async () => {
     const s = await seedStream(5)
     const r = await claim(s, 'h', 'w1')
     assert.equal(r.last_seen, 0n)
   })
 
   // INV-SUB-P-020: start_from = 'current' → last_seen = current head
-  test("start_from 'current' on '$all' starts at the current event_number head", async () => {
+  void test("start_from 'current' on '$all' starts at the current event_number head", async () => {
     await seedStream(3)
     await seedStream(2) // 5 events total
     const r = await claim('$all', 'h', 'w1', 30, { start_from: 'current' })
@@ -235,21 +235,21 @@ describe('subscriptions — start_from on first vs subsequent claim', () => {
   })
 
   // INV-SUB-P-020: start_from = 'current' on single stream → last_seen = its current version
-  test("start_from 'current' on a single stream starts at that stream's version", async () => {
+  void test("start_from 'current' on a single stream starts at that stream's version", async () => {
     const s = await seedStream(7)
     const r = await claim(s, 'h', 'w1', 30, { start_from: 'current' })
     assert.equal(r.last_seen, 7n)
   })
 
   // INV-SUB-P-020: start_from = N → last_seen = N
-  test('start_from integer N sets last_seen = N', async () => {
+  void test('start_from integer N sets last_seen = N', async () => {
     const s = await seedStream(10)
     const r = await claim(s, 'h', 'w1', 30, { start_from: '3' })
     assert.equal(r.last_seen, 3n)
   })
 
   // INV-SUB-P-021: start_from is IGNORED on subsequent claims
-  test('start_from is ignored on subsequent claims (cursor resumes from last_seen)', async () => {
+  void test('start_from is ignored on subsequent claims (cursor resumes from last_seen)', async () => {
     const s = await seedStream(10)
     await claim(s, 'h', 'w1', 30, { start_from: '0' })
     await advance(s, 'h', 'w1', 4n)
@@ -260,7 +260,7 @@ describe('subscriptions — start_from on first vs subsequent claim', () => {
   })
 
   // INV-SUB-P-020 (input validation): malformed start_from → 22023
-  test('malformed start_from raises 22023', async () => {
+  void test('malformed start_from raises 22023', async () => {
     const s = await seedStream(1)
     await rejectsWithCode(() => claim(s, 'h', 'w1', 30, { start_from: 'not-a-number' }), '22023')
   })
@@ -270,7 +270,7 @@ describe('subscriptions — start_from on first vs subsequent claim', () => {
 // Single-active-subscriber and failover (INV-SUB-P-010, 011, 012)
 // =============================================================================
 
-describe('subscriptions — single-active-subscriber and failover', () => {
+void describe('subscriptions — single-active-subscriber and failover', () => {
   // INV-SUB-P-010: only one live subscriber per (stream, name).
   //   In `instructed`'s lease model, a competing claim returns
   //   `result = 'already_claimed'` with the current holder reported
@@ -279,7 +279,7 @@ describe('subscriptions — single-active-subscriber and failover', () => {
   // INV-SUB-P-011 [reference-only mechanism]: Commanded uses
   //   pg_advisory_lock; `instructed` uses lease rows per D-0006.
   //   Both realise INV-SUB-P-010; only the mechanism differs.
-  test("a second claim on a live lease returns 'already_claimed' with the current holder", async () => {
+  void test("a second claim on a live lease returns 'already_claimed' with the current holder", async () => {
     const s = await seedStream(2)
     const first = await claim(s, 'h', 'worker-A')
     assert.equal(first.result, 'claimed')
@@ -292,7 +292,7 @@ describe('subscriptions — single-active-subscriber and failover', () => {
 
   // INV-SUB-P-012: when the holder disconnects, its slot becomes
   //   available without administrative action — realised by lease TTL.
-  test('after lease expiry, a different worker claims successfully', async () => {
+  void test('after lease expiry, a different worker claims successfully', async () => {
     const s = await seedStream(2)
     await claim(s, 'h', 'worker-A', 30)
     // Simulate worker-A disconnecting and its lease timing out:
@@ -304,7 +304,7 @@ describe('subscriptions — single-active-subscriber and failover', () => {
 
   // INV-SUB-P-010 (idempotence under same worker): re-claim by the
   //   current holder always succeeds (used as a heartbeat fallback).
-  test("re-claim by the current holder succeeds (no 'already_claimed' against self)", async () => {
+  void test("re-claim by the current holder succeeds (no 'already_claimed' against self)", async () => {
     const s = await seedStream(1)
     await claim(s, 'h', 'w1')
     const r = await claim(s, 'h', 'w1')
@@ -321,7 +321,7 @@ describe('subscriptions — single-active-subscriber and failover', () => {
   //   than fabricating values. Two dedicated client connections with
   //   explicit BEGIN pin the race: session 1 holds a SELECT FOR UPDATE
   //   on the subscriptions row across session 2's claim attempt.
-  test("contention race: 'already_claimed' carries NULL diagnostic fields when SKIP LOCKED finds zero rows", async () => {
+  void test("contention race: 'already_claimed' carries NULL diagnostic fields when SKIP LOCKED finds zero rows", async () => {
     const s = await seedStream(1)
     // Create the subscription row in the released state (claim then
     // release leaves claimed_by / claim_expires_at = NULL). This is
@@ -420,9 +420,9 @@ describe('subscriptions — single-active-subscriber and failover', () => {
 // Lifecycle — release / delete / position (INV-SUB-P-060, 061, 062)
 // =============================================================================
 
-describe('subscriptions — lifecycle', () => {
+void describe('subscriptions — lifecycle', () => {
   // INV-SUB-P-060: release detaches the holder but preserves the cursor
-  test('release_subscription clears the holder and preserves last_seen', async () => {
+  void test('release_subscription clears the holder and preserves last_seen', async () => {
     const s = await seedStream(5)
     await claim(s, 'h', 'w1')
     await advance(s, 'h', 'w1', 3n)
@@ -436,21 +436,21 @@ describe('subscriptions — lifecycle', () => {
   })
 
   // INV-SUB-P-060: release by a non-holder raises IS022.
-  test('release_subscription by a non-holder raises IS022', async () => {
+  void test('release_subscription by a non-holder raises IS022', async () => {
     const s = await seedStream(1)
     await claim(s, 'h', 'w1')
     await rejectsWithCode(() => release(s, 'h', 'w2'), 'IS022')
   })
 
   // INV-SUB-P-060: release on a missing subscription raises IS020.
-  test('release_subscription on a missing subscription raises IS020', async () => {
+  void test('release_subscription on a missing subscription raises IS020', async () => {
     const s = await seedStream(1)
     await rejectsWithCode(() => release(s, 'no-such', 'w1'), 'IS020')
   })
 
   // INV-SUB-P-061: delete removes the row entirely; subsequent claim
   //   behaves as a first-create (honours start_from).
-  test('delete_subscription removes the row; next claim treats it as fresh', async () => {
+  void test('delete_subscription removes the row; next claim treats it as fresh', async () => {
     const s = await seedStream(5)
     await claim(s, 'h', 'w1')
     await advance(s, 'h', 'w1', 3n)
@@ -465,13 +465,13 @@ describe('subscriptions — lifecycle', () => {
   // INV-SUB-P-062 / D-0009: delete on a missing subscription raises IS020.
   //   This is tighter than Commanded's reference adapter (which is
   //   silent); `instructed` follows the abstract contract.
-  test('delete_subscription on a missing subscription raises IS020 (D-0009)', async () => {
+  void test('delete_subscription on a missing subscription raises IS020 (D-0009)', async () => {
     const s = await seedStream(1)
     await rejectsWithCode(() => deleteSub(s, 'no-such'), 'IS020')
   })
 
   // INV-SUB-P-062: delete on a stream that doesn't even exist → IS020.
-  test('delete_subscription on a non-existent stream raises IS020', async () => {
+  void test('delete_subscription on a non-existent stream raises IS020', async () => {
     await rejectsWithCode(() => deleteSub(randomUUID(), 'h'), 'IS020')
   })
 
@@ -482,7 +482,7 @@ describe('subscriptions — lifecycle', () => {
   //   non-holder-fails case into the single end-to-end sequence the
   //   invariant's wording promises, with *no* administrative action
   //   in between.
-  test("after lease expiry + takeover, the original holder's next op raises IS022", async () => {
+  void test("after lease expiry + takeover, the original holder's next op raises IS022", async () => {
     const s = await seedStream(2)
     const w1 = await claim(s, 'h', 'worker-A', 30)
     assert.equal(w1.result, 'claimed')

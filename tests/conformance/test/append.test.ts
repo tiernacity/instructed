@@ -118,12 +118,12 @@ async function allRowCount(): Promise<bigint> {
 // Identity, ordering, atomicity (INV-APPEND-001..007)
 // =============================================================================
 
-describe('append_to_stream — identity, ordering, atomicity', () => {
+void describe('append_to_stream — identity, ordering, atomicity', () => {
   // INV-APPEND-001: every appended event has a unique event_id (echoed from caller)
   // INV-APPEND-002: first event in a stream is stream_version 1
   // INV-APPEND-003: first event in the store is event_number 1
   // INV-APPEND-005: created_at is a UTC timestamp set at append time
-  test('single-event append returns sv=1, en=1, valid created_at, echoes event_id', async () => {
+  void test('single-event append returns sv=1, en=1, valid created_at, echoes event_id', async () => {
     const s = randomUUID()
     const id = randomUUID()
     const before = Date.now()
@@ -152,7 +152,7 @@ describe('append_to_stream — identity, ordering, atomicity', () => {
   // INV-APPEND-002: contiguous per-stream stream_version starting at 1
   // INV-APPEND-003: contiguous globally-gapless event_number
   // INV-APPEND-004: contiguity within a single multi-event append
-  test('multi-event append assigns contiguous stream_version and event_number', async () => {
+  void test('multi-event append assigns contiguous stream_version and event_number', async () => {
     const s = randomUUID()
     const rows = await append(s, 'no_stream', null, [
       { event_type: 'A' },
@@ -172,7 +172,7 @@ describe('append_to_stream — identity, ordering, atomicity', () => {
   })
 
   // INV-APPEND-003: event_number is gapless across multiple streams
-  test('event_number is globally gapless across interleaved appends to different streams', async () => {
+  void test('event_number is globally gapless across interleaved appends to different streams', async () => {
     const a = randomUUID()
     const b = randomUUID()
     const r1 = await append(a, 'no_stream', null, [{ event_type: 'A1' }])
@@ -190,7 +190,7 @@ describe('append_to_stream — identity, ordering, atomicity', () => {
   })
 
   // INV-APPEND-005: created_at non-decreasing modulo clock skew
-  test('created_at is non-decreasing across appends', async () => {
+  void test('created_at is non-decreasing across appends', async () => {
     const s = randomUUID()
     const a = await append(s, 'no_stream', null, [{ event_type: 'A' }])
     const b = await append(s, 'any', null, [{ event_type: 'B' }])
@@ -202,7 +202,7 @@ describe('append_to_stream — identity, ordering, atomicity', () => {
 
   // INV-APPEND-006: atomicity — either all N persisted, or none
   // INV-APPEND-007: atomicity boundary includes the per-stream + global bumps
-  test('a failing multi-event append leaves no trace (stream version, $all version, events all untouched)', async () => {
+  void test('a failing multi-event append leaves no trace (stream version, $all version, events all untouched)', async () => {
     const s = randomUUID()
     // Seed: stream at version 1
     await append(s, 'no_stream', null, [{ event_type: 'Seed' }])
@@ -250,9 +250,9 @@ describe('append_to_stream — identity, ordering, atomicity', () => {
 // Expected-version semantics (INV-APPEND-010..014)
 // =============================================================================
 
-describe('append_to_stream — expected_version', () => {
+void describe('append_to_stream — expected_version', () => {
   // INV-APPEND-010: :any creates the stream when missing
-  test("'any' creates the stream when missing", async () => {
+  void test("'any' creates the stream when missing", async () => {
     const s = randomUUID()
     const rows = await append(s, 'any', null, [{ event_type: 'A' }])
     assert.equal(rows[0].stream_version, 1n)
@@ -260,7 +260,7 @@ describe('append_to_stream — expected_version', () => {
   })
 
   // INV-APPEND-010: :any extends an existing stream
-  test("'any' extends an existing stream", async () => {
+  void test("'any' extends an existing stream", async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     const rows = await append(s, 'any', null, [{ event_type: 'B' }, { event_type: 'C' }])
@@ -271,19 +271,19 @@ describe('append_to_stream — expected_version', () => {
   })
 
   // INV-APPEND-011: :no_stream succeeds only if the stream does not exist
-  test("'no_stream' on existing stream raises IS002 stream_exists", async () => {
+  void test("'no_stream' on existing stream raises IS002 stream_exists", async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     await rejectsWithCode(() => append(s, 'no_stream', null, [{ event_type: 'B' }]), 'IS002')
   })
 
   // INV-APPEND-012: :stream_exists succeeds only if the stream already exists
-  test("'stream_exists' on missing stream raises IS003 stream_not_found", async () => {
+  void test("'stream_exists' on missing stream raises IS003 stream_not_found", async () => {
     const s = randomUUID()
     await rejectsWithCode(() => append(s, 'stream_exists', null, [{ event_type: 'A' }]), 'IS003')
   })
 
-  test("'stream_exists' on present stream appends and bumps version", async () => {
+  void test("'stream_exists' on present stream appends and bumps version", async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     const rows = await append(s, 'stream_exists', null, [{ event_type: 'B' }])
@@ -291,7 +291,7 @@ describe('append_to_stream — expected_version', () => {
   })
 
   // INV-APPEND-013: exact V succeeds only if current_version == V at append
-  test("'exact' V matching current version appends", async () => {
+  void test("'exact' V matching current version appends", async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     const rows = await append(s, 'exact', 1n, [{ event_type: 'B' }])
@@ -299,14 +299,14 @@ describe('append_to_stream — expected_version', () => {
   })
 
   // INV-APPEND-013: exact V mismatched current version raises IS001
-  test("'exact' V mismatched raises IS001 wrong_expected_version", async () => {
+  void test("'exact' V mismatched raises IS001 wrong_expected_version", async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     await rejectsWithCode(() => append(s, 'exact', 99n, [{ event_type: 'B' }]), 'IS001')
   })
 
   // INV-APPEND-014: V=0 against a non-existent stream MUST succeed (creates it)
-  test("'exact' V=0 on missing stream creates it", async () => {
+  void test("'exact' V=0 on missing stream creates it", async () => {
     const s = randomUUID()
     const rows = await append(s, 'exact', 0n, [{ event_type: 'A' }])
     assert.equal(rows[0].stream_version, 1n)
@@ -314,12 +314,12 @@ describe('append_to_stream — expected_version', () => {
   })
 
   // INV-APPEND-014: V>0 against a non-existent stream MUST fail with IS001
-  test("'exact' V>0 on missing stream raises IS001", async () => {
+  void test("'exact' V>0 on missing stream raises IS001", async () => {
     await rejectsWithCode(() => append(randomUUID(), 'exact', 1n, [{ event_type: 'A' }]), 'IS001')
   })
 
   // INV-APPEND-014: V=0 against an existing stream at version != 0 raises IS001
-  test("'exact' V=0 against a non-empty stream raises IS001", async () => {
+  void test("'exact' V=0 against a non-empty stream raises IS001", async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     await rejectsWithCode(() => append(s, 'exact', 0n, [{ event_type: 'B' }]), 'IS001')
@@ -330,11 +330,11 @@ describe('append_to_stream — expected_version', () => {
 // Concurrency (INV-APPEND-020..022)
 // =============================================================================
 
-describe('append_to_stream — concurrency', () => {
+void describe('append_to_stream — concurrency', () => {
   // INV-APPEND-020: under concurrent 'exact' V appends, at most one succeeds
   // INV-APPEND-022 [reference-only]: realised by the (stream_id, stream_version)
   //   unique constraint — surfaces here as one IS001 reject.
-  test("two concurrent 'exact' V=0 on the same stream: exactly one wins, the other gets IS001", async () => {
+  void test("two concurrent 'exact' V=0 on the same stream: exactly one wins, the other gets IS001", async () => {
     const s = randomUUID()
     // Pre-create the stream at version 0 so both attempts see the same
     // expected_version path (the create-on-V=0 branch is a separate INV-014
@@ -373,7 +373,7 @@ describe('append_to_stream — concurrency', () => {
   // FOR UPDATE, forcing both into the INSERT path. Without the SQL
   // fix, session 2's INSERT raises raw SQLSTATE 23505
   // (streams_stream_uuid_key); with the fix it is translated to IS001.
-  test('deterministic streams_stream_uuid_key race: loser gets IS001, not raw 23505', async () => {
+  void test('deterministic streams_stream_uuid_key race: loser gets IS001, not raw 23505', async () => {
     const { Client } = await import('pg')
     const conn = {
       host: process.env.PGHOST ?? '127.0.0.1',
@@ -437,7 +437,7 @@ describe('append_to_stream — concurrency', () => {
 
   // INV-APPEND-021: concurrent 'any' to different streams: all succeed,
   //   and the global event_number sequence stays gapless (D-0012).
-  test("concurrent 'any' to different streams: all succeed, $all is gapless 1..N", async () => {
+  void test("concurrent 'any' to different streams: all succeed, $all is gapless 1..N", async () => {
     const streams = Array.from({ length: 5 }, () => randomUUID())
     const eventsPerStream = 4
     const total = streams.length * eventsPerStream
@@ -478,10 +478,10 @@ describe('append_to_stream — concurrency', () => {
 // Duplicate event_id (INV-APPEND-030)
 // =============================================================================
 
-describe('append_to_stream — duplicate event_id', () => {
+void describe('append_to_stream — duplicate event_id', () => {
   // INV-APPEND-030: re-appending an event_id MUST NOT silently succeed and
   //   MUST NOT duplicate. In `instructed` this is IS004 duplicate_event.
-  test('re-appending an existing event_id raises IS004 duplicate_event', async () => {
+  void test('re-appending an existing event_id raises IS004 duplicate_event', async () => {
     const s = randomUUID()
     const id = randomUUID()
     await append(s, 'no_stream', null, [{ event_id: id, event_type: 'A' }])
@@ -492,7 +492,7 @@ describe('append_to_stream — duplicate event_id', () => {
   })
 
   // INV-APPEND-030: duplicate event_id within a single batch also fails
-  test('duplicate event_id within a single batch raises IS004', async () => {
+  void test('duplicate event_id within a single batch raises IS004', async () => {
     const s = randomUUID()
     const id = randomUUID()
     await rejectsWithCode(
@@ -513,13 +513,13 @@ describe('append_to_stream — duplicate event_id', () => {
 // Immutability (INV-APPEND-040) and hard-delete (INV-APPEND-041)
 // =============================================================================
 
-describe('append_to_stream — immutability', () => {
+void describe('append_to_stream — immutability', () => {
   // INV-APPEND-040: persisted events MUST NOT be modified by any later op.
   //   Enforced by the events_no_update / stream_events_no_update triggers;
   //   IS006 is raised on direct DDL/DML attempts. (IS006 is internal — not in
   //   the procedure-facing catalogue — but it IS the assertable post-condition
   //   for INV-APPEND-040.)
-  test('direct UPDATE on instructed.events raises IS006', async () => {
+  void test('direct UPDATE on instructed.events raises IS006', async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     await rejectsWithCode(
@@ -529,7 +529,7 @@ describe('append_to_stream — immutability', () => {
   })
 
   // INV-APPEND-040: same for DELETE.
-  test('direct DELETE on instructed.events raises IS006', async () => {
+  void test('direct DELETE on instructed.events raises IS006', async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     await rejectsWithCode(
@@ -539,7 +539,7 @@ describe('append_to_stream — immutability', () => {
   })
 
   // INV-APPEND-040: stream_events is similarly immutable
-  test('direct UPDATE on instructed.stream_events raises IS006', async () => {
+  void test('direct UPDATE on instructed.stream_events raises IS006', async () => {
     const s = randomUUID()
     await append(s, 'no_stream', null, [{ event_type: 'A' }])
     await rejectsWithCode(
@@ -555,7 +555,7 @@ describe('append_to_stream — immutability', () => {
   //   *hard_delete* / *delete_event* / *truncate* exists in the
   //   instructed schema". This is a documentation-shape test more than
   //   a behaviour test, but it locks the absence in.
-  test('no hard-delete procedure exists in v1 (tighter than Commanded)', async () => {
+  void test('no hard-delete procedure exists in v1 (tighter than Commanded)', async () => {
     const r = await pool.query<{ proname: string }>(
       `SELECT proname
          FROM pg_proc p
@@ -579,12 +579,12 @@ describe('append_to_stream — immutability', () => {
 // Reserved stream uuid (INV-STREAM-003 — also surfaces from append_to_stream)
 // =============================================================================
 
-describe('append_to_stream — reserved stream uuid', () => {
+void describe('append_to_stream — reserved stream uuid', () => {
   // INV-STREAM-003 / NG-0011: '$all' is reserved; user appends must fail.
   //   The full INV-STREAM-* coverage lands in step 7/8; this case lives
   //   here because the reservation is enforced at the append_to_stream
   //   surface, not by an out-of-band check.
-  test("appending to '$all' raises IS005 reserved_stream_uuid", async () => {
+  void test("appending to '$all' raises IS005 reserved_stream_uuid", async () => {
     await rejectsWithCode(() => append('$all', 'any', null, [{ event_type: 'A' }]), 'IS005')
   })
 })

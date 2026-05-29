@@ -17,7 +17,7 @@ import type pg from 'pg'
 
 import { closePool, getPool, truncateAll } from './fixtures.ts'
 
-describe('conformance harness — smoke', () => {
+void describe('conformance harness — smoke', () => {
   let pool: pg.Pool
 
   before(async () => {
@@ -32,7 +32,7 @@ describe('conformance harness — smoke', () => {
     await closePool()
   })
 
-  test('schema is installed and the instructed schema exists', async () => {
+  void test('schema is installed and the instructed schema exists', async () => {
     const r = await pool.query<{ exists: boolean }>(
       `SELECT EXISTS(
          SELECT 1 FROM information_schema.schemata
@@ -42,7 +42,7 @@ describe('conformance harness — smoke', () => {
     assert.equal(r.rows[0].exists, true)
   })
 
-  test('$all stream is seeded with stream_id = 0 and version = 0', async () => {
+  void test('$all stream is seeded with stream_id = 0 and version = 0', async () => {
     const r = await pool.query<{
       stream_id: string
       stream_uuid: string
@@ -58,7 +58,7 @@ describe('conformance harness — smoke', () => {
     assert.equal(r.rows[0].stream_version, '0')
   })
 
-  test('every documented procedure is callable (signature smoke)', async () => {
+  void test('every documented procedure is callable (signature smoke)', async () => {
     // Per docs/sql-contract.md the closed procedure catalogue is the
     // following. We don't invoke them with valid arguments here —
     // each gets its own INV-* coverage in steps 2-7. We only assert

@@ -136,10 +136,10 @@ async function readAllRows(): Promise<ReadRow[]> {
 // Causation and correlation (INV-META-001)
 // =============================================================================
 
-describe('metadata — causation and correlation', () => {
+void describe('metadata — causation and correlation', () => {
   // INV-META-001: causation_id / correlation_id, when set on input, MUST be
   //   persisted and echoed on the corresponding RecordedEvent.
-  test('causation_id and correlation_id round-trip via read_stream', async () => {
+  void test('causation_id and correlation_id round-trip via read_stream', async () => {
     const s = randomUUID()
     const causation = randomUUID()
     const correlation = randomUUID()
@@ -154,7 +154,7 @@ describe('metadata — causation and correlation', () => {
   })
 
   // INV-META-001: same echo via read_all
-  test('causation_id and correlation_id round-trip via read_all', async () => {
+  void test('causation_id and correlation_id round-trip via read_all', async () => {
     const s = randomUUID()
     const causation = randomUUID()
     const correlation = randomUUID()
@@ -171,7 +171,7 @@ describe('metadata — causation and correlation', () => {
 
   // INV-META-001: absent causation/correlation come back as null,
   //   not as an empty string or a defaulted UUID
-  test('absent causation_id / correlation_id come back as null', async () => {
+  void test('absent causation_id / correlation_id come back as null', async () => {
     const s = randomUUID()
     await appendOne(s, { event_type: 'A' })
     const got = await readFirst(s)
@@ -184,10 +184,10 @@ describe('metadata — causation and correlation', () => {
 // event_type and JSONB payloads (INV-META-010, INV-META-011)
 // =============================================================================
 
-describe('metadata — event_type and data/metadata payloads', () => {
+void describe('metadata — event_type and data/metadata payloads', () => {
   // INV-META-010: event_type is a string chosen by the caller and is
   //   opaque to the store. Try a few non-trivial shapes.
-  test('event_type round-trips verbatim for several unusual shapes', async () => {
+  void test('event_type round-trips verbatim for several unusual shapes', async () => {
     const cases = [
       'PascalCase',
       'snake_case_event',
@@ -205,7 +205,7 @@ describe('metadata — event_type and data/metadata payloads', () => {
   })
 
   // INV-META-011: data round-trips through JSONB faithfully
-  test('data payload round-trips through JSONB (nested, arrays, primitives)', async () => {
+  void test('data payload round-trips through JSONB (nested, arrays, primitives)', async () => {
     const s = randomUUID()
     const data = {
       balance: 1234,
@@ -221,7 +221,7 @@ describe('metadata — event_type and data/metadata payloads', () => {
   })
 
   // INV-META-011: metadata round-trips similarly
-  test('metadata payload round-trips through JSONB', async () => {
+  void test('metadata payload round-trips through JSONB', async () => {
     const s = randomUUID()
     const meta = { tracing_id: 'abc-123', attempts: 3, tags: ['a', 'b'] }
     await appendOne(s, { event_type: 'X', metadata: meta })
@@ -230,7 +230,7 @@ describe('metadata — event_type and data/metadata payloads', () => {
   })
 
   // INV-META-011: absent metadata comes back as null
-  test('absent metadata comes back as null', async () => {
+  void test('absent metadata comes back as null', async () => {
     const s = randomUUID()
     await appendOne(s, { event_type: 'X' })
     const got = await readFirst(s)
@@ -241,7 +241,7 @@ describe('metadata — event_type and data/metadata payloads', () => {
   //   the store treats it as opaque. (The procedure default-coalesces a
   //   missing 'data' key to JSON null; an explicit non-object value
   //   round-trips verbatim.)
-  test('data may be a JSON array or scalar (treated opaquely)', async () => {
+  void test('data may be a JSON array or scalar (treated opaquely)', async () => {
     const s1 = randomUUID()
     await appendOne(s1, { event_type: 'X', data: [1, 2, 3] })
     assert.deepEqual((await readFirst(s1)).data, [1, 2, 3])
@@ -260,11 +260,11 @@ describe('metadata — event_type and data/metadata payloads', () => {
 // Streams as a first-class concept (INV-STREAM-001, 002, 003)
 // =============================================================================
 
-describe('streams — first-class identity', () => {
+void describe('streams — first-class identity', () => {
   // INV-STREAM-001: stream_uuid is the stable external identity. Two
   //   distinct stream_uuids never share state; same stream_uuid is
   //   always the same stream.
-  test('two distinct stream_uuids carry independent events and versions', async () => {
+  void test('two distinct stream_uuids carry independent events and versions', async () => {
     const a = randomUUID()
     const b = randomUUID()
     await appendOne(a, { event_type: 'A1' })
@@ -290,7 +290,7 @@ describe('streams — first-class identity', () => {
   // INV-STREAM-001: re-appending under the same stream_uuid hits the
   //   same stream (no shadowing, no collision); per-stream versions
   //   stay contiguous.
-  test('the same stream_uuid resolves to the same stream across calls', async () => {
+  void test('the same stream_uuid resolves to the same stream across calls', async () => {
     const s = randomUUID()
     await appendOne(s, { event_type: 'A' })
     await appendOne(s, { event_type: 'B' })
@@ -309,7 +309,7 @@ describe('streams — first-class identity', () => {
   //   read_snapshot mention stream_id.
   //   The smoke test in step 1/8 already pinned the function names;
   //   this case pins the column-shape contract.
-  test('no procedure exposes internal stream_id in its return columns', async () => {
+  void test('no procedure exposes internal stream_id in its return columns', async () => {
     // We inspect pg_proc for the column shape of each "read" function
     // and assert none of them name 'stream_id'.
     const r = await pool.query<{ proname: string; argname: string }>(
@@ -337,7 +337,7 @@ describe('streams — first-class identity', () => {
   //   OR stream_id = 0) rejects user inserts of '$all' as a fresh
   //   stream. The procedure path raises IS005 first (see append.test.ts);
   //   the schema-level CHECK is the belt-and-braces enforcement.
-  test("a direct INSERT of a non-seed '$all' row is rejected by the CHECK constraint", async () => {
+  void test("a direct INSERT of a non-seed '$all' row is rejected by the CHECK constraint", async () => {
     // Postgres raises check_violation (23514) on the constraint named
     // streams_check (or similar — pg generates the name from the table
     // and column order). We assert on the SQLSTATE, not the constraint
@@ -355,7 +355,7 @@ describe('streams — first-class identity', () => {
   // INV-STREAM-003: read_stream on '$all' is rejected as a reserved name
   //   (IS005), not transparently routed to read_all. (Already covered
   //   in read.test.ts; pinned here for the cross-cutting matrix.)
-  test("read_stream against '$all' raises IS005", async () => {
+  void test("read_stream against '$all' raises IS005", async () => {
     await rejectsWithCode(
       () => pool.query(`SELECT * FROM instructed.read_stream('$all', 0, 100)`),
       'IS005',
@@ -367,7 +367,7 @@ describe('streams — first-class identity', () => {
 // Dropped invariants (INV-LINK-001, INV-DELETE-001)
 // =============================================================================
 
-describe('dropped invariants — no user-facing linking, no hard delete', () => {
+void describe('dropped invariants — no user-facing linking, no hard delete', () => {
   // INV-LINK-001: dropped — see mapping.md Pass 1 (NG-0009)
   //
   // Commanded's reference adapter supports linking an event_id into
@@ -375,7 +375,7 @@ describe('dropped invariants — no user-facing linking, no hard delete', () => 
   // exposed at the adapter contract. `instructed` does not expose any
   // such surface either. The omission shape: no procedure named
   // link_event / link_to_stream / similar exists in instructed.*.
-  test('INV-LINK-001 (dropped, NG-0009): no link-event procedure exists', async () => {
+  void test('INV-LINK-001 (dropped, NG-0009): no link-event procedure exists', async () => {
     const r = await pool.query<{ proname: string }>(
       `SELECT proname
          FROM pg_proc p
@@ -399,7 +399,7 @@ describe('dropped invariants — no user-facing linking, no hard delete', () => 
   // does not. Already covered as part of INV-APPEND-041 in
   // append.test.ts; pinned here for the cross-cutting INV-DELETE-001
   // identifier so the coverage matrix renders it as covered (dropped).
-  test('INV-DELETE-001 (dropped, NG-0008): no hard-delete procedure exists', async () => {
+  void test('INV-DELETE-001 (dropped, NG-0008): no hard-delete procedure exists', async () => {
     const r = await pool.query<{ proname: string }>(
       `SELECT proname
          FROM pg_proc p

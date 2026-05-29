@@ -17,7 +17,7 @@ import type pg from 'pg'
 
 import { closePool, getPool, truncateAll } from './fixtures.ts'
 
-describe('SUB-A slice 1 — subscription_work_items schema', () => {
+void describe('SUB-A slice 1 — subscription_work_items schema', () => {
   let pool: pg.Pool
 
   before(async () => {
@@ -32,7 +32,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     await closePool()
   })
 
-  test('table exists with the documented columns', async () => {
+  void test('table exists with the documented columns', async () => {
     const r = await pool.query<{
       column_name: string
       data_type: string
@@ -63,7 +63,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     assert.equal(byName.size, 9, `unexpected extra columns: ${[...byName.keys()].sort().join(',')}`)
   })
 
-  test('primary key is (stream_id, subscription_name, partition_key, event_number)', async () => {
+  void test('primary key is (stream_id, subscription_name, partition_key, event_number)', async () => {
     const r = await pool.query<{ attname: string; ord: number }>(
       `SELECT a.attname, k.n AS ord
          FROM pg_constraint c
@@ -82,7 +82,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     )
   })
 
-  test('FK on (stream_id, subscription_name) cascades from subscriptions', async () => {
+  void test('FK on (stream_id, subscription_name) cascades from subscriptions', async () => {
     const r = await pool.query<{
       confdeltype: string
       cols: string
@@ -104,7 +104,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     assert.equal(r.rows[0].confdeltype, 'c') // ON DELETE CASCADE
   })
 
-  test('partial claim-path index excludes done rows', async () => {
+  void test('partial claim-path index excludes done rows', async () => {
     const r = await pool.query<{ indexdef: string }>(
       `SELECT indexdef
          FROM pg_indexes
@@ -124,7 +124,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     assert.ok(!def.includes("'done'"), `index predicate should not mention done: ${def}`)
   })
 
-  test('state CHECK rejects unknown values', async () => {
+  void test('state CHECK rejects unknown values', async () => {
     // Seed a subscription row to satisfy the FK.
     await pool.query(
       `INSERT INTO instructed.subscriptions
@@ -145,7 +145,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
   //   enforced by CHECK constraints (claimed iff claimed_by and
   //   lease_expires_at; failed iff failed_at; error_text only on
   //   failed rows).
-  test('per-state column invariants are enforced by CHECK constraints', async () => {
+  void test('per-state column invariants are enforced by CHECK constraints', async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions
          (stream_id, subscription_name, last_seen)
@@ -223,7 +223,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     )
   })
 
-  test('FK cascade: deleting a subscription removes its work items', async () => {
+  void test('FK cascade: deleting a subscription removes its work items', async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions
          (stream_id, subscription_name, last_seen)
@@ -245,7 +245,7 @@ describe('SUB-A slice 1 — subscription_work_items schema', () => {
     assert.equal(r.rows[0].c, '0')
   })
 
-  test('primary key prevents duplicate (subscription, partition, event_number)', async () => {
+  void test('primary key prevents duplicate (subscription, partition, event_number)', async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions
          (stream_id, subscription_name, last_seen)

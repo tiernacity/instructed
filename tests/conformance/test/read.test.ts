@@ -104,16 +104,16 @@ async function readAll(fromEventNumber: bigint, qty: number): Promise<ReadRow[]>
 // read_stream — single-stream reads (INV-READ-001..004)
 // =============================================================================
 
-describe('read_stream — stream-not-found and basics', () => {
+void describe('read_stream — stream-not-found and basics', () => {
   // INV-READ-001: reading a never-appended-to stream MUST return IS003
-  test('reading a never-appended-to stream raises IS003 stream_not_found', async () => {
+  void test('reading a never-appended-to stream raises IS003 stream_not_found', async () => {
     await rejectsWithCode(() => readStream(randomUUID(), 0n, 100), 'IS003')
   })
 
   // INV-READ-001: the existence check is on the streams row, not on the
   //   presence of events. (Today there is no way to create a stream row
   //   without also appending; the test below pins the contract anyway.)
-  test('reading an empty page from a present stream returns zero rows, not IS003', async () => {
+  void test('reading an empty page from a present stream returns zero rows, not IS003', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }])
     // Read past the end: from_stream_version = 999 — empty page, no error.
@@ -123,7 +123,7 @@ describe('read_stream — stream-not-found and basics', () => {
 
   // INV-READ-002: events come back in strictly increasing stream_version order
   // INV-READ-008: event_number reflects global position (NOT per-stream)
-  test('returns events in strictly increasing stream_version order; event_number is global', async () => {
+  void test('returns events in strictly increasing stream_version order; event_number is global', async () => {
     const a = randomUUID()
     const b = randomUUID()
     await append(a, [{ event_type: 'A1' }])
@@ -148,7 +148,7 @@ describe('read_stream — stream-not-found and basics', () => {
   })
 
   // INV-READ-004: p_from_stream_version is INCLUSIVE
-  test('from_stream_version is inclusive (=N returns event at version N)', async () => {
+  void test('from_stream_version is inclusive (=N returns event at version N)', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }, { event_type: 'B' }, { event_type: 'C' }])
     const fromTwo = await readStream(s, 2n, 100)
@@ -163,7 +163,7 @@ describe('read_stream — stream-not-found and basics', () => {
   })
 
   // INV-READ-004: from_stream_version = 0 returns from the start
-  test('from_stream_version = 0 returns from the start of the stream', async () => {
+  void test('from_stream_version = 0 returns from the start of the stream', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }, { event_type: 'B' }])
     const rows = await readStream(s, 0n, 100)
@@ -174,7 +174,7 @@ describe('read_stream — stream-not-found and basics', () => {
   })
 
   // INV-READ-003: paged reads cover the full requested range
-  test('paged reads (small qty, loop until empty) cover every event >= start_version', async () => {
+  void test('paged reads (small qty, loop until empty) cover every event >= start_version', async () => {
     const s = randomUUID()
     const types = Array.from({ length: 10 }, (_, i) => `E${i + 1}`)
     await append(
@@ -202,7 +202,7 @@ describe('read_stream — stream-not-found and basics', () => {
   })
 
   // INV-READ-006: stream_uuid on each returned row echoes the requested stream
-  test('returned stream_uuid echoes the requested stream identity', async () => {
+  void test('returned stream_uuid echoes the requested stream identity', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }])
     const rows = await readStream(s, 0n, 100)
@@ -210,7 +210,7 @@ describe('read_stream — stream-not-found and basics', () => {
   })
 
   // INV-STREAM-003 / NG-0011: reads on '$all' must use read_all
-  test("read_stream against '$all' raises IS005 reserved_stream_uuid", async () => {
+  void test("read_stream against '$all' raises IS005 reserved_stream_uuid", async () => {
     await rejectsWithCode(() => readStream('$all', 0n, 100), 'IS005')
   })
 })
@@ -219,10 +219,10 @@ describe('read_stream — stream-not-found and basics', () => {
 // read_all — global reads (INV-READ-005..008)
 // =============================================================================
 
-describe('read_all — global ordering and original-identity echo', () => {
+void describe('read_all — global ordering and original-identity echo', () => {
   // INV-READ-005: read_all returns ALL events ordered by strictly
   //   increasing event_number, regardless of origin stream
-  test('returns every event in the store in strictly increasing event_number order', async () => {
+  void test('returns every event in the store in strictly increasing event_number order', async () => {
     const a = randomUUID()
     const b = randomUUID()
     const c = randomUUID()
@@ -245,7 +245,7 @@ describe('read_all — global ordering and original-identity echo', () => {
 
   // INV-READ-006: stream_uuid carries the *original* stream identity,
   //   not '$all'.
-  test("stream_uuid on each row is the original stream's uuid, not '$all'", async () => {
+  void test("stream_uuid on each row is the original stream's uuid, not '$all'", async () => {
     const a = randomUUID()
     const b = randomUUID()
     await append(a, [{ event_type: 'A1' }])
@@ -265,7 +265,7 @@ describe('read_all — global ordering and original-identity echo', () => {
 
   // INV-READ-007: stream_version returned via read_all is the event's
   //   *per-stream* version in its origin stream, NOT its position in $all
-  test('stream_version is the per-stream version, not the $all position', async () => {
+  void test('stream_version is the per-stream version, not the $all position', async () => {
     const a = randomUUID()
     const b = randomUUID()
     await append(a, [{ event_type: 'A1' }, { event_type: 'A2' }])
@@ -297,7 +297,7 @@ describe('read_all — global ordering and original-identity echo', () => {
   // INV-READ-008: event_number is the position in $all, full stop.
   //   (Already exercised in the test above; pinned here as a per-INV
   //   marker so the coverage report renders 008 distinctly.)
-  test('event_number is the global $all position', async () => {
+  void test('event_number is the global $all position', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }, { event_type: 'B' }])
     const rows = await readAll(0n, 100)
@@ -308,7 +308,7 @@ describe('read_all — global ordering and original-identity echo', () => {
   })
 
   // INV-READ-004 (mirrored for read_all): from_event_number is inclusive.
-  test('from_event_number is inclusive (= N returns event at #N)', async () => {
+  void test('from_event_number is inclusive (= N returns event at #N)', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }, { event_type: 'B' }, { event_type: 'C' }])
     const rows = await readAll(2n, 100)
@@ -320,13 +320,13 @@ describe('read_all — global ordering and original-identity echo', () => {
 
   // INV-READ-005: read_all on an empty store returns zero rows, NOT IS003
   //   (the $all stream always exists; an empty store is a valid state).
-  test('read_all on an empty store returns zero rows, not an error', async () => {
+  void test('read_all on an empty store returns zero rows, not an error', async () => {
     const rows = await readAll(0n, 100)
     assert.equal(rows.length, 0)
   })
 
   // INV-READ-003 (mirrored for read_all): paged reads cover the full range.
-  test('paged reads via read_all cover every event in order', async () => {
+  void test('paged reads via read_all cover every event in order', async () => {
     const streams = [randomUUID(), randomUUID(), randomUUID()]
     for (let i = 0; i < 9; i++) {
       await append(streams[i % 3], [{ event_type: `E${i + 1}` }])
@@ -351,12 +351,12 @@ describe('read_all — global ordering and original-identity echo', () => {
 // Reader / append concurrency (INV-READ-020)
 // =============================================================================
 
-describe('read_stream / read_all — concurrency with appends', () => {
+void describe('read_stream / read_all — concurrency with appends', () => {
   // INV-READ-020: a reader started AFTER an append A observes A.
   //   (The other half of the invariant — whether a started-before reader
   //   lazily picks up A on a later page — is implementation-defined and
   //   Commanded does not rely on either behaviour, so we don't assert it.)
-  test('a read started after an append observes the appended events', async () => {
+  void test('a read started after an append observes the appended events', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }])
     // Append B, then read.
@@ -369,7 +369,7 @@ describe('read_stream / read_all — concurrency with appends', () => {
   })
 
   // INV-READ-020 (continued): same for read_all.
-  test('read_all started after an append observes the appended events', async () => {
+  void test('read_all started after an append observes the appended events', async () => {
     const s = randomUUID()
     await append(s, [{ event_type: 'A' }])
     await append(s, [{ event_type: 'B' }])
@@ -386,7 +386,7 @@ describe('read_stream / read_all — concurrency with appends', () => {
   //   (b) any rows the reader DOES see are in valid order. We do NOT
   //   assert that an append committed mid-paginate will or will not
   //   appear in a later page; Commanded relies on neither behaviour.
-  test('paged read interleaved with appends is internally consistent (order preserved within and across pages it sees)', async () => {
+  void test('paged read interleaved with appends is internally consistent (order preserved within and across pages it sees)', async () => {
     const s = randomUUID()
     for (let i = 0; i < 5; i++) {
       await append(s, [{ event_type: `E${i + 1}` }])

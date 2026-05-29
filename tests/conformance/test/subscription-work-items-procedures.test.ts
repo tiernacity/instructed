@@ -92,7 +92,7 @@ async function claim(
   return r.rowCount === 0 ? null : r.rows[0]
 }
 
-describe('SUB-A slice 2 — route_batch', () => {
+void describe('SUB-A slice 2 — route_batch', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -112,7 +112,7 @@ describe('SUB-A slice 2 — route_batch', () => {
   //   atomic cursor-advance + work-item insert (the pre-SUB-A
   //   read_subscription_batch / advance_subscription procedures were
   //   removed in slice A3).
-  test('inserts decisions and advances the cursor atomically', async () => {
+  void test('inserts decisions and advances the cursor atomically', async () => {
     const [e1, e2, e3] = await appendN(pool, 's1', 3)
     const r = await pool.query<{ inserted_count: string; new_last_seen: string }>(
       `SELECT * FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
@@ -146,7 +146,7 @@ describe('SUB-A slice 2 — route_batch', () => {
     )
   })
 
-  test('empty decisions array still advances the cursor', async () => {
+  void test('empty decisions array still advances the cursor', async () => {
     const [e1, e2] = await appendN(pool, 's1', 2)
     const r = await pool.query<{ inserted_count: string; new_last_seen: string }>(
       `SELECT * FROM instructed.route_batch($1, $2, $3, $4, '[]'::jsonb)`,
@@ -160,7 +160,7 @@ describe('SUB-A slice 2 — route_batch', () => {
   // INV-SUB-W-001: PK (stream_id, subscription_name,
   //   partition_key, event_number) absorbs duplicate INSERTs on
   //   routing-worker re-run, making route_batch idempotent.
-  test('ON CONFLICT DO NOTHING absorbs crash-replay (idempotent)', async () => {
+  void test('ON CONFLICT DO NOTHING absorbs crash-replay (idempotent)', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     const decisions = JSON.stringify([{ partition_key: 'p1', event_number: Number(e1) }])
     const r1 = await pool.query<{ inserted_count: string }>(
@@ -184,7 +184,7 @@ describe('SUB-A slice 2 — route_batch', () => {
   //   test pins the *mixed* case: cursor advances past the ignored
   //   event_numbers, and no work-item row is written for them.
   //   (TODO #11 / Pass-A finding.)
-  test('route_batch with mixed decisions: cursor jumps past ignored event_numbers, no work item written for them', async () => {
+  void test('route_batch with mixed decisions: cursor jumps past ignored event_numbers, no work item written for them', async () => {
     const [e1, , e3] = await appendN(pool, 's1', 3)
     // Decisions only mention e1 and e3; e2 is ignored.
     const r = await pool.query<{ inserted_count: string; new_last_seen: string }>(
@@ -220,7 +220,7 @@ describe('SUB-A slice 2 — route_batch', () => {
   // INV-SUB-P-034: out-of-order / duplicate cursor targets are
   //   absorbed via max(last_seen, p_new_cursor); a lower target does
   //   not move the cursor backwards.
-  test('cursor advance is monotone (lower target is a no-op)', async () => {
+  void test('cursor advance is monotone (lower target is a no-op)', async () => {
     const [e1, e2] = await appendN(pool, 's1', 2)
     await pool.query(`SELECT * FROM instructed.route_batch($1, $2, $3, $4, '[]'::jsonb)`, [
       ALL,
@@ -235,7 +235,7 @@ describe('SUB-A slice 2 — route_batch', () => {
     assert.equal(r.rows[0].new_last_seen, e2.toString())
   })
 
-  test('atomicity: a failing batch leaves cursor and inserts unchanged', async () => {
+  void test('atomicity: a failing batch leaves cursor and inserts unchanged', async () => {
     // Force a failure mid-batch by including a malformed decision.
     const [e1] = await appendN(pool, 's1', 1)
     const before = await pool.query<{ last_seen: string }>(
@@ -264,7 +264,7 @@ describe('SUB-A slice 2 — route_batch', () => {
     assert.equal(items.rowCount, 0)
   })
 
-  test('lease lost: non-holder raises IS022', async () => {
+  void test('lease lost: non-holder raises IS022', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     await rejectsWithCode(
       () =>
@@ -279,7 +279,7 @@ describe('SUB-A slice 2 — route_batch', () => {
     )
   })
 
-  test('subscription-not-found raises IS020', async () => {
+  void test('subscription-not-found raises IS020', async () => {
     await rejectsWithCode(
       () =>
         pool.query(`SELECT * FROM instructed.route_batch($1, $2, $3, $4, '[]'::jsonb)`, [
@@ -301,7 +301,7 @@ describe('SUB-A slice 2 — route_batch', () => {
   //   subscription-work-items-schema.test.ts covers the FK cascade
   //   half; this test composes them with route_batch to demonstrate
   //   the end-to-end redelivery contract.)
-  test("delete_subscription cascades queued work items; re-claim from 'origin' redelivers", async () => {
+  void test("delete_subscription cascades queued work items; re-claim from 'origin' redelivers", async () => {
     const [e1, e2, e3] = await appendN(pool, 's1', 3)
     await pool.query(`SELECT * FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -358,7 +358,7 @@ describe('SUB-A slice 2 — route_batch', () => {
     assert.equal(reroute.rows[0].inserted_count, '3')
   })
 
-  test('malformed inputs raise 22023', async () => {
+  void test('malformed inputs raise 22023', async () => {
     await rejectsWithCode(
       () =>
         pool.query(`SELECT * FROM instructed.route_batch($1, $2, $3, -1, '[]'::jsonb)`, [
@@ -380,7 +380,7 @@ describe('SUB-A slice 2 — route_batch', () => {
   })
 })
 
-describe('SUB-A slice 2 — claim_work_item', () => {
+void describe('SUB-A slice 2 — claim_work_item', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -410,7 +410,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
     return ens
   }
 
-  test('empty queue returns zero rows', async () => {
+  void test('empty queue returns zero rows', async () => {
     const r = await claim(pool)
     assert.equal(r, null)
   })
@@ -419,7 +419,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
   //   This test pins the pending -> claimed edge; the other edges are
   //   pinned by complete_work_item_projection / complete_work_item_pm /
   //   fail_work_item tests below.
-  test('claim transitions pending -> claimed with lease metadata', async () => {
+  void test('claim transitions pending -> claimed with lease metadata', async () => {
     const [e1] = await seedRouted([{ pk: 'p1' }])
     const r = await claim(pool)
     assert.ok(r)
@@ -442,7 +442,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
   //   unexpired-claimed work item per (subscription, partition_key);
   //   claim_work_item refuses a row whose partition has a
   //   non-terminal predecessor.
-  test('per-partition ordering: serial within a partition', async () => {
+  void test('per-partition ordering: serial within a partition', async () => {
     const [e1, e2] = await seedRouted([{ pk: 'p1' }, { pk: 'p1' }])
     const c1 = await claim(pool, 'wA')
     assert.equal(c1?.event_number, e1.toString())
@@ -464,7 +464,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
 
   // INV-SUB-W-011: across partitions, processing is concurrent
   //   via FOR UPDATE SKIP LOCKED.
-  test('parallel across partitions: two claimants get disjoint partitions (SKIP LOCKED)', async () => {
+  void test('parallel across partitions: two claimants get disjoint partitions (SKIP LOCKED)', async () => {
     await seedRouted([{ pk: 'p1' }, { pk: 'p2' }, { pk: 'p3' }])
     // Use two concurrent transactions so SKIP LOCKED is exercised.
     const c1 = await pool.connect()
@@ -490,7 +490,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
 
   // INV-SUB-W-013: failed rows are operator-only and permanently
   //   block their partition until operator action.
-  test('failed row blocks its partition only', async () => {
+  void test('failed row blocks its partition only', async () => {
     const [e1, e2, e3] = await seedRouted([{ pk: 'p1' }, { pk: 'p1' }, { pk: 'p2' }])
     const c1 = await claim(pool, 'wA')
     assert.equal(c1?.event_number, e1.toString())
@@ -520,7 +520,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
   //   redelivery on handler crash is realised at the work-item layer
   //   (lease takeover on an expired 'claimed' row), not by the
   //   removed read_subscription_batch no-auto-ack mechanism (A3).
-  test("lease takeover: expired 'claimed' row is re-claimable", async () => {
+  void test("lease takeover: expired 'claimed' row is re-claimable", async () => {
     const [e1] = await seedRouted([{ pk: 'p1' }])
     // Claim with a 1-second lease then back-date it so it's already expired.
     await claim(pool, 'wDead', 1)
@@ -537,7 +537,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
     assert.equal(taken.claimed_by, 'wAlive')
   })
 
-  test('subscription-not-found raises IS020', async () => {
+  void test('subscription-not-found raises IS020', async () => {
     await rejectsWithCode(
       () =>
         pool.query(`SELECT * FROM instructed.claim_work_item($1, 'nope', $2, 30)`, [ALL, WORKER]),
@@ -546,7 +546,7 @@ describe('SUB-A slice 2 — claim_work_item', () => {
   })
 })
 
-describe('SUB-A slice 5 — extend_work_item_claim', () => {
+void describe('SUB-A slice 5 — extend_work_item_claim', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -572,7 +572,7 @@ describe('SUB-A slice 5 — extend_work_item_claim', () => {
     return { en, expiresBefore: new Date(claimed!.lease_expires_at) }
   }
 
-  test('extends the lease for the claimant', async () => {
+  void test('extends the lease for the claimant', async () => {
     const { en, expiresBefore } = await seedAndClaim()
     await new Promise((r) => setTimeout(r, 50))
     const r = await pool.query<{ lease_expires_at: string }>(
@@ -587,7 +587,7 @@ describe('SUB-A slice 5 — extend_work_item_claim', () => {
     )
   })
 
-  test('non-claimant raises IS030', async () => {
+  void test('non-claimant raises IS030', async () => {
     const { en } = await seedAndClaim()
     await rejectsWithCode(
       () =>
@@ -600,7 +600,7 @@ describe('SUB-A slice 5 — extend_work_item_claim', () => {
     )
   })
 
-  test('missing row raises IS030', async () => {
+  void test('missing row raises IS030', async () => {
     await rejectsWithCode(
       () =>
         pool.query(
@@ -612,7 +612,7 @@ describe('SUB-A slice 5 — extend_work_item_claim', () => {
     )
   })
 
-  test("row no longer in 'claimed' state raises IS030", async () => {
+  void test("row no longer in 'claimed' state raises IS030", async () => {
     const { en } = await seedAndClaim()
     // Move the row to 'failed'.
     await pool.query(`SELECT instructed.fail_work_item($1, $2, $3, $4, $5, $6)`, [
@@ -635,7 +635,7 @@ describe('SUB-A slice 5 — extend_work_item_claim', () => {
   })
 })
 
-describe('SUB-A slice 2 — complete_work_item_projection', () => {
+void describe('SUB-A slice 2 — complete_work_item_projection', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -662,7 +662,7 @@ describe('SUB-A slice 2 — complete_work_item_projection', () => {
   }
 
   // INV-SUB-W-020: projection-side terminal success DELETEs the row.
-  test('happy path: DELETEs the row', async () => {
+  void test('happy path: DELETEs the row', async () => {
     const en = await seedAndClaim()
     await pool.query(`SELECT instructed.complete_work_item_projection($1, $2, $3, $4, $5)`, [
       ALL,
@@ -678,7 +678,7 @@ describe('SUB-A slice 2 — complete_work_item_projection', () => {
     assert.equal(r.rowCount, 0)
   })
 
-  test('missing row raises IS030 (takeover already completed)', async () => {
+  void test('missing row raises IS030 (takeover already completed)', async () => {
     const en = await seedAndClaim()
     await pool.query(`SELECT instructed.complete_work_item_projection($1, $2, $3, $4, $5)`, [
       ALL,
@@ -700,7 +700,7 @@ describe('SUB-A slice 2 — complete_work_item_projection', () => {
     )
   })
 
-  test('non-claimant raises IS030', async () => {
+  void test('non-claimant raises IS030', async () => {
     const en = await seedAndClaim()
     await rejectsWithCode(
       () =>
@@ -716,7 +716,7 @@ describe('SUB-A slice 2 — complete_work_item_projection', () => {
   })
 })
 
-describe('SUB-A slice 2 — complete_work_item_pm', () => {
+void describe('SUB-A slice 2 — complete_work_item_pm', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -732,7 +732,7 @@ describe('SUB-A slice 2 — complete_work_item_pm', () => {
   // INV-SUB-W-021: PM-side terminal success (non-terminal
   //   instance) UPDATEs the row to 'done' AND UPSERTs the PM-state
   //   snapshot in one transaction.
-  test("UPDATEs row to 'done' and UPSERTs snapshot in one tx", async () => {
+  void test("UPDATEs row to 'done' and UPSERTs snapshot in one tx", async () => {
     const [en] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -779,7 +779,7 @@ describe('SUB-A slice 2 — complete_work_item_pm', () => {
     assert.equal(snap.rows[0].data.counter, 1)
   })
 
-  test('non-claimant raises IS030 and leaves both row and snapshot unchanged', async () => {
+  void test('non-claimant raises IS030 and leaves both row and snapshot unchanged', async () => {
     const [en] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -821,7 +821,7 @@ describe('SUB-A slice 2 — complete_work_item_pm', () => {
   })
 })
 
-describe('SUB-A slice 2 — complete_pm_instance', () => {
+void describe('SUB-A slice 2 — complete_pm_instance', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -837,7 +837,7 @@ describe('SUB-A slice 2 — complete_pm_instance', () => {
   // INV-SUB-W-022: PM-side terminal success (terminal instance)
   //   DELETEs the PM-state snapshot AND every work item for the
   //   partition in one transaction.
-  test('DELETEs snapshot AND all work items for the partition in one tx', async () => {
+  void test('DELETEs snapshot AND all work items for the partition in one tx', async () => {
     const ens = await appendN(pool, 's1', 3)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -880,7 +880,7 @@ describe('SUB-A slice 2 — complete_pm_instance', () => {
     assert.equal(b.rowCount, 1)
   })
 
-  test('idempotent: a second call returns zero counts and does not raise', async () => {
+  void test('idempotent: a second call returns zero counts and does not raise', async () => {
     const r = await pool.query<{
       work_items_deleted: string
       snapshot_deleted: boolean
@@ -894,7 +894,7 @@ describe('SUB-A slice 2 — complete_pm_instance', () => {
     assert.equal(r.rows[0].snapshot_deleted, false)
   })
 
-  test('atomicity: a failing call rolls back both deletes', async () => {
+  void test('atomicity: a failing call rolls back both deletes', async () => {
     // Seed: pm-A with a snapshot and a work item.
     const [en] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
@@ -937,7 +937,7 @@ describe('SUB-A slice 2 — complete_pm_instance', () => {
 //   wrong-state tests in this and the preceding describe blocks
 //   pin the IS030 surface; subscription-not-found IS020 is pinned
 //   in the route_batch and claim_work_item describes.
-describe('SUB-A slice 2 — fail_work_item', () => {
+void describe('SUB-A slice 2 — fail_work_item', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -950,7 +950,7 @@ describe('SUB-A slice 2 — fail_work_item', () => {
     await closePool()
   })
 
-  test('transitions claimed -> failed; clears lease; records error_text', async () => {
+  void test('transitions claimed -> failed; clears lease; records error_text', async () => {
     const [en] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -986,7 +986,7 @@ describe('SUB-A slice 2 — fail_work_item', () => {
     assert.equal(row.rows[0].error_text, 'kaboom')
   })
 
-  test('non-claimant raises IS030', async () => {
+  void test('non-claimant raises IS030', async () => {
     const [en] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -1015,7 +1015,7 @@ describe('SUB-A slice 2 — fail_work_item', () => {
 //   subscription_work_items row at or below the target is in a
 //   non-terminal state. Either alone is insufficient. Each test in
 //   this describe block pins one half of the conjunction.
-describe('SUB-A slice 2 — is_subscription_caught_up', () => {
+void describe('SUB-A slice 2 — is_subscription_caught_up', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -1036,13 +1036,13 @@ describe('SUB-A slice 2 — is_subscription_caught_up', () => {
     return r.rows[0].caught_up
   }
 
-  test('routing-not-yet-reached-target => false', async () => {
+  void test('routing-not-yet-reached-target => false', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     // last_seen still 0; e1 not routed yet.
     assert.equal(await caughtUp(e1), false)
   })
 
-  test('routed-and-completed => true', async () => {
+  void test('routed-and-completed => true', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -1062,7 +1062,7 @@ describe('SUB-A slice 2 — is_subscription_caught_up', () => {
     assert.equal(await caughtUp(e1), true)
   })
 
-  test('routed-but-pending => false even though cursor passed target', async () => {
+  void test('routed-but-pending => false even though cursor passed target', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -1074,7 +1074,7 @@ describe('SUB-A slice 2 — is_subscription_caught_up', () => {
     assert.equal(await caughtUp(e1), false)
   })
 
-  test('routed-then-failed => false (failed blocks catch-up)', async () => {
+  void test('routed-then-failed => false (failed blocks catch-up)', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -1094,7 +1094,7 @@ describe('SUB-A slice 2 — is_subscription_caught_up', () => {
     assert.equal(await caughtUp(e1), false)
   })
 
-  test("PM 'done' rows do NOT block catch-up", async () => {
+  void test("PM 'done' rows do NOT block catch-up", async () => {
     const [e1] = await appendN(pool, 's1', 1)
     await pool.query(`SELECT instructed.route_batch($1, $2, $3, $4, $5::jsonb)`, [
       ALL,
@@ -1112,11 +1112,11 @@ describe('SUB-A slice 2 — is_subscription_caught_up', () => {
     assert.equal(await caughtUp(e1), true)
   })
 
-  test('target=0 on a never-touched subscription is true (cursor>=0, no rows)', async () => {
+  void test('target=0 on a never-touched subscription is true (cursor>=0, no rows)', async () => {
     assert.equal(await caughtUp(0), true)
   })
 
-  test('subscription-not-found raises IS020', async () => {
+  void test('subscription-not-found raises IS020', async () => {
     await rejectsWithCode(
       () => pool.query(`SELECT * FROM instructed.is_subscription_caught_up($1, 'nope', 0)`, [ALL]),
       'IS020',
@@ -1124,7 +1124,7 @@ describe('SUB-A slice 2 — is_subscription_caught_up', () => {
   })
 })
 
-describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
+void describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
   let pool: pg.Pool
   before(async () => {
     pool = await getPool()
@@ -1157,7 +1157,7 @@ describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
     )
   }
 
-  test("returns only 'done' rows for the partition, ordered by event_number", async () => {
+  void test("returns only 'done' rows for the partition, ordered by event_number", async () => {
     const ens = await appendN(pool, 's1', 5)
     // pm-A: 3 done; pm-B: 1 done (should not appear).
     await routeAndDone('pm-A', ens[0], 'PM-A')
@@ -1185,7 +1185,7 @@ describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
     )
   })
 
-  test('exclusive upper bound: returns rows strictly less than p_event_number', async () => {
+  void test('exclusive upper bound: returns rows strictly less than p_event_number', async () => {
     const ens = await appendN(pool, 's1', 3)
     await routeAndDone('pm-A', ens[0], 'PM-A')
     await routeAndDone('pm-A', ens[1], 'PM-A')
@@ -1203,7 +1203,7 @@ describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
     )
   })
 
-  test('returns the read_all-compatible event payload', async () => {
+  void test('returns the read_all-compatible event payload', async () => {
     const [e1] = await appendN(pool, 's1', 1)
     await routeAndDone('pm-A', e1, 'PM-A')
 
@@ -1223,7 +1223,7 @@ describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
     assert.ok(row.created_at instanceof Date)
   })
 
-  test("empty result when partition has no 'done' rows below the cutoff", async () => {
+  void test("empty result when partition has no 'done' rows below the cutoff", async () => {
     const r = await pool.query(`SELECT * FROM instructed.list_pm_rebuild_events($1, $2, $3, $4)`, [
       ALL,
       SUB,
@@ -1233,7 +1233,7 @@ describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
     assert.equal(r.rowCount, 0)
   })
 
-  test('subscription-not-found raises IS020', async () => {
+  void test('subscription-not-found raises IS020', async () => {
     await rejectsWithCode(
       () =>
         pool.query(`SELECT * FROM instructed.list_pm_rebuild_events($1, 'no-such', $2, 0)`, [
@@ -1244,7 +1244,7 @@ describe('SUB-A slice 7 — list_pm_rebuild_events', () => {
     )
   })
 
-  test('rejects invalid parameters with 22023', async () => {
+  void test('rejects invalid parameters with 22023', async () => {
     await rejectsWithCode(
       () =>
         pool.query(`SELECT * FROM instructed.list_pm_rebuild_events($1, $2, $3, -1)`, [
