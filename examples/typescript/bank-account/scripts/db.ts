@@ -62,6 +62,7 @@ async function waitForPg(url: string, timeoutMs = 60_000): Promise<void> {
       await c.end()
       return
     } catch (err) {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value retained as Error for diagnostics.
       lastErr = err as Error
       try {
         await c.end()
@@ -163,6 +164,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to Error for diagnostic output.
   process.stderr.write(`start failed: ${(err as Error).stack ?? err}\n`)
   try {
     composeDown()

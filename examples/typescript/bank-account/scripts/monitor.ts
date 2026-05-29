@@ -87,6 +87,7 @@ async function main(): Promise<void> {
     const timer = setInterval(() => {
       if (stopping) return
       tick(pool).catch((err) => {
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to Error for diagnostic output.
         process.stderr.write(`monitor tick failed: ${(err as Error).message}\n`)
       })
     }, POLL_INTERVAL_MS)
@@ -99,6 +100,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to Error for diagnostic output.
   process.stderr.write(`monitor failed: ${(err as Error).stack ?? err}\n`)
   process.exit(1)
 })

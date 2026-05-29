@@ -14,6 +14,7 @@
     ],
     "no-redeclare": "error",
     "typescript/no-explicit-any": "error",
+    "typescript/no-unsafe-type-assertion": "error",
     "typescript/consistent-type-imports": [
       "error",
       {

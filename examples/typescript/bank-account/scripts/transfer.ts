@@ -46,6 +46,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to Error for diagnostic output.
   process.stderr.write(`transfer failed: ${(err as Error).message}\n`)
   process.exit(1)
 })
