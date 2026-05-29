@@ -5,9 +5,13 @@
   "description": "Load / soak harness for the instructed contract — performance gauge + invariant fuzzer over time (TODO #3b).",
   "type": "module",
   "scripts": {
-    "type-check": "tsc --noEmit",
     "start": "node --experimental-strip-types soak.ts",
-    "soak": "node --experimental-strip-types soak.ts"
+    "soak": "node --experimental-strip-types soak.ts",
+    "format:check": "npx oxfmt --check .",
+    "format:fix": "npx oxfmt --write .",
+    "lint:check": "npx oxlint",
+    "lint:fix": "npx oxlint --fix",
+    "ci": "npm run format:check && npm run lint:check"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -18,6 +22,9 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
+    "oxfmt": "^0.52.0",
+    "oxlint": "^1.67.0",
+    "oxlint-tsgolint": "^0.23.0",
     "typescript": "^5.9.3"
   }
 }
