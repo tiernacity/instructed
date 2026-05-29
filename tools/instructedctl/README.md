@@ -65,6 +65,27 @@ export INSTRUCTED_DATABASE_URL="postgresql://user:pass@localhost:5432/mydb"
 instructedctl status
 ```
 
+## Tests
+
+```sh
+deno task test        # unit + integration
+deno task check       # type-check
+deno task lint
+deno task fmt
+```
+
+Unit tests (`tests/cli_test.ts`, `tests/db_test.ts`) cover argument parsing and
+connection-config resolution and need no database. Integration tests
+(`tests/commands_test.ts`) run each command against a **throwaway database**: the
+harness (`tests/support.ts`) creates a uniquely-named database, loads
+`sql/instructed.sql` into it, runs the command, and drops it on teardown — so tests are
+isolated and leave no residue.
+
+The integration tests require the docker-compose Postgres to be running
+(`docker compose up -d postgres`). The admin connection used to create and drop
+throwaway databases resolves from the standard `PG*` variables (defaults:
+`127.0.0.1:5432`, user/password `postgres`).
+
 ## Commands today
 
 - `status` — schema version, `$all` head, and high-level row counts.
@@ -153,6 +174,11 @@ tools/instructedctl/
     commands/
       status.ts
       schema-version.ts
+  tests/
+    support.ts           # throwaway-db harness + stdout capture
+    cli_test.ts          # arg parsing (no db)
+    db_test.ts           # connection-config resolution (no db)
+    commands_test.ts     # commands against a throwaway db
   README.md
 ```
 
