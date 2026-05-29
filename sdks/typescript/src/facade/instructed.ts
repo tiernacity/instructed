@@ -38,7 +38,7 @@
  *     lock-acquisition orders, not of pool / client identity.
  */
 
-import * as pg from "pg";
+import type * as pg from "pg";
 import { Client } from "../client/index.ts";
 import {
   DEFAULT_RETRY_BUDGET,

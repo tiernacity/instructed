@@ -40,8 +40,6 @@ beforeEach(async () => {
   await truncateAll(pool);
 });
 
-const PG_URL = `postgresql://${process.env.PGUSER ?? "postgres"}:${process.env.PGPASSWORD ?? "postgres"}@${process.env.PGHOST ?? "127.0.0.1"}:${Number(process.env.PGPORT ?? 5432)}/${process.env.PGDATABASE ?? "instructed_test"}`;
-
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   timeoutMs: number,

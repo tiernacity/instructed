@@ -16,6 +16,6 @@ export interface Snapshot<S = unknown> {
   sourceType: string;
   sourceVersion: bigint;
   data: S;
-  metadata: unknown | null;
+  metadata: unknown;
   createdAt: Date;
 }

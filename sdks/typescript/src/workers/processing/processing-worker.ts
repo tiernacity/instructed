@@ -52,8 +52,9 @@
  */
 
 import type { Client } from "../../client/index.ts";
+import type {
+  SubscriptionLeaseLost} from "../../errors/index.ts";
 import {
-  SubscriptionLeaseLost,
   SubscriptionNotFound,
   WorkItemLeaseLost,
 } from "../../errors/index.ts";

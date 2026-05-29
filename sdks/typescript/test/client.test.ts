@@ -390,9 +390,6 @@ describe("Append-only trigger (IS006)", () => {
     await assert.rejects(
       () => pool.query(`UPDATE instructed.events SET event_type = 'B'`),
       (err: any) => {
-        const mapped = (err && typeof err === "object" && (err as any).code)
-          ? err
-          : err;
         return (err as any).code === "IS006";
       },
     );

@@ -263,7 +263,7 @@ export interface RanCommand<S> {
  * Callers wanting the post-append state opt in by calling
  * `runCommandAndApply`, which folds.
  */
-interface ExecutedCommand<S, E extends DomainEvent> {
+interface ExecutedCommand<S> {
   appended: AppendedEvent[];
   /** Loaded baseline state (pre-append). Identical to the state passed to `execute`. */
   loadedState: S;
@@ -283,7 +283,7 @@ async function executeCommand<S, C, E extends DomainEvent>(
   streamUuid: string,
   command: C,
   opts: RunCommandOptions,
-): Promise<ExecutedCommand<S, E>> {
+): Promise<ExecutedCommand<S>> {
   const retryBudget = opts.retryBudget ?? DEFAULT_RETRY_BUDGET;
   if (!Number.isInteger(retryBudget) || retryBudget < 0) {
     throw new RangeError(

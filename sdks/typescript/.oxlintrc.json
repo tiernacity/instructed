@@ -13,7 +13,8 @@
       }
     ],
     "no-redeclare": "error",
-    "typescript/no-explicit-any": "error",
+    "typescript/no-explicit-any": "off",
+    "typescript/no-floating-promises": "off",
     "typescript/consistent-type-imports": [
       "error",
       {

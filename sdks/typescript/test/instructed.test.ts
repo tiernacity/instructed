@@ -17,7 +17,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
-import pg from "pg";
+import type pg from "pg";
 import {
   commandRouter,
   expected,

@@ -83,7 +83,7 @@ export interface RecordedEventFields {
   stream_version: bigint;
   causation_id: string | null;
   correlation_id: string | null;
-  metadata: unknown | null;
+  metadata: unknown;
   created_at: Date;
 }
 

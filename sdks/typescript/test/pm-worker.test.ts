@@ -38,8 +38,6 @@ import type { RecordedEvent } from "../src/types/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 
-const ALL = "$all";
-
 let pool: pg.Pool;
 let client: Client;
 
@@ -102,22 +100,6 @@ async function listWorkItems(
     [name],
   );
   return r.rows;
-}
-
-async function workItemState(
-  name: string,
-  partitionKey: string,
-  eventNumber: bigint,
-): Promise<{ state: string; claimed_by: string | null } | null> {
-  const r = await pool.query<{ state: string; claimed_by: string | null }>(
-    `SELECT state, claimed_by FROM instructed.subscription_work_items
-      WHERE subscription_name = $1
-        AND partition_key = $2
-        AND event_number = $3`,
-    [name, partitionKey, eventNumber.toString()],
-  );
-  if (r.rowCount === 0) return null;
-  return r.rows[0];
 }
 
 async function snapshotRow(
