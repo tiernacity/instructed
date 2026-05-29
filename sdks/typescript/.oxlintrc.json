@@ -33,8 +33,17 @@
     "typescript/restrict-template-expressions": "off"
   },
   "ignorePatterns": ["node_modules/", "dist/", "build/", "coverage/"],
+  "overrides": [
+    {
+      "files": ["test/**/*.ts"],
+      "rules": {
+        "typescript/no-unsafe-type-assertion": "off"
+      }
+    }
+  ],
   "options": {
     "typeAware": true,
-    "typeCheck": true
+    "typeCheck": true,
+    "reportUnusedDisableDirectives": "error"
   }
 }

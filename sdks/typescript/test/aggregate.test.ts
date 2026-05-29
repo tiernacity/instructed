@@ -64,7 +64,6 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
     },
     apply(state, event) {
       if (event.type === 'Added') {
-        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
         const n = (event.data as { n: number }).n
         return { value: state.value + n }
       }
@@ -253,7 +252,6 @@ void describe('runCommand — OCC retry (D-0005 / AGG-010)', () => {
     for (const r of rejected) {
       assert.ok(
         r.reason instanceof RetryBudgetExhausted,
-        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: read error off the result.
         `expected RetryBudgetExhausted, got ${(r.reason as Error)?.constructor?.name}`,
       )
       const re = r.reason as RetryBudgetExhausted
@@ -372,7 +370,6 @@ void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => 
     // First command writes a snapshot stamped with "v1".
     await runCommandWithSnapshots(client, def, s, { kind: 'add', n: 3 })
     const snap = await client.readSnapshot<CounterState>(s)
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot metadata.
     assert.deepEqual((snap.metadata as Record<string, unknown>)['snapshot_module_version'], 'v1')
 
     // Second command with the same version: apply runs only for the
@@ -403,7 +400,6 @@ void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => 
     await runCommandWithSnapshots(client, v1, s, { kind: 'add', n: 7 })
     // Sanity: snapshot exists with v1 stamped.
     const v1Snap = await client.readSnapshot<CounterState>(s)
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot metadata.
     assert.equal((v1Snap.metadata as Record<string, unknown>)['snapshot_module_version'], 'v1')
 
     // Phase 2: a NEW def with version "v2" loads. The v1 snapshot
@@ -435,7 +431,6 @@ void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => 
     const final = await client.readSnapshot<CounterState>(s)
     assert.equal(final.data.value, 11)
     // And the snapshot is now stamped with v2.
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot metadata.
     assert.equal((final.metadata as Record<string, unknown>)['snapshot_module_version'], 'v2')
   })
 
@@ -505,9 +500,7 @@ async function loadFresh(streamUuid: string): Promise<CounterState> {
   const events = await client.readStream(streamUuid, 0n, 1000)
   for (const e of events) {
     state = def.apply(state, {
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test fixture: narrow opaque row fields to the event union.
       type: e.type as CounterEvent['type'],
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test fixture: narrow opaque row fields to the event union.
       data: e.data as CounterEvent['data'],
       metadata: e.metadata,
     })

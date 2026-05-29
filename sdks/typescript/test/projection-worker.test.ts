@@ -158,7 +158,6 @@ function startPair<E extends Event>(
 
 void describe('routingFnForPartitionBy', () => {
   function fakeEvent<E extends Event = Event>(en: bigint, data: unknown = {}): RecordedEvent<E> {
-    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test fixture: synthetic RecordedEvent.
     return {
       event_id: 'id-' + en,
       event_number: en,
@@ -505,7 +504,6 @@ void describe('projection worker — D-0016 handler opacity', () => {
         'workerId',
       ])
       // Belt and braces: explicit field-absence checks.
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: inspect the handler context as a bag to assert field absence.
       const bag = ctx as unknown as Record<string, unknown>
       assert.equal(bag.tx, undefined)
       assert.equal(bag.client, undefined)

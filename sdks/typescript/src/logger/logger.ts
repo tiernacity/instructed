@@ -119,11 +119,8 @@ export class Logger {
  * method.
  */
 export const DEFAULT_LOGGER_IMPL: ILoggerImpl = {
-  // eslint-disable-next-line no-console
   info: (msg) => console.info(msg),
-  // eslint-disable-next-line no-console
   warn: (msg) => console.warn(msg),
-  // eslint-disable-next-line no-console
   error: (msg) => console.error(msg),
 }
 
