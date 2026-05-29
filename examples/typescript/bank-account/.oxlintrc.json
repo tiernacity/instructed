@@ -35,6 +35,7 @@
   "ignorePatterns": ["node_modules/", "dist/", "build/", "coverage/"],
   "options": {
     "typeAware": true,
-    "typeCheck": true
+    "typeCheck": true,
+    "reportUnusedDisableDirectives": "error"
   }
 }
