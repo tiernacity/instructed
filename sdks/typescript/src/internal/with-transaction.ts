@@ -15,7 +15,7 @@
 
 import type * as pg from "pg";
 import { Client } from "../client.ts";
-import { mapPgError } from "../errors.ts";
+import { mapPgError } from "../errors/index.ts";
 import type { Queryable } from "../types/index.ts";
 
 interface PoolLike {

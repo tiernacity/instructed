@@ -63,7 +63,7 @@ export {
   WorkItemLeaseLost,
   // 22023
   InvalidParameterValue,
-} from "./errors.ts";
+} from "./errors/index.ts";
 
 // L1 \u2014 wire-shape contracts.
 export * from "./types/index.ts";
@@ -112,7 +112,7 @@ export {
 } from "./logger.ts";
 
 // L2 retry-exhaustion class (emitted by `runCommand`).
-export { RetryBudgetExhausted } from "./errors.ts";
+export { RetryBudgetExhausted } from "./errors/index.ts";
 
 // Routing worker (D-0025 per-batch claim/release).
 export {

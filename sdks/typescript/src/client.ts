@@ -13,7 +13,7 @@ import {
   mapPgError,
   SnapshotNotFound,
   type MapPgErrorContext,
-} from "./errors.ts";
+} from "./errors/index.ts";
 import type {
   Event,
   AppendOptions,
@@ -161,7 +161,7 @@ export class Client {
       // Mirror the SQL contract: empty array is invalid_parameter_value
       // (22023). The procedure raises it; we let it through. But we'd
       // rather raise client-side for a marginally better stack.
-      throw new (await import("./errors.ts")).InvalidParameterValue(
+      throw new (await import("./errors/index.ts")).InvalidParameterValue(
         "appendToStream: events must be a non-empty array",
         { code: "22023" },
       );

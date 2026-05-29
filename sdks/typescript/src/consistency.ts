@@ -53,7 +53,7 @@ import {
   ConsistencyTargetError,
   ConsistencyTimeout,
   InstructedError,
-} from "./errors.ts";
+} from "./errors/index.ts";
 import type { AppendedEvent } from "./types/index.ts";
 import { sleep } from "./internal/sleep.ts";
 

@@ -405,7 +405,7 @@ describe("Append-only trigger (IS006)", () => {
       assert.fail("expected DELETE to raise");
     } catch (err: any) {
       assert.equal(err.code, "IS006");
-      const { mapPgError } = await import("../src/errors.ts");
+      const { mapPgError } = await import("../src/errors/index.ts");
       const mapped = mapPgError(err);
       assert.ok(mapped instanceof AppendOnlyViolation);
       assert.ok(mapped instanceof InstructedError);

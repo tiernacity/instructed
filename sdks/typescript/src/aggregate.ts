@@ -42,7 +42,7 @@ import {
   SnapshotNotFound,
   StreamNotFound,
   WrongExpectedVersion,
-} from "./errors.ts";
+} from "./errors/index.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import { expected as ev } from "./types/index.ts";
 import type {

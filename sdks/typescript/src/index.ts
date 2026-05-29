@@ -122,7 +122,7 @@ export {
   ConsistencyTimeout,
   ConsistencyTargetError,
   UnknownAggregateType,
-} from "./errors.ts";
+} from "./errors/index.ts";
 
 // The `Instructed` facade: by-name aggregate dispatch, projection / PM
 // registration, single `startWorker()`, single `close()`.

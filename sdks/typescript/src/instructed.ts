@@ -74,7 +74,7 @@ import {
   waitForProjection,
   type SubscriptionRef,
 } from "./consistency.ts";
-import { UnknownAggregateType } from "./errors.ts";
+import { UnknownAggregateType } from "./errors/index.ts";
 import {
   DEFAULT_LOGGER_IMPL,
   Logger,
