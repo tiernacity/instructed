@@ -159,7 +159,8 @@ is final). Each slice ends green.
       recorded-event SELECT as a view and a shared snapshot-upsert.
       Pure refactor; conformance is SQLSTATE-checked so messages may
       change. Defer if appetite is low.
-- [→] **A6 — (optional) SDK row-mapper consolidation.** Pull
+- [x] **A6 — (optional) SDK row-mapper consolidation.** DONE as part
+      of B3 (commit `ae88adb`). Pull
       `toBigInt`/`toDate`/`mapRecordedEvent`/`RawEventRow` and the
       read-event column list into one place. **Deferred into B3** (see
       the B3 entry): doing it standalone in flat `src/` would just be
@@ -178,7 +179,7 @@ type-check` + `npm test`.
 
 - [x] **B1 — `types.ts` → `types/`.**
 - [x] **B2 — `errors.ts` → `errors/`.**
-- [ ] **B3 — `client.ts` → `client/`** (+ `row-mappers.ts`, `pack-event.ts`).
+- [x] **B3 — `client.ts` → `client/`** (+ `row-mappers.ts`, `pack-event.ts`).
       **MUST also do A6 here** (row-mapper consolidation): in the same
       slice, extract `toBigInt`/`toDate`/`mapRecordedEvent`/`RawEventRow`
       and the duplicated read-event column-list string into
@@ -519,3 +520,23 @@ revert was for risk/context management, not because it was broken.
   * Verified the full L1/L2/L3 error-class set is present on both
     `core` and `index` runtime namespaces post-split.
   * Gates: SDK 162/162 + type-check. (SQL/conformance untouched.)
+- 2026-05-29 — **B3 + A6** (`client.ts` → `client/`, A6 folded in).
+  Commit `ae88adb`. Moved the 737-line `client.ts` to
+  `client/client.ts` behind a barrel `index.ts` ({ Client,
+  ClientOptions }). A6: extracted `toBigInt`/`toDate`/`RawEventRow`/
+  `mapRecordedEvent` + a new `READ_EVENT_COLUMNS` constant into
+  `client/row-mappers.ts`, and `packEvent`/`expectedVersionParams`
+  into `client/pack-event.ts`. The three read methods now share the
+  one column-list constant. `isQueryable` stayed with `Client`.
+  Surprises / notes:
+  * The blanket `sed` for `"./client.ts" → "./client/index.ts"` also
+    rewrote the *new barrel's own* `from "./client.ts"` (→ a bogus
+    `./client/index.ts` self-ref) and did NOT touch the dynamic
+    `import("./errors/index.ts")` inside the moved file, which now
+    needed `../errors/index.ts` for the extra directory depth. Both
+    caught by type-check (TS2307) and fixed by hand. Lesson for B4–B6:
+    after the sed, grep the moved file for `import(` (dynamic imports)
+    and check the new barrel doesn't get its own self-import rewritten.
+  * The read-event column list was duplicated 3× (not 4× — the 4th was
+    `read_subscription_batch`, removed back in A3).
+  * Gates: SDK 162/162 + type-check; conformance 148/148.
