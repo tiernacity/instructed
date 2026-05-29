@@ -186,7 +186,7 @@ type-check` + `npm test`.
       `client/row-mappers.ts`, and point the four read methods at it.
       A6 has no separate slice — it is closed out by B3. The public
       barrel surface must be unchanged.
-- [ ] **B4 — `aggregate.ts` (+ `aggregate-snapshots.ts`, `snapshot-version.ts`) → `aggregate/`.**
+- [x] **B4 — `aggregate.ts` (+ `aggregate-snapshots.ts`, `snapshot-version.ts`) → `aggregate/`.**
 - [ ] **B5 — workers → `workers/{routing,processing,projection,pm}/`** (+ `pm-substrate`, `error-policies`).
 - [ ] **B6 — facade + consistency → `facade/`, `consistency/`** (+ `command-router`, `partition-by`, `routing-helpers`, `logger`).
 
@@ -540,3 +540,21 @@ revert was for risk/context management, not because it was broken.
   * The read-event column list was duplicated 3× (not 4× — the 4th was
     `read_subscription_batch`, removed back in A3).
   * Gates: SDK 162/162 + type-check; conformance 148/148.
+- 2026-05-29 — **B4** (`aggregate.ts` + friends → `aggregate/`).
+  Commit `f1aa438`. `git mv` of the three files
+  (`aggregate.ts`→`run-command.ts`, `aggregate-snapshots.ts`→
+  `snapshots.ts`, `snapshot-version.ts`→`snapshot-version.ts`) into
+  `aggregate/`, plus a clean extraction of the `SnapshotPolicy<S>`
+  contract + `everyN` into `aggregate/snapshot-policy.ts`. Barrel
+  `index.ts` re-exports the identical surface.
+  Surprises / notes:
+  * `git mv` into a not-yet-existing dir failed with "No such file or
+    directory" — had to `mkdir -p src/aggregate` first (git mv doesn't
+    create the leading dir here).
+  * sed gotcha (per the B3 lesson): the intra-dir `./snapshot-version.ts`
+    imports inside `run-command.ts`/`snapshots.ts` must NOT be rewritten
+    to the barrel; scoped the path-rewrite sed to files *outside*
+    `src/aggregate/`. Verified after.
+  * `aggregate.ts` substring does not match `aggregate-snapshots.ts`, so
+    the two `"./aggregate*.ts"` patterns were safe to run together.
+  * Gates: SDK 162/162 + type-check; core/full export surface verified.
