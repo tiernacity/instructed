@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript"],
+  "categories": {
+    "correctness": "error"
+  },
+  "rules": {
+    "no-unused-vars": [
+      "error",
+      {
+        "argsIgnorePattern": "^_",
+        "caughtErrorsIgnorePattern": "^_"
+      }
+    ],
+    "no-redeclare": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-unsafe-type-assertion": "off",
+    "typescript/consistent-type-imports": [
+      "error",
+      {
+        "prefer": "type-imports",
+        "disallowTypeAnnotations": false
+      }
+    ],
+    "typescript/consistent-type-exports": [
+      "error",
+      {
+        "fixMixedExportsWithInlineTypeSpecifier": true
+      }
+    ],
+    "typescript/no-deprecated": "warn",
+    "typescript/unbound-method": "off",
+    "typescript/restrict-template-expressions": "off"
+  },
+  "ignorePatterns": ["node_modules/", "dist/", "build/", "coverage/"],
+  "options": {
+    "typeAware": true,
+    "typeCheck": true,
+    "reportUnusedDisableDirectives": "error"
+  }
+}
