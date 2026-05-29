@@ -41,9 +41,10 @@
  *   - PM forwarded count == total triggers (no triggers dropped)
  */
 
-import pg from "pg";
+import type pg from "pg";
+import type {
+  Client} from "../../sdks/typescript/src/index.ts";
 import {
-  Client,
   type RecordedEvent,
 } from "../../sdks/typescript/src/index.ts";
 

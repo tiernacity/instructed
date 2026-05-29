@@ -25,7 +25,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import pg from "pg";
+import type pg from "pg";
 
 import {
   Client,

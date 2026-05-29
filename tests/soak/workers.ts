@@ -50,9 +50,10 @@
  *      `subscriptions`).
  */
 
-import pg from "pg";
+import type pg from "pg";
+import type {
+  Client} from "../../sdks/typescript/src/index.ts";
 import {
-  Client,
   startPmWorker,
   startProjectionWorker,
   startRoutingWorker,

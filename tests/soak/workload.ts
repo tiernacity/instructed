@@ -20,8 +20,9 @@
  * bound on that sleep.
  */
 
+import type {
+  Client} from "../../sdks/typescript/src/index.ts";
 import {
-  Client,
   expected,
   runCommand,
 } from "../../sdks/typescript/src/index.ts";
