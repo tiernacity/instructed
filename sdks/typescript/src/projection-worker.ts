@@ -23,7 +23,7 @@
  * runs" for the routing / processing split.
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import type { Event, RecordedEvent } from "./types/index.ts";
 import {
   startProcessingWorker,

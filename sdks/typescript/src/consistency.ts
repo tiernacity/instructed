@@ -48,7 +48,7 @@
  * `$all` refs are exempt; they validly observe every append.
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import {
   ConsistencyTargetError,
   ConsistencyTimeout,

@@ -13,7 +13,7 @@ import {
   mapPgError,
   SnapshotNotFound,
   type MapPgErrorContext,
-} from "./errors/index.ts";
+} from "../errors/index.ts";
 import type {
   Event,
   AppendOptions,
@@ -30,7 +30,15 @@ import type {
   RouteDecision,
   Snapshot,
   SnapshotInput,
-} from "./types/index.ts";
+} from "../types/index.ts";
+import {
+  toBigInt,
+  toDate,
+  mapRecordedEvent,
+  READ_EVENT_COLUMNS,
+  type RawEventRow,
+} from "./row-mappers.ts";
+import { packEvent, expectedVersionParams } from "./pack-event.ts";
 
 export interface ClientOptions {
   /** Reserved. */
@@ -42,87 +50,6 @@ function isQueryable(value: unknown): value is Queryable {
     value !== null &&
     typeof (value as Queryable).query === "function"
   );
-}
-
-/** Some Postgres ints (int8) come back as strings. Coerce to bigint. */
-function toBigInt(v: unknown): bigint {
-  if (typeof v === "bigint") return v;
-  if (typeof v === "number") return BigInt(v);
-  if (typeof v === "string") return BigInt(v);
-  throw new Error(`expected bigint-like, got ${typeof v}: ${String(v)}`);
-}
-
-function toDate(v: unknown): Date {
-  if (v instanceof Date) return v;
-  if (typeof v === "string") return new Date(v);
-  throw new Error(`expected Date, got ${typeof v}`);
-}
-
-function packEvent<E = unknown>(e: NewEvent<E>): Record<string, unknown> {
-  // L2 → L1 boundary: the TypeScript surface uses `type`; the SQL
-  // column is `event_type`. The rename is purely TS-facing; the L1
-  // wire contract (and any deployed database schema) is unchanged.
-  const out: Record<string, unknown> = {
-    event_id: e.event_id,
-    event_type: e.type,
-    data: e.data ?? null,
-  };
-  if (e.metadata !== undefined) out.metadata = e.metadata;
-  if (e.causation_id !== undefined) out.causation_id = e.causation_id;
-  if (e.correlation_id !== undefined) out.correlation_id = e.correlation_id;
-  return out;
-}
-
-function expectedVersionParams(
-  ev: ExpectedVersion,
-): { type: string; version: string | null } {
-  switch (ev.kind) {
-    case "any":
-      return { type: "any", version: null };
-    case "noStream":
-      return { type: "no_stream", version: null };
-    case "streamExists":
-      return { type: "stream_exists", version: null };
-    case "exact":
-      return { type: "exact", version: ev.version.toString() };
-  }
-}
-
-interface RawEventRow {
-  event_id: string;
-  event_number: string | number;
-  stream_uuid: string;
-  stream_version: string | number;
-  event_type: string;
-  causation_id: string | null;
-  correlation_id: string | null;
-  data: unknown;
-  metadata: unknown;
-  created_at: Date | string;
-}
-
-function mapRecordedEvent<E extends Event>(row: RawEventRow): RecordedEvent<E> {
-  // L1 → L2 boundary: SQL `event_type` becomes TS `type`. See
-  // {@link packEvent} for the inverse direction.
-  //
-  // The cast at the return is unavoidable: `RecordedEvent<E>` is a
-  // distributive conditional over the user's event union, so TS
-  // cannot prove that the runtime shape (built from an opaque SQL
-  // row whose `event_type` is just `string`) matches the specific
-  // union member. The constructed shape IS structurally compatible;
-  // the caller's `E` selects which branch the consumer sees.
-  return {
-    event_id: row.event_id,
-    event_number: toBigInt(row.event_number),
-    stream_uuid: row.stream_uuid,
-    stream_version: toBigInt(row.stream_version),
-    type: row.event_type,
-    causation_id: row.causation_id,
-    correlation_id: row.correlation_id,
-    data: row.data,
-    metadata: row.metadata,
-    created_at: toDate(row.created_at),
-  } as RecordedEvent<E>;
 }
 
 /** Layer 0: a thin wrapper over the Postgres procedures. */
@@ -161,7 +88,7 @@ export class Client {
       // Mirror the SQL contract: empty array is invalid_parameter_value
       // (22023). The procedure raises it; we let it through. But we'd
       // rather raise client-side for a marginally better stack.
-      throw new (await import("./errors/index.ts")).InvalidParameterValue(
+      throw new (await import("../errors/index.ts")).InvalidParameterValue(
         "appendToStream: events must be a non-empty array",
         { code: "22023" },
       );
@@ -206,8 +133,7 @@ export class Client {
     qty: number,
   ): Promise<RecordedEvent<E>[]> {
     const res = await this.run<RawEventRow>(
-      `SELECT event_id, event_number, stream_uuid, stream_version,
-              event_type, causation_id, correlation_id, data, metadata, created_at
+      `SELECT ${READ_EVENT_COLUMNS}
          FROM instructed.read_stream($1, $2, $3, $4::jsonb)`,
       [streamUuid, fromVersion.toString(), qty, JSON.stringify({})],
       { streamUuid },
@@ -220,8 +146,7 @@ export class Client {
     qty: number,
   ): Promise<RecordedEvent<E>[]> {
     const res = await this.run<RawEventRow>(
-      `SELECT event_id, event_number, stream_uuid, stream_version,
-              event_type, causation_id, correlation_id, data, metadata, created_at
+      `SELECT ${READ_EVENT_COLUMNS}
          FROM instructed.read_all($1, $2, $3::jsonb)`,
       [fromEventNumber.toString(), qty, JSON.stringify({})],
     );
@@ -716,8 +641,7 @@ export class Client {
   ): Promise<RecordedEvent<E>[]> {
     const opts: Record<string, unknown> = {};
     const res = await this.run<RawEventRow>(
-      `SELECT event_id, event_number, stream_uuid, stream_version,
-              event_type, causation_id, correlation_id, data, metadata, created_at
+      `SELECT ${READ_EVENT_COLUMNS}
          FROM instructed.list_pm_rebuild_events($1, $2, $3, $4, $5::jsonb)`,
       [
         streamUuid,

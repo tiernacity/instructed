@@ -35,7 +35,7 @@
  * them into one atomic write would conflate the two failure modes.
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import { DEFAULT_LOGGER_IMPL, Logger } from "./logger.ts";
 import {
   RetryBudgetExhausted,

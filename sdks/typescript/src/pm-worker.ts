@@ -50,7 +50,7 @@
  * client / pool separation.
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import { prefixType, type AggregateDefinition } from "./aggregate.ts";
 import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
 import type { CommandRouter } from "./command-router.ts";

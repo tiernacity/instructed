@@ -76,7 +76,7 @@
  *     lost lease surfaces as `IS022` rather than via a heartbeat.
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import { Logger } from "./logger.ts";
 import { SubscriptionLeaseLost, SubscriptionNotFound } from "./errors/index.ts";
 import type {

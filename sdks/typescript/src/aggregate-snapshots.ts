@@ -50,7 +50,7 @@
  * "snapshot is best-effort" semantics).
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import {
   runCommandAndApply,
   type AggregateDefinition,

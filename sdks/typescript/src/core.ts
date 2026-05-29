@@ -36,7 +36,7 @@
 // L1 \u2014 procedure bindings
 // ----------------------------------------------------------------------------
 
-export { Client, type ClientOptions } from "./client.ts";
+export { Client, type ClientOptions } from "./client/index.ts";
 
 // L1 \u2014 SQLSTATE-bound error classes. `RetryBudgetExhausted` (L2) is
 // re-exported below in the L2 group; the L3 error classes are not

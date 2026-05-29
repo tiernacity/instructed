@@ -51,7 +51,7 @@
  * slice 9. Tests import this module directly.
  */
 
-import type { Client } from "./client.ts";
+import type { Client } from "./client/index.ts";
 import {
   SubscriptionLeaseLost,
   SubscriptionNotFound,

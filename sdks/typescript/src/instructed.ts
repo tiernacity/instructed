@@ -39,7 +39,7 @@
  */
 
 import * as pg from "pg";
-import { Client } from "./client.ts";
+import { Client } from "./client/index.ts";
 import {
   DEFAULT_RETRY_BUDGET,
   prefixType,
