@@ -13,9 +13,6 @@
     "lint:fix": "npx oxlint --fix",
     "ci": "npm run format:check && npm run lint:check"
   },
-  "engines": {
-    "node": ">=22.0.0"
-  },
   "dependencies": {
     "pg": "^8.13.0"
   },
@@ -26,5 +23,8 @@
     "oxlint": "^1.67.0",
     "oxlint-tsgolint": "^0.23.0",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   }
 }

@@ -35,41 +35,37 @@ import type {
   PmDefinition,
   RecordedEvent,
   RoutingFn,
-} from "../../sdks/typescript/src/index.ts";
+} from '../../sdks/typescript/src/index.ts'
 
 // ---------------------------------------------------------------------------
 // Counter aggregate
 // ---------------------------------------------------------------------------
 
 export interface CounterState {
-  value: number;
+  value: number
 }
 
-export type CounterCommand = { kind: "add"; n: number };
+export type CounterCommand = { kind: 'add'; n: number }
 
 export interface CounterEvent extends DomainEvent {
-  type: "Added";
-  data: { n: number };
+  type: 'Added'
+  data: { n: number }
 }
 
-export function counter(): AggregateDefinition<
-  CounterState,
-  CounterCommand,
-  CounterEvent
-> {
+export function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEvent> {
   return {
-    type: "Counter",
+    type: 'Counter',
     initialState: () => ({ value: 0 }),
     execute(_state, command) {
-      return { type: "Added", data: { n: command.n } };
+      return { type: 'Added', data: { n: command.n } }
     },
     apply(state, event) {
-      if (event.type === "Added") {
-        return { value: state.value + event.data.n };
+      if (event.type === 'Added') {
+        return { value: state.value + event.data.n }
       }
-      return state;
+      return state
     },
-  };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -77,13 +73,13 @@ export function counter(): AggregateDefinition<
 // ---------------------------------------------------------------------------
 
 export interface ForwarderState {
-  forwarded: number;
+  forwarded: number
 }
 
 export interface TriggeredData {
-  n: number;
+  n: number
   /** Account stream UUID to forward into. */
-  target: string;
+  target: string
 }
 
 /**
@@ -117,19 +113,19 @@ export interface TriggeredData {
  */
 export interface ForwarderCounters {
   /** Times the SDK invoked our routeFn, by type. */
-  readonly routeCalls: Map<string, number>;
+  readonly routeCalls: Map<string, number>
   /** Times the processing worker entered handle. */
-  handleCalls: number;
+  handleCalls: number
   /** Times handle returned normally (not threw / not aborted mid-body). */
-  handleReturns: number;
+  handleReturns: number
 }
 
 export function newForwarderCounters(): ForwarderCounters {
-  return { routeCalls: new Map(), handleCalls: 0, handleReturns: 0 };
+  return { routeCalls: new Map(), handleCalls: 0, handleReturns: 0 }
 }
 
 function bump(map: Map<string, number>, key: string): void {
-  map.set(key, (map.get(key) ?? 0) + 1);
+  map.set(key, (map.get(key) ?? 0) + 1)
 }
 
 /**
@@ -143,15 +139,13 @@ function bump(map: Map<string, number>, key: string): void {
  * semantics per subscription, so the counter is single-writer modulo
  * routing-worker handover.
  */
-export function forwarderRouteFn(
-  counters?: ForwarderCounters,
-): RoutingFn {
+export function forwarderRouteFn(counters?: ForwarderCounters): RoutingFn {
   return (event: RecordedEvent) => {
-    if (event.type !== "Triggered") return "ignore";
-    if (counters) bump(counters.routeCalls, event.type);
-    const data = event.data as TriggeredData;
-    return { partitionKey: data.target };
-  };
+    if (event.type !== 'Triggered') return 'ignore'
+    if (counters) bump(counters.routeCalls, event.type)
+    const data = event.data as TriggeredData
+    return { partitionKey: data.target }
+  }
 }
 
 /**
@@ -170,30 +164,30 @@ export function forwarderPmDefinition(
   name: string,
   counters?: ForwarderCounters,
 ): PmDefinition<ForwarderState> {
-  const Counter = counter();
+  const Counter = counter()
   return {
     type: name,
-    stream: "$all",
+    stream: '$all',
     initialState: () => ({ forwarded: 0 }),
     apply(state, event) {
       // PM-C: pure fold. Only Triggered events touch our state; the
       // routing fn ignores everything else, so in practice this only
       // sees Triggered, but defend in depth.
-      if (event.type !== "Triggered") return state;
-      return { forwarded: state.forwarded + 1 };
+      if (event.type !== 'Triggered') return state
+      return { forwarded: state.forwarded + 1 }
     },
     async handle(_state, event) {
-      if (counters) counters.handleCalls += 1;
-      const data = event.data as TriggeredData;
+      if (counters) counters.handleCalls += 1
+      const data = event.data as TriggeredData
       const commands: DispatchedCommand[] = [
         {
           streamUuid: data.target,
           aggregate: Counter,
-          command: { kind: "add", n: data.n } as CounterCommand,
+          command: { kind: 'add', n: data.n } as CounterCommand,
         },
-      ];
-      if (counters) counters.handleReturns += 1;
-      return { commands };
+      ]
+      if (counters) counters.handleReturns += 1
+      return { commands }
     },
-  };
+  }
 }

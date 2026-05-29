@@ -20,119 +20,104 @@
  * bound on that sleep.
  */
 
-import type {
-  Client} from "../../sdks/typescript/src/index.ts";
-import {
-  expected,
-  runCommand,
-} from "../../sdks/typescript/src/index.ts";
-import {
-  counter,
-  type CounterCommand,
-  type TriggeredData,
-} from "./domain.ts";
-import type { SoakMetrics } from "./workers.ts";
+import type { Client } from '../../sdks/typescript/src/index.ts'
+import { expected, runCommand } from '../../sdks/typescript/src/index.ts'
+import { counter, type CounterCommand, type TriggeredData } from './domain.ts'
+import type { SoakMetrics } from './workers.ts'
 
 export interface DispatcherOptions {
-  client: Client;
-  accounts: string[];
+  client: Client
+  accounts: string[]
   /** Sleep up to this many ms between iterations. */
-  maxThinkTimeMs: number;
-  metrics: SoakMetrics;
-  signal: { aborted: boolean };
+  maxThinkTimeMs: number
+  metrics: SoakMetrics
+  signal: { aborted: boolean }
   /** Probability (0..1) of using `:any_version` instead of OCC. */
-  anyVersionFraction: number;
+  anyVersionFraction: number
 }
 
 export async function dispatcherLoop(opts: DispatcherOptions): Promise<void> {
-  const Counter = counter();
+  const Counter = counter()
   while (!opts.signal.aborted) {
-    const stream = pick(opts.accounts);
-    const n = 1 + Math.floor(Math.random() * 5);
-    opts.metrics.commandsAttempted += 1;
+    const stream = pick(opts.accounts)
+    const n = 1 + Math.floor(Math.random() * 5)
+    opts.metrics.commandsAttempted += 1
     try {
       if (Math.random() < opts.anyVersionFraction) {
         // Bypass OCC — append directly via the client, as a
         // misbehaving / exogenous writer would. Aggregate folds
         // still reconcile because `Added` events accumulate
         // commutatively.
-        await opts.client.appendToStream(stream, expected.any, [
-          { type: "Added", data: { n } },
-        ]);
+        await opts.client.appendToStream(stream, expected.any, [{ type: 'Added', data: { n } }])
       } else {
         await runCommand(
           opts.client,
           Counter,
           stream,
-          { kind: "add", n } as CounterCommand,
+          { kind: 'add', n } as CounterCommand,
           // Soak runs deliberately wide; give OCC enough head room.
           { retryBudget: 64 },
-        );
+        )
       }
-      opts.metrics.commandsCompleted += 1;
+      opts.metrics.commandsCompleted += 1
     } catch {
-      opts.metrics.commandsFailed += 1;
+      opts.metrics.commandsFailed += 1
     }
-    await jitterSleep(opts.maxThinkTimeMs, opts.signal);
+    await jitterSleep(opts.maxThinkTimeMs, opts.signal)
   }
 }
 
 export interface TriggerAppenderOptions {
-  client: Client;
-  triggerStreams: string[];
-  accounts: string[];
-  maxThinkTimeMs: number;
-  metrics: SoakMetrics;
-  signal: { aborted: boolean };
+  client: Client
+  triggerStreams: string[]
+  accounts: string[]
+  maxThinkTimeMs: number
+  metrics: SoakMetrics
+  signal: { aborted: boolean }
 }
 
-export async function triggerAppenderLoop(
-  opts: TriggerAppenderOptions,
-): Promise<void> {
+export async function triggerAppenderLoop(opts: TriggerAppenderOptions): Promise<void> {
   while (!opts.signal.aborted) {
-    const triggerStream = pick(opts.triggerStreams);
-    const target = pick(opts.accounts);
-    const n = 1 + Math.floor(Math.random() * 5);
+    const triggerStream = pick(opts.triggerStreams)
+    const target = pick(opts.accounts)
+    const n = 1 + Math.floor(Math.random() * 5)
     try {
       await opts.client.appendToStream(triggerStream, expected.any, [
         {
-          type: "Triggered",
+          type: 'Triggered',
           data: { n, target } as TriggeredData,
         },
-      ]);
-      opts.metrics.triggersAppended += 1;
+      ])
+      opts.metrics.triggersAppended += 1
     } catch {
       // Tracked indirectly via final invariant checks; the trigger
       // stream is `expected.any` so the only failures here are
       // connectivity blips.
     }
-    await jitterSleep(opts.maxThinkTimeMs, opts.signal);
+    await jitterSleep(opts.maxThinkTimeMs, opts.signal)
   }
 }
 
 function pick<T>(xs: readonly T[]): T {
-  if (xs.length === 0) throw new Error("pick: empty");
-  return xs[Math.floor(Math.random() * xs.length)]!;
+  if (xs.length === 0) throw new Error('pick: empty')
+  return xs[Math.floor(Math.random() * xs.length)]!
 }
 
-async function jitterSleep(
-  maxMs: number,
-  signal: { aborted: boolean },
-): Promise<void> {
-  if (maxMs <= 0) return;
-  const ms = Math.floor(Math.random() * maxMs);
-  if (ms === 0) return;
+async function jitterSleep(maxMs: number, signal: { aborted: boolean }): Promise<void> {
+  if (maxMs <= 0) return
+  const ms = Math.floor(Math.random() * maxMs)
+  if (ms === 0) return
   await new Promise<void>((resolve) => {
-    const t = setTimeout(resolve, ms);
+    const t = setTimeout(resolve, ms)
     // Best-effort abort: poll every 50ms.
     const i = setInterval(() => {
       if (signal.aborted) {
-        clearTimeout(t);
-        clearInterval(i);
-        resolve();
+        clearTimeout(t)
+        clearInterval(i)
+        resolve()
       }
-    }, 50);
-    t.unref?.();
-    i.unref?.();
-  });
+    }, 50)
+    t.unref?.()
+    i.unref?.()
+  })
 }
