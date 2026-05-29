@@ -42,8 +42,8 @@
  * separate registration call on the worker).
  */
 
-import type { RoutingFn } from "./workers/routing/index.ts";
-import type { Event, RecordedEvent } from "./types/index.ts";
+import type { RoutingFn } from "../workers/routing/index.ts";
+import type { Event, RecordedEvent } from "../types/index.ts";
 
 /**
  * Three-mode partitioning sugar over a routing-layer `RoutingFn`. None

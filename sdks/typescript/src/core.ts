@@ -109,7 +109,7 @@ export {
   NOOP_LOGGER_IMPL,
   type ILoggerImpl,
   type LogMessage,
-} from "./logger.ts";
+} from "./logger/index.ts";
 
 // L2 retry-exhaustion class (emitted by `runCommand`).
 export { RetryBudgetExhausted } from "./errors/index.ts";

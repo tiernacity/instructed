@@ -12,7 +12,7 @@ import { after, before, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
-import { Logger } from "../src/logger.ts";
+import { Logger } from "../src/logger/index.ts";
 import {
   Client,
   exponentialBackoff,

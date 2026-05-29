@@ -48,13 +48,13 @@ export {
   routingFnForPartitionBy,
   SEQUENTIAL_PARTITION_KEY,
   type PartitionBy,
-} from "./partition-by.ts";
+} from "./facade/index.ts";
 
 // L3 routing-function combinators (composable wrappers over the L2
 // `RoutingFn`). `onlyTypes` is the type-set filter every projection
 // and PM seems to want; further combinators get added here if a
 // concrete use case demands them.
-export { onlyTypes } from "./routing-helpers.ts";
+export { onlyTypes } from "./facade/index.ts";
 
 // `runCommandWithSnapshots`: L3 orchestrator that wraps the L2
 // `runCommandAndApply` primitive with best-effort snapshot writes
@@ -89,7 +89,7 @@ export {
   commandRouter,
   type CommandRouter,
   type CommandRoute,
-} from "./command-router.ts";
+} from "./facade/index.ts";
 
 // Retry/error-policy standard library (L3). The contract
 // (`ErrorPolicy<PolicyState>`) and the observable default
@@ -115,7 +115,7 @@ export {
   DEFAULT_WAIT_TIMEOUT_MS,
   type SubscriptionRef,
   type WaitForProjectionOptions,
-} from "./consistency.ts";
+} from "./consistency/index.ts";
 
 // L3 error classes (emitted only by the facade / consistency helpers).
 export {
@@ -136,7 +136,7 @@ export {
   type ProjectionDefinition,
   type ProcessManagerDefinition,
   type DispatchOptions,
-} from "./instructed.ts";
+} from "./facade/index.ts";
 
 // Pluggable logger surface (TODO #16).
 export {
@@ -145,4 +145,4 @@ export {
   NOOP_LOGGER_IMPL,
   type ILoggerImpl,
   type LogMessage,
-} from "./logger.ts";
+} from "./logger/index.ts";

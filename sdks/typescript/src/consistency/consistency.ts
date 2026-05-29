@@ -48,14 +48,14 @@
  * `$all` refs are exempt; they validly observe every append.
  */
 
-import type { Client } from "./client/index.ts";
+import type { Client } from "../client/index.ts";
 import {
   ConsistencyTargetError,
   ConsistencyTimeout,
   InstructedError,
-} from "./errors/index.ts";
-import type { AppendedEvent } from "./types/index.ts";
-import { sleep } from "./internal/sleep.ts";
+} from "../errors/index.ts";
+import type { AppendedEvent } from "../types/index.ts";
+import { sleep } from "../internal/sleep.ts";
 
 export interface WaitForProjectionOptions {
   /** Poll interval in ms. Default 25. */

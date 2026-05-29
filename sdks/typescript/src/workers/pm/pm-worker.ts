@@ -53,7 +53,7 @@
 import type { Client } from "../../client/index.ts";
 import { prefixType, type AggregateDefinition } from "../../aggregate/index.ts";
 import { runCommandWithSnapshots } from "../../aggregate/index.ts";
-import type { CommandRouter } from "../../command-router.ts";
+import type { CommandRouter } from "../../facade/command-router.ts";
 import type { Command } from "../../types/index.ts";
 import {
   startPmSubstrate,
@@ -286,7 +286,7 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
 function resolveDispatch(
   c: DispatchedCommand,
   opts: PmWorkerOptions,
-  dispatchCtx: { logger: import("../../logger.ts").Logger },
+  dispatchCtx: { logger: import("../../logger/index.ts").Logger },
 ): {
   def: AggregateDefinition<any, any, any>;
   streamUuid: string;

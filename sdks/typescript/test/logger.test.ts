@@ -14,7 +14,7 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { Logger, DEFAULT_LOGGER_IMPL, NOOP_LOGGER_IMPL } from "../src/logger.ts";
+import { Logger, DEFAULT_LOGGER_IMPL, NOOP_LOGGER_IMPL } from "../src/logger/index.ts";
 
 describe("Logger -- wired levels", () => {
   test("eager string passes through to the underlying impl", () => {

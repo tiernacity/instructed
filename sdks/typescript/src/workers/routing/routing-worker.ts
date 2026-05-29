@@ -77,7 +77,7 @@
  */
 
 import type { Client } from "../../client/index.ts";
-import { Logger } from "../../logger.ts";
+import { Logger } from "../../logger/index.ts";
 import { SubscriptionLeaseLost, SubscriptionNotFound } from "../../errors/index.ts";
 import type {
   Event,

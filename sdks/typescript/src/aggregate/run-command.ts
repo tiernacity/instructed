@@ -36,7 +36,7 @@
  */
 
 import type { Client } from "../client/index.ts";
-import { DEFAULT_LOGGER_IMPL, Logger } from "../logger.ts";
+import { DEFAULT_LOGGER_IMPL, Logger } from "../logger/index.ts";
 import {
   RetryBudgetExhausted,
   SnapshotNotFound,

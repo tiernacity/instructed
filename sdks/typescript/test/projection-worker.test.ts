@@ -34,7 +34,7 @@ import {
 import {
   routingFnForPartitionBy,
   SEQUENTIAL_PARTITION_KEY,
-} from "../src/partition-by.ts";
+} from "../src/facade/partition-by.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 import type { Event, RecordedEvent } from "../src/types/index.ts";

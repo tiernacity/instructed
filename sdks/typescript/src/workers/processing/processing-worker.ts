@@ -57,7 +57,7 @@ import {
   SubscriptionNotFound,
   WorkItemLeaseLost,
 } from "../../errors/index.ts";
-import { Logger } from "../../logger.ts";
+import { Logger } from "../../logger/index.ts";
 import type { Event, RecordedEvent } from "../../types/index.ts";
 import type { RunningWorker } from "../../internal/running-worker.ts";
 export type { RunningWorker };

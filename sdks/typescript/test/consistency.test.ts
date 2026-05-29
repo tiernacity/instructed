@@ -250,7 +250,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
       "../src/workers/projection/index.ts"
     );
     const { routingFnForPartitionBy } = await import(
-      "../src/partition-by.ts"
+      "../src/facade/partition-by.ts"
     );
 
     const stream = randomUUID();
@@ -398,7 +398,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
       "../src/workers/projection/index.ts"
     );
     const { routingFnForPartitionBy } = await import(
-      "../src/partition-by.ts"
+      "../src/facade/partition-by.ts"
     );
 
     const stream = randomUUID();

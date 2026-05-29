@@ -39,7 +39,7 @@
  */
 
 import * as pg from "pg";
-import { Client } from "./client/index.ts";
+import { Client } from "../client/index.ts";
 import {
   DEFAULT_RETRY_BUDGET,
   prefixType,
@@ -47,19 +47,19 @@ import {
   type DispatchContext,
   type DomainEvent,
   type RunCommandOptions,
-} from "./aggregate/index.ts";
-import { runCommandWithSnapshots } from "./aggregate/index.ts";
+} from "../aggregate/index.ts";
+import { runCommandWithSnapshots } from "../aggregate/index.ts";
 import {
   startRoutingWorker,
   DEFAULT_ROUTING_BATCH_SIZE,
   DEFAULT_ROUTING_LEASE_SECONDS,
   DEFAULT_ROUTING_POLL_INTERVAL_MS,
   type RoutingFn,
-} from "./workers/routing/index.ts";
+} from "../workers/routing/index.ts";
 import {
   startProjectionWorker,
   type ProjectionHandler,
-} from "./workers/projection/index.ts";
+} from "../workers/projection/index.ts";
 import {
   routingFnForPartitionBy,
   type PartitionBy,
@@ -67,20 +67,20 @@ import {
 import {
   startPmWorker,
   type PmDefinition,
-} from "./workers/pm/index.ts";
+} from "../workers/pm/index.ts";
 import type { CommandRouter } from "./command-router.ts";
-import type { ErrorPolicy } from "./workers/processing/index.ts";
+import type { ErrorPolicy } from "../workers/processing/index.ts";
 import {
   waitForProjection,
   type SubscriptionRef,
-} from "./consistency.ts";
-import { UnknownAggregateType } from "./errors/index.ts";
+} from "../consistency/index.ts";
+import { UnknownAggregateType } from "../errors/index.ts";
 import {
   DEFAULT_LOGGER_IMPL,
   Logger,
   type ILoggerImpl,
-} from "./logger.ts";
-import { defaultWorkerId } from "./internal/worker-id.ts";
+} from "../logger/index.ts";
+import { defaultWorkerId } from "../internal/worker-id.ts";
 import type {
   Event,
   Command,
@@ -88,8 +88,8 @@ import type {
   ExpectedVersion,
   Queryable,
   StartFrom,
-} from "./types/index.ts";
-import type { RunningWorker } from "./internal/running-worker.ts";
+} from "../types/index.ts";
+import type { RunningWorker } from "../internal/running-worker.ts";
 
 // ============================================================================
 // Public surface

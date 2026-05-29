@@ -17,8 +17,8 @@
  * idiomatic TS convenience.
  */
 
-import type { RoutingFn } from "./workers/routing/index.ts";
-import type { Event } from "./types/index.ts";
+import type { RoutingFn } from "../workers/routing/index.ts";
+import type { Event } from "../types/index.ts";
 
 /**
  * Filter a `RoutingFn` to a fixed set of event types. Events whose

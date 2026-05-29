@@ -57,7 +57,7 @@ import {
   type DomainEvent,
   type RunCommandOptions,
 } from "./run-command.ts";
-import { DEFAULT_LOGGER_IMPL, Logger } from "../logger.ts";
+import { DEFAULT_LOGGER_IMPL, Logger } from "../logger/index.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
 import type { AppendedEvent } from "../types/index.ts";
 

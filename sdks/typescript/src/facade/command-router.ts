@@ -35,8 +35,8 @@
  * state) write a `CommandRouter` directly.
  */
 
-import type { AggregateDefinition, DispatchContext } from "./aggregate/index.ts";
-import type { Command } from "./types/index.ts";
+import type { AggregateDefinition, DispatchContext } from "../aggregate/index.ts";
+import type { Command } from "../types/index.ts";
 
 /**
  * Pure resolution from a command to its target aggregate

@@ -21,7 +21,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
-import { Logger } from "../src/logger.ts";
+import { Logger } from "../src/logger/index.ts";
 import {
   DEFAULT_ERROR_POLICY,
   startProcessingWorker,
