@@ -159,9 +159,12 @@ is final). Each slice ends green.
       recorded-event SELECT as a view and a shared snapshot-upsert.
       Pure refactor; conformance is SQLSTATE-checked so messages may
       change. Defer if appetite is low.
-- [ ] **A6 — (optional) SDK row-mapper consolidation.** Pull
+- [→] **A6 — (optional) SDK row-mapper consolidation.** Pull
       `toBigInt`/`toDate`/`mapRecordedEvent`/`RawEventRow` and the
-      read-event column list into one place. Naturally folds into B3.
+      read-event column list into one place. **Deferred into B3** (see
+      the B3 entry): doing it standalone in flat `src/` would just be
+      moved again by B3, so it is folded into that slice and lands
+      directly in `client/row-mappers.ts`. Do NOT do A6 on its own.
 
 A1–A3 could also be done as a single "remove the 4 legacy procs" slice
 if a session has the appetite; they are separated here to stay small.
@@ -175,7 +178,13 @@ type-check` + `npm test`.
 
 - [ ] **B1 — `types.ts` → `types/`.**
 - [ ] **B2 — `errors.ts` → `errors/`.**
-- [ ] **B3 — `client.ts` → `client/`** (+ `row-mappers.ts`, `pack-event.ts`; folds in A6).
+- [ ] **B3 — `client.ts` → `client/`** (+ `row-mappers.ts`, `pack-event.ts`).
+      **MUST also do A6 here** (row-mapper consolidation): in the same
+      slice, extract `toBigInt`/`toDate`/`mapRecordedEvent`/`RawEventRow`
+      and the duplicated read-event column-list string into
+      `client/row-mappers.ts`, and point the four read methods at it.
+      A6 has no separate slice — it is closed out by B3. The public
+      barrel surface must be unchanged.
 - [ ] **B4 — `aggregate.ts` (+ `aggregate-snapshots.ts`, `snapshot-version.ts`) → `aggregate/`.**
 - [ ] **B5 — workers → `workers/{routing,processing,projection,pm}/`** (+ `pm-substrate`, `error-policies`).
 - [ ] **B6 — facade + consistency → `facade/`, `consistency/`** (+ `command-router`, `partition-by`, `routing-helpers`, `logger`).

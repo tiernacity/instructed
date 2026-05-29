@@ -84,7 +84,7 @@ import type {
   RecordedEvent,
   RouteDecision,
   StartFrom,
-} from "./types.ts";
+} from "./types/index.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 export type { RunningWorker };
 import { defaultWorkerId } from "./internal/worker-id.ts";

@@ -16,7 +16,7 @@
 import type * as pg from "pg";
 import { Client } from "../client.ts";
 import { mapPgError } from "../errors.ts";
-import type { Queryable } from "../types.ts";
+import type { Queryable } from "../types/index.ts";
 
 interface PoolLike {
   connect(): Promise<pg.PoolClient>;

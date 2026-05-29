@@ -54,7 +54,7 @@ import type { Client } from "./client.ts";
 import { prefixType, type AggregateDefinition } from "./aggregate.ts";
 import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
 import type { CommandRouter } from "./command-router.ts";
-import type { Command } from "./types.ts";
+import type { Command } from "./types/index.ts";
 import {
   startPmSubstrate,
   type PmSubstrateDefinition,
@@ -64,7 +64,7 @@ import type {
   ErrorPolicy,
   ProcessingHandlerContext,
 } from "./processing-worker.ts";
-import type { Event, RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types/index.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 
 // ============================================================================

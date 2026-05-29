@@ -66,7 +66,7 @@ export {
 } from "./errors.ts";
 
 // L1 \u2014 wire-shape contracts.
-export * from "./types.ts";
+export * from "./types/index.ts";
 
 // ----------------------------------------------------------------------------
 // L2 \u2014 core behaviours

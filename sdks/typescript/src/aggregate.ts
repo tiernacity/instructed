@@ -44,13 +44,13 @@ import {
   WrongExpectedVersion,
 } from "./errors.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
-import { expected as ev } from "./types.ts";
+import { expected as ev } from "./types/index.ts";
 import type {
   AppendedEvent,
   ExpectedVersion,
   NewEvent,
   RecordedEvent,
-} from "./types.ts";
+} from "./types/index.ts";
 
 /**
  * Per-dispatch context handed to {@link AggregateDefinition.execute}

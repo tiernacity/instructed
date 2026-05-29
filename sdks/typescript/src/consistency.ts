@@ -54,7 +54,7 @@ import {
   ConsistencyTimeout,
   InstructedError,
 } from "./errors.ts";
-import type { AppendedEvent } from "./types.ts";
+import type { AppendedEvent } from "./types/index.ts";
 import { sleep } from "./internal/sleep.ts";
 
 export interface WaitForProjectionOptions {

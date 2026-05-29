@@ -18,7 +18,7 @@
  */
 
 import type { RoutingFn } from "./routing-worker.ts";
-import type { Event } from "./types.ts";
+import type { Event } from "./types/index.ts";
 
 /**
  * Filter a `RoutingFn` to a fixed set of event types. Events whose

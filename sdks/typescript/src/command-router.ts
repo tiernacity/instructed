@@ -36,7 +36,7 @@
  */
 
 import type { AggregateDefinition, DispatchContext } from "./aggregate.ts";
-import type { Command } from "./types.ts";
+import type { Command } from "./types/index.ts";
 
 /**
  * Pure resolution from a command to its target aggregate

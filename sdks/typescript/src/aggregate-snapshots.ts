@@ -59,7 +59,7 @@ import {
 } from "./aggregate.ts";
 import { DEFAULT_LOGGER_IMPL, Logger } from "./logger.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
-import type { AppendedEvent } from "./types.ts";
+import type { AppendedEvent } from "./types/index.ts";
 
 /**
  * Run a command against an aggregate stream with snapshot

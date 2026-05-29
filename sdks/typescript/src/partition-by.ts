@@ -43,7 +43,7 @@
  */
 
 import type { RoutingFn } from "./routing-worker.ts";
-import type { Event, RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types/index.ts";
 
 /**
  * Three-mode partitioning sugar over a routing-layer `RoutingFn`. None

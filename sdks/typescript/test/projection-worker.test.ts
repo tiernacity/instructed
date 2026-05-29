@@ -37,7 +37,7 @@ import {
 } from "../src/partition-by.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
-import type { Event, RecordedEvent } from "../src/types.ts";
+import type { Event, RecordedEvent } from "../src/types/index.ts";
 
 const ALL = "$all";
 

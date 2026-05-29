@@ -23,7 +23,7 @@ import {
   startPmSubstrate,
   type PmSubstrateDefinition,
 } from "../src/pm-substrate.ts";
-import type { RecordedEvent } from "../src/types.ts";
+import type { RecordedEvent } from "../src/types/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 

@@ -88,7 +88,7 @@ import type {
   ExpectedVersion,
   Queryable,
   StartFrom,
-} from "./types.ts";
+} from "./types/index.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 
 // ============================================================================

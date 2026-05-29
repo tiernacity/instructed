@@ -74,7 +74,7 @@ import {
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
 } from "./processing-worker.ts";
-import type { Event, RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types/index.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 
 // ============================================================================

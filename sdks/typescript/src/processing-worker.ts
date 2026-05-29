@@ -58,7 +58,7 @@ import {
   WorkItemLeaseLost,
 } from "./errors.ts";
 import { Logger } from "./logger.ts";
-import type { Event, RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types/index.ts";
 import type { RunningWorker } from "./internal/running-worker.ts";
 export type { RunningWorker };
 import { defaultWorkerId } from "./internal/worker-id.ts";

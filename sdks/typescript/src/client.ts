@@ -30,7 +30,7 @@ import type {
   RouteDecision,
   Snapshot,
   SnapshotInput,
-} from "./types.ts";
+} from "./types/index.ts";
 
 export interface ClientOptions {
   /** Reserved. */

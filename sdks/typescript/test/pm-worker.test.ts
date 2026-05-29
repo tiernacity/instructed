@@ -34,7 +34,7 @@ import {
 } from "../src/pm-worker.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "../src/snapshot-version.ts";
 import type { AggregateDefinition, DomainEvent } from "../src/aggregate.ts";
-import type { RecordedEvent } from "../src/types.ts";
+import type { RecordedEvent } from "../src/types/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 

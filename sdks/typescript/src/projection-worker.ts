@@ -24,7 +24,7 @@
  */
 
 import type { Client } from "./client.ts";
-import type { Event, RecordedEvent } from "./types.ts";
+import type { Event, RecordedEvent } from "./types/index.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
