@@ -43,6 +43,7 @@ export interface ClientOptions {
 
 function isQueryable(value: unknown): value is Queryable {
   return (
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- structural type-guard probe on an unknown value.
     typeof value === 'object' && value !== null && typeof (value as Queryable).query === 'function'
   )
 }
@@ -187,6 +188,7 @@ export class Client {
       sourceUuid: r.source_uuid,
       sourceType: r.source_type,
       sourceVersion: toBigInt(r.source_version),
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- DB-row boundary: snapshot data column asserted to the caller's state type S.
       data: r.data as S,
       metadata: r.metadata,
       createdAt: toDate(r.created_at),
@@ -244,7 +246,9 @@ export class Client {
       return {
         result: 'claimed',
         lastSeen: toBigInt(r.last_seen),
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- DB-row boundary: claimed_by is non-null on the 'claimed' branch.
         claimedBy: r.claimed_by as string,
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- DB-row boundary: claim_expires_at column shape from pg.
         claimExpiresAt: toDate(r.claim_expires_at as Date | string),
       }
     }

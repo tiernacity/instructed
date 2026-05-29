@@ -29,6 +29,7 @@ type Pinged = { type: 'Pinged'; data: Record<string, never> }
 type E = Added | Removed | Pinged
 
 function fake(type: E['type'], data: unknown = {}): RecordedEvent<E> {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test fixture: synthetic RecordedEvent.
   return {
     event_id: 'id',
     event_number: 1n,

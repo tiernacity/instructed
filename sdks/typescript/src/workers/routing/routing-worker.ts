@@ -264,6 +264,7 @@ export function startRoutingWorker<E extends Event = Event>(
         } catch (err) {
           // Genuine errors (stream not found, bad args, transport
           // failures). Surface and exit.
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to onError's Error contract.
           safeOnError(err as Error)
           return
         }
@@ -281,6 +282,7 @@ export function startRoutingWorker<E extends Event = Event>(
               ? await client.readAll<E>(claimed.lastSeen + 1n, batchSize)
               : await client.readStream<E>(stream, claimed.lastSeen + 1n, batchSize)
         } catch (err) {
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to onError's Error contract.
           safeOnError(err as Error)
           await releaseQuietly()
           await sleep(pollInterval, signal)
@@ -325,6 +327,7 @@ export function startRoutingWorker<E extends Event = Event>(
             holdingLease = false
             continue
           }
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to onError's Error contract.
           safeOnError(err as Error)
           await releaseQuietly()
           await sleep(pollInterval, signal)
@@ -349,6 +352,7 @@ export function startRoutingWorker<E extends Event = Event>(
     } catch (err) {
       if (!isLeaseLoss(err) && !(err instanceof SubscriptionNotFound)) {
         // Surface but don't abort — release is best-effort.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to onError's Error contract.
         safeOnError(err as Error)
       }
     }

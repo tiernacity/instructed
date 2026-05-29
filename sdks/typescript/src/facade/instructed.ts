@@ -397,6 +397,7 @@ export class Instructed {
       // PolicyState is opaque to the facade; the worker threads it
       // back to the policy untouched. Erase the slot here so the
       // heterogeneous registry holds one type.
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- PolicyState is opaque to the facade and threaded back to the policy untouched; erased so the registry holds one type.
       def: def as unknown as ProjectionDefinition<Event>,
       opts,
     })
@@ -411,6 +412,7 @@ export class Instructed {
     this.processManagers.push({
       stream: def.stream ?? '$all',
       // PolicyState erased here (see registerProjection).
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- PolicyState erased here; opaque to the facade (see registerProjection).
       def: def as unknown as ProcessManagerDefinition<unknown, Event>,
       opts,
     })
@@ -460,8 +462,10 @@ export class Instructed {
     if (typeof a === 'string') {
       // Explicit overload: dispatch(type, id, command, opts?)
       aggregateType = a
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- explicit dispatch(type,id,command,opts) overload: 'b' is the id string per the call signature.
       id = b as string
       command = c
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- explicit overload: 'd' is the optional DispatchOptions arg.
       opts = (d as DispatchOptions | undefined) ?? {}
     } else {
       // Lean overload: dispatch(command, opts?). Route via router.
@@ -473,10 +477,12 @@ export class Instructed {
         )
       }
       const dispatchCtx: DispatchContext = { logger: this.logger_ }
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- lean dispatch(command,opts) overload: 'a' is the Command per the call signature.
       const route = this.commandRouter_(a as Command, dispatchCtx)
       aggregateType = route.aggregateType
       id = route.aggregateId
       command = a
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- lean overload: 'b' is the optional DispatchOptions arg.
       opts = (b as DispatchOptions | undefined) ?? {}
     }
 
@@ -683,6 +689,7 @@ export class Instructed {
       'pollInterval',
     ]
     const tuning: WorkerOptions = {}
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- fully populated in the loop below over every WorkerOptions field.
     const sources = {} as Record<keyof WorkerOptions, ProvenanceTag>
     for (const f of fields) {
       const wv = opts.workers?.[name]?.[f]

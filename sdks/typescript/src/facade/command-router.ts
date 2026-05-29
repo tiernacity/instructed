@@ -84,6 +84,7 @@ export function commandRouter<C extends Command>(routes: {
 }): CommandRouter {
   // The mapped-type domain is exactly the discriminator union of
   // `C`; we erase to a plain Record for runtime lookup.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- erase the exhaustive mapped type to a plain runtime lookup table (keys are exactly the command-type union).
   const table = routes as unknown as Record<string, CommandRoute<Command, string>>
   return (command, _ctx) => {
     const entry = table[command.type]
@@ -92,6 +93,7 @@ export function commandRouter<C extends Command>(routes: {
     }
     return {
       aggregateType: entry.aggregate.type,
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- existential dispatch: the resolved route's id() accepts this command variant by construction.
       aggregateId: entry.id(command as never),
     }
   }

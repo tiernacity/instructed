@@ -187,6 +187,7 @@ export function retryUpTo<PolicyState>(
         // The state-of-record going into the stop is whatever was
         // last set; preserve it verbatim. Cast covers the `state`
         // parameter being `PolicyState | undefined`.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- preserve the caller's last PolicyState verbatim through the stop decision.
         state: state as PolicyState,
       }
     }

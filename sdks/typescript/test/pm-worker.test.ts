@@ -210,6 +210,7 @@ void describe('startPmWorker — non-terminal complete', () => {
       // partition's source_uuid.
       const snap = await snapshotRow(`${name}-p1`)
       assert.ok(snap, 'snapshot should exist')
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot data.
       const snapData = snap.data as PmState
       // apply was run on every routed event, in event-number order.
       assert.deepEqual(
@@ -406,6 +407,7 @@ void describe('startPmWorker — rebuild on missing snapshot', () => {
     const finalSnap = await snapshotRow(`${name}-p1`)
     assert.ok(finalSnap, 'snapshot should be rebuilt')
     assert.deepEqual(
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot data.
       (finalSnap.data as PmState).applied,
       [...ens1, e3].map((n) => n.toString()),
     )
@@ -444,6 +446,7 @@ void describe('startPmWorker — rebuild on snapshot_module_version mismatch', (
     const v1Snap = await snapshotRow(`${name}-p1`)
     assert.ok(v1Snap, 'v1 snapshot should exist')
     assert.deepEqual(
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot metadata.
       (v1Snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY],
       'v1',
     )
@@ -492,11 +495,13 @@ void describe('startPmWorker — rebuild on snapshot_module_version mismatch', (
     const finalSnap = await snapshotRow(`${name}-p1`)
     assert.ok(finalSnap)
     assert.deepEqual(
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot data.
       (finalSnap.data as PmState).applied,
       [...ens, e3].map((n) => n.toString()),
     )
     // The v2 snapshot now carries v2 in its metadata.
     assert.deepEqual(
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque snapshot metadata.
       (finalSnap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY],
       'v2',
     )
@@ -588,5 +593,7 @@ void describe('startPmWorker — empty handle result', () => {
 })
 
 // Silence unused-import linter for type-only references kept for clarity.
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: type-level probe (value never used at runtime).
 void (null as unknown as DispatchedCommand)
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: type-level probe (value never used at runtime).
 void (null as unknown as RecordedEvent)

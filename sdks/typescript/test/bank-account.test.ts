@@ -194,6 +194,7 @@ function balancesHandler(view: BalancesView) {
   return async (event: RecordedEvent) => {
     const last = view.lastEventByAccount.get(event.stream_uuid) ?? -1n
     if (event.event_number <= last) return // idempotent
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
     const data = event.data as { amount?: number }
     switch (event.type) {
       case 'AccountOpened':
@@ -233,6 +234,7 @@ type TransferStage =
 const TRANSFER_PM_NAME = 'TransferProcessManager'
 
 function transferIdOf(event: { data: unknown }): string | null {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
   const d = event.data as { transferId?: string } | null
   return d?.transferId ?? null
 }
@@ -240,6 +242,7 @@ function transferIdOf(event: { data: unknown }): string | null {
 const transferRouteFn: RoutingFn = (e) => {
   switch (e.type) {
     case 'TransferRequested': {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
       const id = (e.data as { transferId?: string }).transferId
       return id ? { partitionKey: id } : 'ignore'
     }
@@ -257,6 +260,7 @@ const transferRouteFn: RoutingFn = (e) => {
 function transferApply(state: TransferStage, event: RecordedEvent): TransferStage {
   switch (event.type) {
     case 'Withdrawn': {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
       const d = event.data as { amount: number; transferId?: string; to?: string }
       if (!d.to || !d.transferId) return state
       return {
@@ -270,6 +274,7 @@ function transferApply(state: TransferStage, event: RecordedEvent): TransferStag
     case 'Deposited':
       return { stage: 'done' }
     case 'WithdrawalRefused': {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
       const d = event.data as { reason: string }
       return { stage: 'refunded', reason: d.reason }
     }
@@ -284,6 +289,7 @@ async function transferHandle(
 ): Promise<{ commands?: DispatchedCommand[]; complete?: boolean }> {
   switch (event.type) {
     case 'TransferRequested': {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
       const d = event.data as TransferRequestedData
       return {
         commands: [
@@ -301,6 +307,7 @@ async function transferHandle(
       }
     }
     case 'Withdrawn': {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
       const d = event.data as { amount: number; transferId?: string; to?: string }
       if (!d.to || !d.transferId) return {}
       return {

@@ -42,6 +42,7 @@ export async function withTransaction<T>(
       await pc.query('BEGIN')
       let result: T
       try {
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- a pg PoolClient satisfies the Queryable surface the Client uses.
         result = await fn(new Client(pc as unknown as Queryable))
       } catch (err) {
         try {
@@ -58,6 +59,7 @@ export async function withTransaction<T>(
     }
   }
   // Already a single session: inline BEGIN/COMMIT.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- non-pool branch: con is already a single Queryable session.
   const session = con as Queryable
   try {
     await session.query('BEGIN')

@@ -237,7 +237,9 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
   // erase the generic internally so the default policy (which uses
   // `undefined`) and a user-supplied generic policy share one slot.
   const errorPolicy: ErrorPolicy<unknown> =
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- SDK is opaque to PolicyState; erase the user's slot to share one internal type.
     (def.errorPolicy as ErrorPolicy<unknown> | undefined) ??
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- default policy uses undefined state; erased to the shared slot.
     (DEFAULT_ERROR_POLICY as ErrorPolicy<unknown>)
   const onError = opts.onError ?? noopOnError
 
@@ -318,7 +320,9 @@ export function startProcessingWorker<E extends Event = Event, PolicyState = und
           )
           continue
         } catch (err2) {
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to onError's Error contract.
           if (!(err2 instanceof WorkItemLeaseLost)) safeOnError(err2 as Error)
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- caught value coerced to onError's Error contract.
           markAborted(err2 as Error)
           return
         }

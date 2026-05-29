@@ -98,11 +98,13 @@ export interface DispatchedCommandExplicit {
 }
 
 function isExplicitDispatch(c: DispatchedCommand): c is DispatchedCommandExplicit {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- structural type-guard probe; narrowed by the runtime checks below.
+  const e = c as Partial<DispatchedCommandExplicit>
   return (
-    typeof (c as DispatchedCommandExplicit).streamUuid === 'string' &&
-    typeof (c as DispatchedCommandExplicit).aggregate === 'object' &&
-    (c as DispatchedCommandExplicit).aggregate !== null &&
-    typeof (c as DispatchedCommandExplicit).aggregate.type === 'string'
+    typeof e.streamUuid === 'string' &&
+    typeof e.aggregate === 'object' &&
+    e.aggregate !== null &&
+    typeof e.aggregate.type === 'string'
   )
 }
 
@@ -245,6 +247,7 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
         // Per-command trace: aggregate type + command type are
         // enough to read a PM's behaviour off the log without
         // dumping payloads.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- trace-only structural read of an opaque dispatched command.
         const cmdType = (resolved.command as { type?: string }).type ?? '<untyped>'
         ctx.logger.trace(
           () => `pm dispatch: ${resolved.def.type}.${cmdType} -> ${resolved.streamUuid}`,

@@ -369,6 +369,7 @@ void describe('Append-only trigger (IS006)', () => {
     await assert.rejects(
       () => pool.query(`UPDATE instructed.events SET event_type = 'B'`),
       (err: unknown) => {
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: read error code off caught value.
         return (err as { code?: string }).code === 'IS006'
       },
     )
@@ -380,6 +381,7 @@ void describe('Append-only trigger (IS006)', () => {
       await pool.query(`DELETE FROM instructed.events`)
       assert.fail('expected DELETE to raise')
     } catch (err: unknown) {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: read error code off caught value.
       assert.equal((err as { code?: string }).code, 'IS006')
       const { mapPgError } = await import('../src/errors/index.ts')
       const mapped = mapPgError(err)

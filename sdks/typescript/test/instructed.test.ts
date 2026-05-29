@@ -159,7 +159,8 @@ void describe('Instructed -- poll fan-out', () => {
       routeFn: (e) =>
         e.type === 'Triggered'
           ? {
-              partitionKey: (e.data as { processId: string }).processId,
+              // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
+      partitionKey: (e.data as { processId: string }).processId,
             }
           : 'ignore',
       initialState: () => ({ done: false }),
@@ -275,6 +276,7 @@ void describe('Instructed -- command router', () => {
     const app = new Instructed({ db: pool })
     app.register(counter())
     await assert.rejects(
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: compile-time probe for the unknown-command error path.
       () => app.dispatch<Command<'Whatever'>>({ type: 'Whatever' } as never),
       /no command router registered/,
     )

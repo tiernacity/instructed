@@ -57,6 +57,7 @@ export function mapRecordedEvent<E extends Event>(row: RawEventRow): RecordedEve
   // row whose `event_type` is just `string`) matches the specific
   // union member. The constructed shape IS structurally compatible;
   // the caller's `E` selects which branch the consumer sees.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- DB-row boundary: opaque SQL row asserted to the caller's event union; shape guaranteed by the SELECT.
   return {
     event_id: row.event_id,
     event_number: toBigInt(row.event_number),

@@ -202,6 +202,7 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
       const snap = await client.readSnapshot<S>(sourceUuid)
       snapData = snap.data
       if (snap.metadata && typeof snap.metadata === 'object' && snap.metadata !== null) {
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- snapshot metadata is opaque JSON from the DB; narrowed to a record after the object guard above.
         const v = (snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY]
         if (typeof v === 'string') snapModuleVersion = v
       }
@@ -215,6 +216,7 @@ export function startPmSubstrate<S, E extends Event = Event, PolicyState = undef
       (want === undefined ? snapModuleVersion === undefined : snapModuleVersion === want)
 
     if (matches) {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- snapshot data column asserted to PM state S (version matched above).
       return snapData as S
     }
 

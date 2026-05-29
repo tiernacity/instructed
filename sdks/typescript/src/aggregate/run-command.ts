@@ -431,6 +431,7 @@ export async function runCommandAndApply<S, C, E extends DomainEvent = DomainEve
   // command-worth of events.
   let stagedState = r.loadedState
   for (const e of r.filled) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- L2 fold: r.filled events are of type E by construction (produced by def.execute).
     stagedState = def.apply(stagedState, {
       type: e.type,
       data: e.data,
@@ -476,6 +477,7 @@ async function loadAggregate<S, C, E extends DomainEvent>(
     const snap = await client.readSnapshot<S>(streamUuid)
     let snapModuleVersion: string | undefined
     if (snap.metadata && typeof snap.metadata === 'object' && snap.metadata !== null) {
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- snapshot metadata is opaque JSON from the DB; narrowed to a record after the object guard above.
       const v = (snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY]
       if (typeof v === 'string') snapModuleVersion = v
     }
@@ -517,6 +519,7 @@ async function loadAggregate<S, C, E extends DomainEvent>(
 }
 
 function recordedToDomain<E extends DomainEvent>(row: RecordedEvent): E {
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- distributive RecordedEvent -> E: the runtime row shape matches the caller's event-union member.
   return {
     type: row.type,
     data: row.data,
