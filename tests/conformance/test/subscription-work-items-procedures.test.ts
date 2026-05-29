@@ -183,7 +183,7 @@ describe("SUB-A slice 2 — route_batch", () => {
   //   event_numbers, and no work-item row is written for them.
   //   (TODO #11 / Pass-A finding.)
   test("route_batch with mixed decisions: cursor jumps past ignored event_numbers, no work item written for them", async () => {
-    const [e1, e2, e3] = await appendN(pool, "s1", 3);
+    const [e1, , e3] = await appendN(pool, "s1", 3);
     // Decisions only mention e1 and e3; e2 is ignored.
     const r = await pool.query<{ inserted_count: string; new_last_seen: string }>(
       `SELECT * FROM instructed.route_batch($1, $2, $3, $4, $5::jsonb)`,
