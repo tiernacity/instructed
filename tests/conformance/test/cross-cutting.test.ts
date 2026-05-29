@@ -304,7 +304,7 @@ describe("streams — first-class identity", () => {
   //   The internal numeric stream_id is an implementation detail; it
   //   is NOT exposed across the procedure contract. None of the
   //   returned-row signatures of read_stream / read_all /
-  //   read_subscription_batch / read_snapshot mention stream_id.
+  //   read_snapshot mention stream_id.
   //   The smoke test in step 1/8 already pinned the function names;
   //   this case pins the column-shape contract.
   test("no procedure exposes internal stream_id in its return columns", async () => {
@@ -318,7 +318,7 @@ describe("streams — first-class identity", () => {
          JOIN pg_namespace n ON n.oid = p.pronamespace
         WHERE n.nspname = 'instructed'
           AND p.proname IN (
-            'read_stream', 'read_all', 'read_subscription_batch',
+            'read_stream', 'read_all',
             'read_snapshot'
           )`,
     );

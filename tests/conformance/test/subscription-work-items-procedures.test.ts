@@ -101,6 +101,13 @@ describe("SUB-A slice 2 — route_batch", () => {
     await closePool();
   });
 
+  // INV-SUB-P-030: the routing cursor advances in delivery order
+  //   (event_number order for $all).
+  // INV-SUB-P-032: advancing to N records "all events up to and
+  //   including N". Under SUB-A both are realised by route_batch's
+  //   atomic cursor-advance + work-item insert (the pre-SUB-A
+  //   read_subscription_batch / advance_subscription procedures were
+  //   removed in slice A3).
   test("inserts decisions and advances the cursor atomically", async () => {
     const [e1, e2, e3] = await appendN(pool, "s1", 3);
     const r = await pool.query<{ inserted_count: string; new_last_seen: string }>(
@@ -208,6 +215,9 @@ describe("SUB-A slice 2 — route_batch", () => {
     );
   });
 
+  // INV-SUB-P-034: out-of-order / duplicate cursor targets are
+  //   absorbed via max(last_seen, p_new_cursor); a lower target does
+  //   not move the cursor backwards.
   test("cursor advance is monotone (lower target is a no-op)", async () => {
     const [e1, e2] = await appendN(pool, "s1", 2);
     await pool.query(
@@ -505,6 +515,10 @@ describe("SUB-A slice 2 — claim_work_item", () => {
   // INV-SUB-W-012: a processing worker taking over an
   //   expired-claimed row sees the same work item; the previous
   //   worker's next op raises IS030 work_item_lease_lost.
+  // INV-SUB-P-031: at-least-once delivery. Under SUB-A application
+  //   redelivery on handler crash is realised at the work-item layer
+  //   (lease takeover on an expired 'claimed' row), not by the
+  //   removed read_subscription_batch no-auto-ack mechanism (A3).
   test("lease takeover: expired 'claimed' row is re-claimable", async () => {
     const [e1] = await seedRouted([{ pk: "p1" }]);
     // Claim with a 1-second lease then back-date it so it's already expired.

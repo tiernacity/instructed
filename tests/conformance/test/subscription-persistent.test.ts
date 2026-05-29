@@ -3,9 +3,15 @@
  *
  * Drives `instructed.claim_subscription`,
  * `instructed.release_subscription`,
- * `instructed.read_subscription_batch`,
- * `instructed.advance_subscription`, and
+ * `instructed.route_batch` (for cursor advance), and
  * `instructed.delete_subscription` directly via `pg` (D-0021).
+ *
+ * The pre-SUB-A single-cursor delivery procedures
+ * (`read_subscription_batch` / `advance_subscription`) were removed
+ * in slice A3; their delivery-order, at-least-once and
+ * cursor-monotonicity invariants (INV-SUB-P-030/031/032/034) are now
+ * realised by the SUB-A routing cursor + work-item queue and covered
+ * in `subscription-work-items-procedures.test.ts`.
  *
  * Each `test(...)` carries one or more `// INV-SUB-P-NNN` annotations
  * on the line above it. The procedures' full contracts live in
@@ -87,54 +93,25 @@ async function release(
   );
 }
 
-interface BatchRow {
-  event_id: string;
-  event_number: bigint;
-  stream_uuid: string;
-  stream_version: bigint;
-  event_type: string;
-  data: unknown;
-}
-
-async function readBatch(
-  streamUuid: string,
-  name: string,
-  workerId: string,
-  qty: number,
-): Promise<BatchRow[]> {
-  const r = await pool.query<{
-    event_id: string;
-    event_number: string;
-    stream_uuid: string;
-    stream_version: string;
-    event_type: string;
-    data: unknown;
-  }>(
-    `SELECT event_id, event_number, stream_uuid, stream_version, event_type, data
-       FROM instructed.read_subscription_batch($1, $2, $3, $4)`,
-    [streamUuid, name, workerId, qty],
-  );
-  return r.rows.map((row) => ({
-    event_id: row.event_id,
-    event_number: BigInt(row.event_number),
-    stream_uuid: row.stream_uuid,
-    stream_version: BigInt(row.stream_version),
-    event_type: row.event_type,
-    data: row.data,
-  }));
-}
-
+// Advance the routing cursor via the SUB-A `route_batch` primitive
+// (the pre-SUB-A `advance_subscription` procedure was removed in A3).
+// Passing an empty decisions array moves the cursor monotonically to
+// `greatest(last_seen, upToPosition)` without enqueuing work items —
+// exactly the cursor-only advance these lifecycle tests need. Requires
+// the caller to hold the lease; a non-holder raises IS022 and a
+// missing subscription raises IS020, matching the old contract.
 async function advance(
   streamUuid: string,
   name: string,
   workerId: string,
   upToPosition: bigint,
 ): Promise<bigint> {
-  const r = await pool.query<{ last_seen: string }>(
-    `SELECT * FROM instructed.advance_subscription($1, $2, $3, $4)`,
+  const r = await pool.query<{ new_last_seen: string }>(
+    `SELECT new_last_seen
+       FROM instructed.route_batch($1, $2, $3, $4, '[]'::jsonb)`,
     [streamUuid, name, workerId, upToPosition],
   );
-  return BigInt(r.rows[0].last_seen);
+  return BigInt(r.rows[0].new_last_seen);
 }
 
 // Reads the routing cursor directly. The read_subscription_position
@@ -426,218 +403,6 @@ describe("subscriptions — single-active-subscriber and failover", () => {
 });
 
 // =============================================================================
-// Delivery order, at-least-once (INV-SUB-P-030, 031)
-// =============================================================================
-
-describe("subscriptions — delivery", () => {
-  // INV-SUB-P-030: single-stream subscriptions deliver in stream_version order
-  test("single-stream subscription delivers events in stream_version order", async () => {
-    const s = await seedStream(5);
-    await claim(s, "h", "w1");
-    const batch = await readBatch(s, "h", "w1", 100);
-    assert.deepEqual(
-      batch.map((b) => b.stream_version),
-      [1n, 2n, 3n, 4n, 5n],
-    );
-    assert.deepEqual(
-      batch.map((b) => b.event_type),
-      ["E1", "E2", "E3", "E4", "E5"],
-    );
-  });
-
-  // INV-SUB-P-001 / INV-SUB-P-030 (subscription scope isolation):
-  //   a per-stream subscription on stream A MUST NOT deliver events
-  //   appended to stream B. The lone positive test above asserts
-  //   stream-A delivery; this one asserts stream-B non-delivery in
-  //   the same store. (TODO #11 / §4 gap-list item 1.)
-  test("per-stream subscription on A does not deliver events from B", async () => {
-    const a = await seedStream(3); // global event_numbers 1..3
-    const b = await seedStream(3); // global event_numbers 4..6
-    await claim(a, "h", "w1");
-    const batch = await readBatch(a, "h", "w1", 100);
-    assert.equal(batch.length, 3, "only A's events should be delivered");
-    for (const row of batch) {
-      assert.equal(row.stream_uuid, a);
-    }
-    assert.deepEqual(batch.map((r) => r.stream_version), [1n, 2n, 3n]);
-    // Sanity: the B-events exist in the store (so the test is
-    // actually exercising the filter, not a setup that wrote
-    // nothing).
-    const bRows = await pool.query<{ n: string }>(
-      `SELECT count(*)::text AS n FROM instructed.stream_events se
-         JOIN instructed.streams s USING (stream_id)
-        WHERE s.stream_uuid = $1`,
-      [b],
-    );
-    assert.equal(bRows.rows[0].n, "3");
-  });
-
-  // INV-SUB-P-030: '$all' subscriptions deliver in event_number order
-  test("'$all' subscription delivers events in event_number order across streams", async () => {
-    const a = await seedStream(2); // events 1,2
-    const b = await seedStream(1); // event 3
-    await appendAny(pool, a, [{ event_type: "A3" }]); // event 4
-    await claim("$all", "h", "w1");
-    const batch = await readBatch("$all", "h", "w1", 100);
-    assert.deepEqual(
-      batch.map((b) => b.event_number),
-      [1n, 2n, 3n, 4n],
-    );
-    // And the original stream identities are echoed (INV-READ-006/007
-    // applied to subscriptions).
-    assert.deepEqual(batch.map((b) => b.stream_uuid), [a, a, b, a]);
-    assert.deepEqual(batch.map((b) => b.stream_version), [1n, 2n, 1n, 3n]);
-  });
-
-  // INV-SUB-P-031: read_subscription_batch does NOT advance the cursor;
-  //   repeated calls without advance return the same events.
-  test("read_subscription_batch does NOT advance the cursor (at-least-once contract)", async () => {
-    const s = await seedStream(3);
-    await claim(s, "h", "w1");
-    const first = await readBatch(s, "h", "w1", 100);
-    const second = await readBatch(s, "h", "w1", 100);
-    assert.deepEqual(
-      first.map((b) => b.event_id),
-      second.map((b) => b.event_id),
-    );
-    assert.equal(await position(s, "h"), 0n);
-  });
-
-  // INV-SUB-P-031 (continued): after advance, the cursor moves and
-  //   subsequent reads return only the unacked tail.
-  test("after advance, subsequent reads return only events past last_seen", async () => {
-    const s = await seedStream(5);
-    await claim(s, "h", "w1");
-    await advance(s, "h", "w1", 3n);
-    const batch = await readBatch(s, "h", "w1", 100);
-    assert.deepEqual(batch.map((b) => b.stream_version), [4n, 5n]);
-  });
-
-  // INV-SUB-P-031: a non-holder read raises IS022.
-  test("read_subscription_batch by a non-holder raises IS022", async () => {
-    const s = await seedStream(1);
-    await claim(s, "h", "w1");
-    await rejectsWithCode(() => readBatch(s, "h", "w2", 100), "IS022");
-  });
-
-  // INV-SUB-P-031: a read against a non-existent subscription raises IS020.
-  test("read_subscription_batch on a missing subscription raises IS020", async () => {
-    const s = await seedStream(1);
-    await rejectsWithCode(() => readBatch(s, "no-such", "w1", 100), "IS020");
-  });
-
-  // INV-SUB-P-030: a read of an empty tail returns zero rows.
-  test("read_subscription_batch on a caught-up cursor returns zero rows", async () => {
-    const s = await seedStream(2);
-    await claim(s, "h", "w1");
-    await advance(s, "h", "w1", 2n);
-    const batch = await readBatch(s, "h", "w1", 100);
-    assert.equal(batch.length, 0);
-  });
-
-  // INV-SUB-P-030: batch qty caps the page size; the cursor still hasn't moved
-  //   so a second call returns the next page.
-  test("p_qty caps the batch size; further events appear on the next read after advance", async () => {
-    const s = await seedStream(6);
-    await claim(s, "h", "w1");
-    const first = await readBatch(s, "h", "w1", 3);
-    assert.deepEqual(first.map((b) => b.stream_version), [1n, 2n, 3n]);
-    // Without advance, the next call returns the same first 3.
-    const second = await readBatch(s, "h", "w1", 3);
-    assert.deepEqual(second.map((b) => b.stream_version), [1n, 2n, 3n]);
-    // Advance, then read the rest.
-    await advance(s, "h", "w1", 3n);
-    const third = await readBatch(s, "h", "w1", 3);
-    assert.deepEqual(third.map((b) => b.stream_version), [4n, 5n, 6n]);
-  });
-});
-
-// =============================================================================
-// Cursor advance and monotonicity (INV-SUB-P-032, 033, 034)
-// =============================================================================
-
-describe("subscriptions — advance and monotonicity", () => {
-  // INV-SUB-P-032: advance to N records "all events up to and including N"
-  test("advance(N) sets last_seen = N", async () => {
-    const s = await seedStream(5);
-    await claim(s, "h", "w1");
-    const after = await advance(s, "h", "w1", 3n);
-    assert.equal(after, 3n);
-    assert.equal(await position(s, "h"), 3n);
-  });
-
-  // INV-SUB-P-033: cursor does not advance past unacked events.
-  //   Reading without calling advance leaves last_seen at its prior value.
-  test("read without advance leaves the cursor unmoved (no auto-ack)", async () => {
-    const s = await seedStream(3);
-    await claim(s, "h", "w1");
-    await readBatch(s, "h", "w1", 100); // reads but does not advance
-    assert.equal(await position(s, "h"), 0n);
-  });
-
-  // INV-SUB-P-034: out-of-order / duplicate ack is absorbed via
-  //   max(last_seen, p_up_to_position). Lower values don't move the
-  //   cursor backwards.
-  test("advance with a lower position is a no-op (monotone)", async () => {
-    const s = await seedStream(5);
-    await claim(s, "h", "w1");
-    await advance(s, "h", "w1", 3n);
-    const after = await advance(s, "h", "w1", 1n); // lower
-    assert.equal(after, 3n);
-    assert.equal(await position(s, "h"), 3n);
-  });
-
-  // INV-SUB-P-034: repeated ack at the same position is a no-op.
-  test("advance with the same position is a no-op", async () => {
-    const s = await seedStream(3);
-    await claim(s, "h", "w1");
-    await advance(s, "h", "w1", 2n);
-    const after = await advance(s, "h", "w1", 2n);
-    assert.equal(after, 2n);
-  });
-
-  // INV-SUB-P-032 (defensive): advance by a non-holder raises IS022.
-  test("advance by a non-holder raises IS022", async () => {
-    const s = await seedStream(1);
-    await claim(s, "h", "w1");
-    await rejectsWithCode(() => advance(s, "h", "w2", 1n), "IS022");
-  });
-
-  // INV-SUB-P-032 (defensive): advance on a missing subscription → IS020.
-  test("advance on a missing subscription raises IS020", async () => {
-    const s = await seedStream(1);
-    await rejectsWithCode(() => advance(s, "no-such", "w1", 1n), "IS020");
-  });
-
-  // INV-SUB-P-031 (routing-layer at-least-once): with no advance call
-  //   between read and re-claim, the next claim re-reads the same
-  //   events. This pins the routing-cursor's no-auto-ack contract.
-  //
-  //   Under SUB-A, application-facing redelivery on handler failure
-  //   is realised at the work-item layer (lease takeover on expired
-  //   `claimed` rows). See
-  //   `subscription-work-items-procedures.test.ts` :: "lease
-  //   takeover: expired 'claimed' row is re-claimable" for that
-  //   case. The routing-layer test below remains load-bearing for
-  //   INV-SUB-P-031's no-auto-ack half.
-  test("redelivery: crash-before-advance is recovered by re-claim", async () => {
-    const s = await seedStream(3);
-    await claim(s, "h", "w1");
-    const first = await readBatch(s, "h", "w1", 100);
-    // Simulate worker-1 crashing — its lease expires.
-    await expireLease(s, "h");
-    // Worker-2 takes over.
-    const claim2 = await claim(s, "h", "w2");
-    assert.equal(claim2.last_seen, 0n);
-    const redelivered = await readBatch(s, "h", "w2", 100);
-    assert.deepEqual(
-      first.map((b) => b.event_id),
-      redelivered.map((b) => b.event_id),
-    );
-  });
-});
-
-// =============================================================================
 // Selector (INV-SUB-P-050) — above adapter line
 // =============================================================================
 //
@@ -649,7 +414,7 @@ describe("subscriptions — advance and monotonicity", () => {
 // runs the predicate, calls the handler on matches, and advances the
 // cursor to the highest *fetched* event_number regardless of how many
 // matched). The SQL surface deliberately exposes no selector
-// parameter on `read_subscription_batch` and no selector column on
+// parameter on the routing primitives and no selector column on
 // `subscriptions`. Server-side selector evaluation is reserved for
 // ML-0003.
 //
@@ -747,7 +512,7 @@ describe("subscriptions — lifecycle", () => {
     // Original holder's *next* op on any of the routing-side
     // procedures must raise IS022 (subscription_lease_lost).
     await rejectsWithCode(
-      () => readBatch(s, "h", "worker-A", 10),
+      () => advance(s, "h", "worker-A", 1n),
       "IS022",
     );
     await rejectsWithCode(() => release(s, "h", "worker-A"), "IS022");

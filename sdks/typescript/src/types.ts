@@ -140,7 +140,7 @@ export interface RecordedEventFields {
 }
 
 /** A recorded event row, the shape returned by read_stream / read_all /
- *  read_subscription_batch.
+ *  list_pm_rebuild_events.
  *
  *  Generic `E` is the application's event union (each member extending
  *  {@link Event}); the type distributes so each branch carries its own

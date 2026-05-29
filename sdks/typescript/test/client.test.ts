@@ -353,7 +353,8 @@ describe("Client.subscriptions", () => {
     const s = randomUUID();
     await client.appendToStream(s, expected.noStream, [ev("A"), ev("B")]);
     await client.claimSubscription(s, "sub", "w1", 30, { startFrom: "origin" });
-    await client.advanceSubscription(s, "sub", "w1", 1n);
+    // Advance the cursor via the SUB-A routing primitive.
+    await client.routeBatch(s, "sub", "w1", 1n, []);
     await client.releaseSubscription(s, "sub", "w1");
     const r2 = await client.claimSubscription(s, "sub", "w2", 30);
     assert.equal(r2.lastSeen, 1n);
@@ -369,40 +370,6 @@ describe("Client.subscriptions", () => {
     );
   });
 
-  test("readBatch returns events after last_seen", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [
-      ev("A"),
-      ev("B"),
-      ev("C"),
-    ]);
-    await client.claimSubscription(s, "sub", "w1", 30, { startFrom: "origin" });
-    const batch = await client.readSubscriptionBatch(s, "sub", "w1", 50);
-    assert.equal(batch.length, 3);
-    assert.equal(batch[0].type, "A");
-    assert.equal(batch[2].stream_version, 3n);
-  });
-
-  test("readBatch by non-holder raises lease-lost (IS022)", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [ev("A")]);
-    await client.claimSubscription(s, "sub", "w1", 30);
-    await assert.rejects(
-      () => client.readSubscriptionBatch(s, "sub", "intruder", 10),
-      (err) => err instanceof SubscriptionLeaseLost && err.code === "IS022",
-    );
-  });
-
-  test("advance moves cursor; duplicate advance is absorbed", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [ev("A"), ev("B")]);
-    await client.claimSubscription(s, "sub", "w1", 30, { startFrom: "origin" });
-    const r1 = await client.advanceSubscription(s, "sub", "w1", 2n);
-    assert.equal(r1.lastSeen, 2n);
-    const r2 = await client.advanceSubscription(s, "sub", "w1", 1n);
-    assert.equal(r2.lastSeen, 2n); // monotone only
-  });
-
   test("delete removes the row; missing raises IS020 (D-0009, not lenient)", async () => {
     const s = randomUUID();
     await client.appendToStream(s, expected.noStream, [ev("A")]);
@@ -414,19 +381,6 @@ describe("Client.subscriptions", () => {
     );
   });
 
-  test("$all subscription delivers events with original-stream identity", async () => {
-    const a = randomUUID();
-    await client.appendToStream(a, expected.noStream, [ev("A1")]);
-    await client.appendToStream(a, expected.any, [ev("A2")]);
-    await client.claimSubscription("$all", "tail", "w1", 30, {
-      startFrom: "origin",
-    });
-    const batch = await client.readSubscriptionBatch("$all", "tail", "w1", 50);
-    assert.equal(batch.length, 2);
-    assert.equal(batch[0].stream_uuid, a);
-    assert.equal(batch[0].stream_version, 1n);
-    assert.equal(batch[0].event_number, 1n);
-  });
 });
 
 describe("Append-only trigger (IS006)", () => {

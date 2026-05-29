@@ -269,7 +269,7 @@ run; these are the gauge.
 
 The PM used to ack every `Added` event it ignored; the coalescing
 optimisation (TODO #10 / ex-ML-0005) replaced that with one
-`advance_subscription` per batch tail of ignored events, with
+`route_batch` cursor advance per batch tail of ignored events, with
 routed-event txs covering prior ignored runs implicitly. The
 ignored-event ack overhead is therefore bounded by batch boundary
 count rather than ignored event count. To stress PM throughput end

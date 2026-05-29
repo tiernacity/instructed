@@ -40,7 +40,7 @@ describe("transient subscriptions — dropped wholesale (NG-0005 / D-0007)", () 
   // `instructed`. The omission shape: no procedure named
   // `subscribe`, `transient_subscribe`, `subscribe_transient`, or
   // similar exists in `instructed.*`. The persistent surface
-  // (claim_subscription / read_subscription_batch / etc.) is the
+  // (claim_subscription / route_batch / etc.) is the
   // only subscription primitive.
   test("no transient-subscribe procedure exists in the instructed schema", async () => {
     const r = await pool.query<{ proname: string }>(

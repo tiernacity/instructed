@@ -145,7 +145,7 @@ is final). Each slice ends green.
       Consumers: `consistency.ts` already uses `isSubscriptionCaughtUp`
       (no change). Soak uses it (see §5 gotcha). Conformance:
       subscription-persistent + smoke + cross-cutting.
-- [ ] **A3 — Remove `read_subscription_batch` + `advance_subscription`.**
+- [x] **A3 — Remove `read_subscription_batch` + `advance_subscription`.**
       These two go together (the read/ack pair). Biggest conformance
       churn (the `subscription-persistent.test.ts` delivery + advance
       describe blocks). Re-annotate INV-SUB-P-030/031/032/034 onto the
@@ -364,3 +364,34 @@ revert was for risk/context management, not because it was broken.
     PM-024 comparison accordingly.
   * Gates: SQL clean; SDK 166/166 + type-check; soak type-check;
     conformance 164/164; coverage MISSING 0.
+- 2026-05-29 — **A3** (remove `read_subscription_batch` +
+  `advance_subscription`). Atomic. Touched: `sql/instructed.sql`
+  (both proc blocks + header + lock-set inventories + the
+  `record_snapshot` and `delete_subscription` prose cross-refs),
+  `client.ts` (both wrapper methods + their doc comments), `types.ts`
+  (`RecordedEvent` doc-comment proc list), SDK `client.test.ts`
+  ("release clears holder" rewritten to advance via `routeBatch`; 4
+  readBatch/advance-specific cases removed), conformance
+  `smoke`/`cross-cutting`/`subscription-transient` (proc-name lists +
+  prose), `subscription-persistent.test.ts` (header; `readBatch`
+  helper deleted; `advance` helper rewritten to wrap `route_batch`
+  with empty decisions; the "delivery" + "advance and monotonicity"
+  describe blocks removed; selector prose + composed-takeover
+  IS022 assertion rewired off `readBatch`),
+  `subscription-work-items-procedures.test.ts` (re-annotated
+  INV-SUB-P-030/032 on "inserts decisions…", -034 on "cursor advance
+  is monotone", -031 on "lease takeover…"), soak `README.md` prose.
+  Surprises / notes:
+  * §5 gotcha 4 confirmed: the four INV-SUB-P invariants stay live;
+    only their conformance annotations moved to the surviving
+    route_batch/takeover tests.
+  * Coverage reporter (`COMMENT_REGEX`) only scrapes INV-* from
+    comment lines that *start* with `// INV-`; a second INV-* placed
+    mid-prose on a continuation line is invisible. INV-SUB-P-032 read
+    MISSING until split onto its own leading-`// INV-` line.
+  * Rewriting the `advance` helper to `route_batch(..., '[]')` kept
+    every cursor-moving lifecycle/re-subscribe/start_from test intact
+    (route_batch enforces the same IS022/IS020 lease contract).
+  * No `docs/*.md` referenced the proc names (already proc-name-free).
+  * Gates: SQL clean; SDK 162/162 + type-check; conformance 148/148
+    + type-check; soak type-check; coverage MISSING 0.
