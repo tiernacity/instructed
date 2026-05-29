@@ -59,13 +59,13 @@ export class Client {
   }
 
   /** Run a single query against the underlying connection. */
-  private async run<T extends pg.QueryResultRow = any>(
+  private async run<T extends pg.QueryResultRow = pg.QueryResultRow>(
     sql: string,
     params: unknown[],
     ctx: MapPgErrorContext = {},
   ): Promise<pg.QueryResult<T>> {
     try {
-      return await this.con.query<T>(sql, params as any[])
+      return await this.con.query<T>(sql, params)
     } catch (err) {
       throw mapPgError(err, ctx)
     }

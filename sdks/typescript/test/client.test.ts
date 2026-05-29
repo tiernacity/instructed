@@ -368,8 +368,8 @@ void describe('Append-only trigger (IS006)', () => {
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await assert.rejects(
       () => pool.query(`UPDATE instructed.events SET event_type = 'B'`),
-      (err: any) => {
-        return (err as any).code === 'IS006'
+      (err: unknown) => {
+        return (err as { code?: string }).code === 'IS006'
       },
     )
     // And via the SDK's mapper (Client doesn't expose raw SQL, but mapPgError
@@ -379,8 +379,8 @@ void describe('Append-only trigger (IS006)', () => {
     try {
       await pool.query(`DELETE FROM instructed.events`)
       assert.fail('expected DELETE to raise')
-    } catch (err: any) {
-      assert.equal(err.code, 'IS006')
+    } catch (err: unknown) {
+      assert.equal((err as { code?: string }).code, 'IS006')
       const { mapPgError } = await import('../src/errors/index.ts')
       const mapped = mapPgError(err)
       assert.ok(mapped instanceof AppendOnlyViolation)

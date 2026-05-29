@@ -124,7 +124,7 @@ async function waitFor<T>(
 // real projection / PM completion paths until slices 6 / 7 land.
 function deleteCompleter(name: string) {
   return async (
-    _event: any,
+    _event: unknown,
     ctx: { workerId: string; partitionKey: string; eventNumber: bigint },
   ) => {
     await client.completeWorkItemProjection(

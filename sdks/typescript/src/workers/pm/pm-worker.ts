@@ -93,7 +93,7 @@ export type DispatchedCommand = (Command & { [key: string]: unknown }) | Dispatc
 
 export interface DispatchedCommandExplicit {
   streamUuid: string
-  aggregate: AggregateDefinition<any, any, any>
+  aggregate: AggregateDefinition<unknown, unknown>
   command: unknown
 }
 
@@ -180,7 +180,7 @@ export interface PmWorkerOptions extends PmSubstrateOptions {
   /** Resolves lean commands to `(aggregateType, aggregateId)`. */
   router?: CommandRouter
   /** Registry consulted by the router's `aggregateType` result. */
-  aggregates?: ReadonlyMap<string, AggregateDefinition<any, any, any>>
+  aggregates?: ReadonlyMap<string, AggregateDefinition<unknown, unknown>>
 }
 
 // ============================================================================
@@ -273,7 +273,7 @@ function resolveDispatch(
   opts: PmWorkerOptions,
   dispatchCtx: { logger: import('../../logger/index.ts').Logger },
 ): {
-  def: AggregateDefinition<any, any, any>
+  def: AggregateDefinition<unknown, unknown>
   streamUuid: string
   command: unknown
 } {

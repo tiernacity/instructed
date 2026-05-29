@@ -190,7 +190,7 @@ export interface DispatchOptions {
  * `{ kind: 'sequential' }`. A projection that needs routing-side
  * filtering passes `routeFn: (event) => 'ignore' | { partitionKey }`.
  */
-export interface ProjectionDefinition<E extends Event = Event> {
+export interface ProjectionDefinition<E extends Event = Event, PolicyState = undefined> {
   /** Projection type — doubles as the subscription name. */
   type: string
   /** Source stream; default `$all`. */
@@ -211,7 +211,7 @@ export interface ProjectionDefinition<E extends Event = Event> {
    * forfeit at this layer. Callers wanting strong typing of
    * `PolicyState` use `startProjectionWorker` directly.
    */
-  errorPolicy?: ErrorPolicy<any>
+  errorPolicy?: ErrorPolicy<PolicyState>
 }
 
 /**
@@ -223,10 +223,11 @@ export interface ProjectionDefinition<E extends Event = Event> {
  * `apply` is the PM-C pure state fold; `handle` produces commands
  * and/or signals partition completion (`complete: true`).
  */
-export interface ProcessManagerDefinition<S, E extends Event = Event> extends Omit<
-  PmDefinition<S, E, any>,
-  'type' | 'streamName'
-> {
+export interface ProcessManagerDefinition<
+  S,
+  E extends Event = Event,
+  PolicyState = undefined,
+> extends Omit<PmDefinition<S, E, PolicyState>, 'type' | 'streamName'> {
   /** PM type — doubles as the subscription name. */
   type: string
   /** Optional source_uuid encoding (see {@link PmDefinition.streamName}). */
@@ -321,9 +322,12 @@ export class Instructed {
    */
   register(router: CommandRouter): this
   register<S, C, E extends DomainEvent = DomainEvent>(def: AggregateDefinition<S, C, E>): this
-  register<E extends Event = Event>(def: ProjectionDefinition<E>, opts?: RegistrationOptions): this
-  register<S, E extends Event = Event>(
-    def: ProcessManagerDefinition<S, E>,
+  register<E extends Event = Event, P = undefined>(
+    def: ProjectionDefinition<E, P>,
+    opts?: RegistrationOptions,
+  ): this
+  register<S, E extends Event = Event, P = undefined>(
+    def: ProcessManagerDefinition<S, E, P>,
     opts?: RegistrationOptions,
   ): this
   register(
@@ -379,8 +383,8 @@ export class Instructed {
     return this
   }
 
-  private registerProjection<E extends Event = Event>(
-    def: ProjectionDefinition<E>,
+  private registerProjection<E extends Event = Event, P = undefined>(
+    def: ProjectionDefinition<E, P>,
     opts: RegistrationOptions = {},
   ): this {
     if (def.partitionBy !== undefined && def.routeFn !== undefined) {
@@ -390,20 +394,24 @@ export class Instructed {
     }
     this.projections.push({
       stream: def.stream ?? '$all',
-      def,
+      // PolicyState is opaque to the facade; the worker threads it
+      // back to the policy untouched. Erase the slot here so the
+      // heterogeneous registry holds one type.
+      def: def as unknown as ProjectionDefinition<Event>,
       opts,
     })
     this.logger_.info(`registered projection "${def.type}"`)
     return this
   }
 
-  private registerProcessManager<S, E extends Event = Event>(
-    def: ProcessManagerDefinition<S, E>,
+  private registerProcessManager<S, E extends Event = Event, P = undefined>(
+    def: ProcessManagerDefinition<S, E, P>,
     opts: RegistrationOptions = {},
   ): this {
     this.processManagers.push({
       stream: def.stream ?? '$all',
-      def,
+      // PolicyState erased here (see registerProjection).
+      def: def as unknown as ProcessManagerDefinition<unknown, Event>,
       opts,
     })
     this.logger_.info(`registered process manager "${def.type}"`)

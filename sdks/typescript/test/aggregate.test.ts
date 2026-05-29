@@ -167,7 +167,7 @@ void describe('runCommand — happy path', () => {
     await runCommand(client, counter(), s, { kind: 'add', n: 7 })
 
     // Reload via a fresh aggregate that asserts the shape its apply sees.
-    const observed: any[] = []
+    const observed: CounterEvent[] = []
     const probe: AggregateDefinition<CounterState, CounterCommand, CounterEvent> = {
       ...counter(),
       apply(state, event) {

@@ -58,7 +58,7 @@ export type CommandRouter = (
  * the `DepositToAccount` variant only.
  */
 export interface CommandRoute<C extends Command, K extends C['type']> {
-  aggregate: AggregateDefinition<any, any, any>
+  aggregate: AggregateDefinition<unknown, unknown>
   id: (cmd: Extract<C, { type: K }>) => string
 }
 
