@@ -56,10 +56,10 @@ export interface Throwaway {
   drop: () => Promise<void>;
 }
 
-// Create a throwaway database with the schema installed. The returned config
-// uses discrete fields so commands connect to it regardless of the ambient
-// environment.
-export async function createThrowawayDb(): Promise<Throwaway> {
+// Create a throwaway database with NO schema installed. Useful for testing the
+// `install` command. The returned config uses discrete fields so commands
+// connect to it regardless of the ambient environment.
+export async function createEmptyDb(): Promise<Throwaway> {
   const name = randomDbName();
   assertSafeIdent(name);
 
@@ -71,6 +71,16 @@ export async function createThrowawayDb(): Promise<Throwaway> {
     await admin.end();
   }
 
+  return { config: configFor(name), drop: dropFor(name) };
+}
+
+// Create a throwaway database with the schema installed. The returned config
+// uses discrete fields so commands connect to it regardless of the ambient
+// environment.
+export async function createThrowawayDb(): Promise<Throwaway> {
+  const db = await createEmptyDb();
+  const name = db.config.database!;
+
   const schema = await Deno.readTextFile(SCHEMA_PATH);
   const target = adminClient(name);
   await target.connect();
@@ -80,15 +90,21 @@ export async function createThrowawayDb(): Promise<Throwaway> {
     await target.end();
   }
 
-  const config: DbConfig = {
+  return db;
+}
+
+function configFor(name: string): DbConfig {
+  return {
     host: HOST,
     port: PORT,
     user: USER,
     password: PASSWORD,
     database: name,
   };
+}
 
-  const drop = async () => {
+function dropFor(name: string): () => Promise<void> {
+  return async () => {
     const a = adminClient("postgres");
     await a.connect();
     try {
@@ -103,8 +119,6 @@ export async function createThrowawayDb(): Promise<Throwaway> {
       await a.end();
     }
   };
-
-  return { config, drop };
 }
 
 // Run `fn` with console.log/console.error captured. Returns the combined

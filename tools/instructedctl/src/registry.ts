@@ -3,10 +3,12 @@
 // place.
 
 import type { Command } from "./cli.ts";
+import { installCommand } from "./commands/install.ts";
 import { statusCommand } from "./commands/status.ts";
 import { schemaVersionCommand } from "./commands/schema-version.ts";
 
 export const COMMANDS: Command[] = [
+  installCommand,
   statusCommand,
   schemaVersionCommand,
 ];

@@ -10,6 +10,9 @@
     "compile": "deno compile -A --output instructedctl src/main.ts",
     "test": "deno test -A"
   },
+  "compile": {
+    "include": ["src/instructed.sql"]
+  },
   "imports": {
     "@db/postgres": "jsr:@db/postgres@^0.19.5",
     "@std/path": "jsr:@std/path@^1.1.0",

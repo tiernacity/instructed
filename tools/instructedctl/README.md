@@ -88,9 +88,31 @@ throwaway databases resolves from the standard `PG*` variables (defaults:
 
 ## Commands today
 
+- `install` — apply the embedded schema to a database (see below).
 - `status` — schema version, `$all` head, and high-level row counts.
 - `schema-version` — print the recorded schema version.
 - `help`, `--version`.
+
+### `install`
+
+Applies `sql/instructed.sql` to the target database (analogous to `absurdctl init`). The
+schema creates tables with bare `create table`, so it is meant for a clean database: if
+the `instructed` schema already exists, `install` refuses unless `--force` is given.
+`--force` drops the schema (`CASCADE`) and reinstalls, destroying all data.
+
+```sh
+instructedctl install
+instructedctl install --force
+```
+
+The schema is **embedded into the binary** so `install` is self-contained. The
+mechanism: `src/instructed.sql` is a symlink to the repo-root `sql/instructed.sql`
+(single source of truth, no drift), declared in `deno.json`'s `compile.include`.
+`src/schema.ts` reads it via `import.meta.dirname + "/instructed.sql"`, which resolves
+through the symlink in dev and from the embedded copy in the compiled binary. The
+symlink lives in `src/`, co-located with `schema.ts`, because `deno compile` only
+materialises included files reachable without traversing above the reading module's
+directory.
 
 ## Planned command surface
 
@@ -170,8 +192,11 @@ tools/instructedctl/
     main.ts            # entry point + help + dispatch
     cli.ts             # arg parsing, command registry types, shared db options
     db.ts              # connection-config resolution + query helper
+    schema.ts          # reads the embedded sql/instructed.sql
+    instructed.sql     # symlink -> ../../../sql/instructed.sql (embedded at compile)
     registry.ts        # the list of commands
     commands/
+      install.ts
       status.ts
       schema-version.ts
   tests/
