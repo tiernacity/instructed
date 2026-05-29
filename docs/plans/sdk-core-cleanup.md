@@ -457,3 +457,18 @@ revert was for risk/context management, not because it was broken.
     appetite per the slice's own guidance).
   * Gates: SQL installs clean (0 errors); SDK 162/162 + type-check;
     conformance 148/148; coverage MISSING 0.
+- 2026-05-29 — **A5 (cont.)** (shared snapshot-upsert). Atomic, commit
+  `ef1d6d5`. Extracted the full-row snapshot upsert (INV-SNAP-001/002)
+  duplicated in `record_snapshot` and inline in the co-transactional
+  PM-snapshot write of `complete_work_item_pm` into an internal
+  `instructed._upsert_snapshot(uuid, type, version, data, metadata)`.
+  Input validation stays with the callers (their messages name the
+  calling proc); the helper does only the INSERT … ON CONFLICT, so
+  SQLSTATE/message contracts are unchanged — again a pure SQL-internal
+  refactor with no SDK/conformance/doc edits.
+  * Gates: SQL clean; SDK 162/162 + type-check; conformance 148/148;
+    coverage MISSING 0.
+  * Remaining under A5: the recorded-event SELECT-as-a-view. Assessed
+    (see note below) — performance-safe but modest centralisation
+    value (covers read_all + list_pm_rebuild_events, NOT read_stream,
+    which is keyed/projected differently). Left deferred.
