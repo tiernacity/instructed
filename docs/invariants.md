@@ -200,9 +200,8 @@ items.
 
 The `INV-SUB-P-*` series describes the routing-side invariants;
 the `INV-SUB-W-*` series describes the work-queue invariants.
-Identity is `(stream_uuid, name)` with a reserved `shard`
-dimension at v1 default 0 for a future operator-facing shard
-extension.
+Identity is `(stream_uuid, name)`. (ML-0013 would re-introduce a
+partition dimension additively; v1 has none.)
 
 ### Identity
 
@@ -287,7 +286,7 @@ plus standard Postgres infrastructure errors.
 ### Work queue (`INV-SUB-W-*`)
 
 - **INV-SUB-W-001** — Each row in `subscription_work_items` is
-  identified by `(stream_id, subscription_name, shard,
+  identified by `(stream_id, subscription_name,
   partition_key, event_number)`. The PK absorbs duplicate
   INSERTs on routing-worker re-run (after crash, after
   takeover), making `route_batch` idempotent.

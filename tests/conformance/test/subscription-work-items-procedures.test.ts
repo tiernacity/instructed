@@ -153,7 +153,7 @@ describe("SUB-A slice 2 — route_batch", () => {
     void e1;
   });
 
-  // INV-SUB-W-001: PK (stream_id, subscription_name, shard,
+  // INV-SUB-W-001: PK (stream_id, subscription_name,
   //   partition_key, event_number) absorbs duplicate INSERTs on
   //   routing-worker re-run, making route_batch idempotent.
   test("ON CONFLICT DO NOTHING absorbs crash-replay (idempotent)", async () => {

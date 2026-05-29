@@ -188,7 +188,7 @@ function pmDef(
     type: name,
     // `stream` defaulted via spread by the caller; required so the PM
     // worker and the routing worker agree on the source stream (the
-    // PM worker's `claim_work_item` is keyed on (stream, name, shard)).
+    // PM worker's `claim_work_item` is keyed on (stream, name)).
     initialState: () => ({ applied: [] }),
     apply: (s, event) => ({
       applied: [...s.applied, event.event_number.toString()],

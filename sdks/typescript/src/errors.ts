@@ -177,7 +177,6 @@ export class SnapshotNotFound extends InstructedError {
 export class SubscriptionError extends InstructedError {
   readonly streamUuid?: string;
   readonly subscriptionName?: string;
-  readonly shard?: number;
   readonly holder?: string;
   constructor(
     message: string,
@@ -187,7 +186,6 @@ export class SubscriptionError extends InstructedError {
       hint?: string;
       streamUuid?: string;
       subscriptionName?: string;
-      shard?: number;
       holder?: string;
       cause?: unknown;
     } = {},
@@ -195,7 +193,6 @@ export class SubscriptionError extends InstructedError {
     super(message, opts);
     this.streamUuid = opts.streamUuid;
     this.subscriptionName = opts.subscriptionName;
-    this.shard = opts.shard;
     this.holder = opts.holder;
   }
 }
@@ -217,7 +214,6 @@ export class SubscriptionLeaseLost extends SubscriptionError {}
 export class WorkItemLeaseLost extends InstructedError {
   readonly streamUuid?: string;
   readonly subscriptionName?: string;
-  readonly shard?: number;
   readonly partitionKey?: string;
   readonly eventNumber?: bigint;
   readonly holder?: string;
@@ -229,7 +225,6 @@ export class WorkItemLeaseLost extends InstructedError {
       hint?: string;
       streamUuid?: string;
       subscriptionName?: string;
-      shard?: number;
       partitionKey?: string;
       eventNumber?: bigint;
       holder?: string;
@@ -239,7 +234,6 @@ export class WorkItemLeaseLost extends InstructedError {
     super(message, opts);
     this.streamUuid = opts.streamUuid;
     this.subscriptionName = opts.subscriptionName;
-    this.shard = opts.shard;
     this.partitionKey = opts.partitionKey;
     this.eventNumber = opts.eventNumber;
     this.holder = opts.holder;
@@ -360,8 +354,6 @@ export interface MapPgErrorContext {
   streamUuid?: string;
   /** The subscription name, if known at call site. */
   subscriptionName?: string;
-  /** The shard, if known at call site. */
-  shard?: number;
   /** The snapshot source_uuid, if known at call site. */
   sourceUuid?: string;
   /** The work-item partition, if known at call site (SUB-A). */
@@ -420,28 +412,24 @@ export function mapPgError(err: unknown, ctx: MapPgErrorContext = {}): unknown {
         ...base,
         streamUuid: ctx.streamUuid,
         subscriptionName: ctx.subscriptionName,
-        shard: ctx.shard,
       });
     case "IS021":
       return new SubscriptionAlreadyClaimed(msg, {
         ...base,
         streamUuid: ctx.streamUuid,
         subscriptionName: ctx.subscriptionName,
-        shard: ctx.shard,
       });
     case "IS022":
       return new SubscriptionLeaseLost(msg, {
         ...base,
         streamUuid: ctx.streamUuid,
         subscriptionName: ctx.subscriptionName,
-        shard: ctx.shard,
       });
     case "IS030":
       return new WorkItemLeaseLost(msg, {
         ...base,
         streamUuid: ctx.streamUuid,
         subscriptionName: ctx.subscriptionName,
-        shard: ctx.shard,
         partitionKey: ctx.partitionKey,
         eventNumber: ctx.eventNumber,
       });

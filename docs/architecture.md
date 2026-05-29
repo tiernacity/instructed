@@ -42,7 +42,7 @@ Six tables in the `instructed` schema:
 | `events` | Caller-keyed event rows. Append-only — `UPDATE` and `DELETE` triggers raise. |
 | `stream_events` | The `(event, stream)` join. Carries per-stream version and original-stream identity. The unique constraint on `(stream_id, stream_version)` is the optimistic-locking mechanism. |
 | `snapshots` | At most one row per `source_uuid`. Backs aggregate snapshots and process-manager state. |
-| `subscriptions` | Persistent routing cursor + lease per `(stream_id, name, shard)`. The routing worker advances this row; processing workers do not touch it. |
+| `subscriptions` | Persistent routing cursor + lease per `(stream_id, name)`. The routing worker advances this row; processing workers do not touch it. |
 | `subscription_work_items` | The per-subscription work queue. One row per routed event per partition; carries the per-item lease (`claimed_by`, `lease_expires_at`) processing workers compete on. |
 
 All mutation goes through stored procedures; the tables are not

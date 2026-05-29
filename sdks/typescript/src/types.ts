@@ -219,12 +219,6 @@ export type StartFrom = "origin" | "current" | bigint | number;
 
 export interface ClaimSubscriptionOptions {
   startFrom?: StartFrom;
-  /** Reserved (ML-0013); v1 callers should omit. */
-  shard?: number;
-}
-
-export interface SubscriptionShardOption {
-  shard?: number;
 }
 
 // ============================================================================

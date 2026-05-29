@@ -150,7 +150,7 @@ is final). Each slice ends green.
       churn (the `subscription-persistent.test.ts` delivery + advance
       describe blocks). Re-annotate INV-SUB-P-030/031/032/034 onto the
       surviving `route_batch`/takeover tests (see §5 gotcha).
-- [ ] **A4 — Remove `shard`.** ~158 SQL occurrences + SDK + conformance
+- [x] **A4 — Remove `shard`.** ~158 SQL occurrences + SDK + conformance
       + docs. Scripted transform; mind the terminator-semicolon and
       `claimSubscription` opts gotchas (§5). Largest single slice —
       keep it to *just* `shard`.
@@ -395,3 +395,41 @@ revert was for risk/context management, not because it was broken.
   * No `docs/*.md` referenced the proc names (already proc-name-free).
   * Gates: SQL clean; SDK 162/162 + type-check; conformance 148/148
     + type-check; soak type-check; coverage MISSING 0.
+- 2026-05-29 — **A4** (remove the speculative `shard` column).
+  Atomic. Touched: `sql/instructed.sql` (column drops on both tables;
+  PK / FK / index column-list trims; `v_shard` decls +
+  `p_options->>'shard'` assignments; the claim_subscription
+  shard-validation block; every `and [x.]shard = v_shard` predicate;
+  INSERT column/VALUES lists; raise-message `(shard %)` removal;
+  header / lock-set / option-docstring prose), `client.ts` (dropped
+  the `SubscriptionShardOption` param + `opts.shard` line from 11
+  subscription/work-item methods, the shard error-context field, and
+  the now-unused import; left `claimSubscription`'s `opts`/`start_from`
+  intact), `types.ts` (removed `SubscriptionShardOption` + `shard?` on
+  `ClaimSubscriptionOptions`), `errors.ts` (removed `shard` from
+  `SubscriptionError`, `WorkItemLeaseLost`, `MapPgErrorContext` and
+  the 4 `mapPgError` branches), SDK `pm-worker.test.ts` (comment),
+  conformance `subscription-work-items-{procedures,schema}.test.ts`
+  (column/PK/FK assertions + ~20 direct INSERTs + the cascade DELETE),
+  docs (`architecture`, `sql-contract`, `invariants`, `maybe-later`
+  ML-0013 reworded per §5.7, `decisions` D-0011 implications).
+  Surprises / notes:
+  * §5 gotcha 1 confirmed exactly: 6 `;`-terminated shard predicates
+    in surviving procs (claim ×3, release ×1, delete ×1,
+    is_subscription_caught_up ×1) needed the preceding clause
+    re-terminated. Scripted the re-termination (drop a `;`-ending
+    shard line → append `;` to the last emitted line).
+  * §5 gotcha 2 honoured: scripted only the `opts.shard` line, never
+    `JSON.stringify(opts)`, so `claimSubscription`'s `start_from`
+    survived. Left the now-always-empty `const opts = {}` in the
+    other methods rather than churn each `JSON.stringify` call.
+  * Did the bulk SQL + client.ts + schema-test edits as line-rule
+    Python transforms, prose comments by hand; validated structure
+    via the SQL-install gate after each pass.
+  * Environment note: bash stdout was intermittently corrupting
+    (doubled / `...`-elided) during this session — relied on grep -c,
+    `git status`/`git diff`, and per-file checks to verify state
+    rather than trusting individual tool-success messages.
+  * Gates: SQL installs clean (0 errors); SDK 162/162 + type-check;
+    conformance 148/148 + type-check; coverage covered 66 /
+    MISSING 0; soak type-check.

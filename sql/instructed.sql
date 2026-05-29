@@ -32,10 +32,11 @@
 --                      (PM-020..024); the snapshot's `source_version` doubles
 --                      as the PM instance's `last_seen_event` (PM-024).
 --   subscriptions   -- persistent leased cursors (D-0006). One row per
---                      `(stream_id, subscription_name, shard)`. The `shard`
---                      column is reserved at v1 with default 0 so that
---                      ML-0013 (partitioned consumers) can be added without
---                      breaking v1 callers. Under SUB-A the `last_seen`
+--                      `(stream_id, subscription_name)`. ML-0013
+--                      (partitioned consumers) would re-introduce a
+--                      partition dimension additively (via `p_options` +
+--                      a defaulted migration column) without breaking v1
+--                      callers. Under SUB-A the `last_seen`
 --                      column is conceptually the *routing cursor*: it is
 --                      advanced by the routing worker as it inserts work
 --                      items, not by per-event ack.
@@ -226,9 +227,9 @@ create table instructed.snapshots (
 -- subscriptions
 --
 -- One row per persistent subscription. Identity is
--- `(stream_id, subscription_name, shard)`. The `shard` column is reserved at
--- v1 with default 0 per ML-0013 so that partitioned-consumer support can be
--- added without a v1-breaking migration.
+-- `(stream_id, subscription_name)`. ML-0013 (partitioned consumers) would
+-- re-introduce a partition dimension additively (via `p_options` + a
+-- defaulted migration column) without a v1-breaking migration.
 --
 -- Leased ownership (D-0006): `claimed_by` records the current worker (or
 -- NULL); `claim_expires_at` is when the lease becomes reclaimable.
@@ -243,12 +244,11 @@ create table instructed.snapshots (
 create table instructed.subscriptions (
   stream_id          bigint not null references instructed.streams (stream_id),
   subscription_name  text not null,
-  shard              smallint not null default 0,
   last_seen          bigint not null default 0,
   claimed_by         text,
   claim_expires_at   timestamptz,
   created_at         timestamptz not null default now(),
-  primary key (stream_id, subscription_name, shard)
+  primary key (stream_id, subscription_name)
 );
 
 -- Reclaim sweep helper: workers calling claim_subscription will scan rows
@@ -304,7 +304,7 @@ create index subscriptions_claim_expires_idx
 -- Columns:
 --   subscription_id   FK into `subscriptions`; identifies the owning
 --                       subscription. Composite FK on
---                       `(stream_id, subscription_name, shard)` because that
+--                       `(stream_id, subscription_name)` because that
 --                       is `subscriptions`' PK (no synthetic id at v1; see
 --                       "Note on `subscription_id`" in the table body).
 --   partition_key     opaque string chosen by `RouteFn`. For projections the
@@ -350,7 +350,7 @@ create index subscriptions_claim_expires_idx
 --
 -- Note on `subscription_id`: the SUB-A design sketch uses a synthetic
 -- `subscription_id INT` for brevity. At v1 the `subscriptions` table has a
--- composite PK `(stream_id, subscription_name, shard)` and no surrogate id
+-- composite PK `(stream_id, subscription_name)` and no surrogate id
 -- column. We expand the FK / PK accordingly here rather than retrofit a
 -- surrogate id onto `subscriptions` in this slice. If a surrogate id is
 -- introduced later (e.g. for cross-table joins or ML-0013 ergonomics) this
@@ -359,7 +359,6 @@ create index subscriptions_claim_expires_idx
 create table instructed.subscription_work_items (
   stream_id         bigint   not null,
   subscription_name text     not null,
-  shard             smallint not null,
   partition_key     text     not null,
   event_number      bigint   not null,
   state             text     not null
@@ -368,9 +367,9 @@ create table instructed.subscription_work_items (
   lease_expires_at  timestamptz,
   failed_at         timestamptz,
   error_text        text,
-  primary key (stream_id, subscription_name, shard, partition_key, event_number),
-  foreign key (stream_id, subscription_name, shard)
-    references instructed.subscriptions (stream_id, subscription_name, shard)
+  primary key (stream_id, subscription_name, partition_key, event_number),
+  foreign key (stream_id, subscription_name)
+    references instructed.subscriptions (stream_id, subscription_name)
     on delete cascade,
   -- Per-state column invariants. These are mechanism-level; the procedure
   -- contract is the user-facing surface, but the CHECKs document the shape
@@ -391,7 +390,7 @@ create table instructed.subscription_work_items (
 -- EXISTS subquery stays cheap as PMs accumulate completed work items.
 create index subscription_work_items_claimable
   on instructed.subscription_work_items
-     (stream_id, subscription_name, shard, event_number)
+     (stream_id, subscription_name, event_number)
   where state in ('pending','claimed','failed');
 
 
@@ -451,10 +450,10 @@ create trigger stream_events_no_delete
 --   record_snapshot             holds  { snapshots[source_uuid] }
 --   read_snapshot               holds  { } (MVCC read)
 --   delete_snapshot             holds  { snapshots[source_uuid] }
---   claim_subscription          holds  { subscriptions[stream,name,shard] }
---   release_subscription        holds  { subscriptions[stream,name,shard] }
---   delete_subscription         holds  { subscriptions[stream,name,shard] }
---   route_batch                 holds  { subscriptions[stream,name,shard]
+--   claim_subscription          holds  { subscriptions[stream,name] }
+--   release_subscription        holds  { subscriptions[stream,name] }
+--   delete_subscription         holds  { subscriptions[stream,name] }
+--   route_batch                 holds  { subscriptions[stream,name]
 --                                        (FOR UPDATE),
 --                                        subscription_work_items (INSERTs) }
 --   claim_work_item             holds  { subscription_work_items[one row]
@@ -1260,10 +1259,8 @@ $$;
 --                                        single-stream subscription;
 --                                        event_number for '$all').
 --                                      integer N -> last_seen = N.
---                         'shard'      :: smallint (default 0). Reserved
---                                      for ML-0013; v1 callers should
---                                      omit. Unknown shard values raise
---                                      invalid_parameter_value.
+--                       (ML-0013 would add a partition key here; v1 has
+--                       no partition dimension.)
 --
 -- Output: exactly one row:
 --   result              text, 'claimed' | 'already_claimed'
@@ -1283,8 +1280,7 @@ $$;
 --   22023  invalid_parameter_value  null/empty p_subscription_name or
 --                                    p_worker_id; non-positive
 --                                    p_lease_seconds; malformed
---                                    p_options.start_from; negative
---                                    shard.
+--                                    p_options.start_from.
 --
 -- Lock-acquisition order (per D-0025):
 --   1. The target stream's `streams` row, read-only (lookup of
@@ -1334,7 +1330,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id  bigint;
-  v_shard      smallint;
   v_start_from text;
   v_initial    bigint;
   v_now        timestamptz := now();
@@ -1359,11 +1354,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
-  if v_shard < 0 then
-    raise exception 'claim_subscription: shard must be non-negative'
-      using errcode = '22023';
-  end if;
 
   v_start_from := coalesce(p_options->>'start_from', 'origin');
   v_expires    := v_now + make_interval(secs => p_lease_seconds);
@@ -1388,8 +1378,7 @@ begin
   select * into v_row
     from instructed.subscriptions
    where stream_id = v_stream_id
-     and subscription_name = p_subscription_name
-     and shard = v_shard;
+     and subscription_name = p_subscription_name;
 
   if found
      and v_row.claimed_by is not null
@@ -1438,12 +1427,12 @@ begin
     -- and this INSERT. ON CONFLICT DO NOTHING lets us fall through to
     -- the locked re-claim path on the now-existing row.
     insert into instructed.subscriptions
-      (stream_id, subscription_name, shard, last_seen,
+      (stream_id, subscription_name, last_seen,
        claimed_by, claim_expires_at)
     values
-      (v_stream_id, p_subscription_name, v_shard, v_initial,
+      (v_stream_id, p_subscription_name, v_initial,
        p_worker_id, v_expires)
-    on conflict (stream_id, subscription_name, shard) do nothing
+    on conflict (stream_id, subscription_name) do nothing
     returning last_seen into v_initial;
 
     if found then
@@ -1465,7 +1454,6 @@ begin
     from instructed.subscriptions
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
    for update skip locked;
 
   if not found then
@@ -1476,8 +1464,7 @@ begin
     select * into v_row
       from instructed.subscriptions
      where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-       and shard = v_shard;
+       and subscription_name = p_subscription_name;
     if found then
       return query
       select 'already_claimed'::text,
@@ -1510,8 +1497,7 @@ begin
        set claimed_by       = p_worker_id,
            claim_expires_at = v_expires
      where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-       and shard = v_shard;
+       and subscription_name = p_subscription_name;
 
     return query
     select 'claimed'::text, v_row.last_seen, p_worker_id, v_expires;
@@ -1542,14 +1528,14 @@ $$;
 --   p_worker_id         text, the caller's worker_id. Must match
 --                         claimed_by; releasing someone else's lease is an
 --                         error.
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: void.
 --
 -- Errors (closed set):
 --   IS020  subscription_not_found   no subscription row for
---                                    (stream, name, shard).
+--                                    (stream, name).
 --   IS022  subscription_lease_lost  row exists but claimed_by !=
 --                                    p_worker_id, or the lease has
 --                                    already expired and been picked up
@@ -1560,7 +1546,7 @@ $$;
 --   22023  invalid_parameter_value  null inputs.
 --
 -- Lock-acquisition order:
---   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--   1. The `subscriptions` row keyed by (stream_id, name):
 --      SELECT ... FOR UPDATE; verify claimed_by; UPDATE
 --      (claimed_by := NULL, claim_expires_at := NULL).
 -- ----------------------------------------------------------------------------
@@ -1576,7 +1562,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_holder    text;
 begin
   if p_stream_uuid is null then
@@ -1592,7 +1577,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -1606,12 +1590,11 @@ begin
     from instructed.subscriptions
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
    for update;
 
   if not found then
-    raise exception 'release_subscription: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'release_subscription: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
   if v_holder is distinct from p_worker_id then
@@ -1624,8 +1607,7 @@ begin
      set claimed_by       = null,
          claim_expires_at = null
    where stream_id = v_stream_id
-     and subscription_name = p_subscription_name
-     and shard = v_shard;
+     and subscription_name = p_subscription_name;
 end;
 $$;
 
@@ -1650,18 +1632,18 @@ $$;
 -- Inputs:
 --   p_stream_uuid       text
 --   p_subscription_name text
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: void.
 --
 -- Errors (closed set):
 --   IS020  subscription_not_found   no subscription row for
---                                    (stream, name, shard).
+--                                    (stream, name).
 --   22023  invalid_parameter_value  null inputs.
 --
 -- Lock-acquisition order:
---   1. The `subscriptions` row keyed by (stream_id, name, shard):
+--   1. The `subscriptions` row keyed by (stream_id, name):
 --      DELETE returning 1; if 0 rows deleted, raise IS020.
 -- ----------------------------------------------------------------------------
 create or replace function instructed.delete_subscription (
@@ -1675,7 +1657,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_deleted   integer;
 begin
   if p_stream_uuid is null then
@@ -1687,7 +1668,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -1699,12 +1679,11 @@ begin
 
   delete from instructed.subscriptions
    where stream_id = v_stream_id
-     and subscription_name = p_subscription_name
-     and shard = v_shard;
+     and subscription_name = p_subscription_name;
   get diagnostics v_deleted = row_count;
   if v_deleted = 0 then
-    raise exception 'delete_subscription: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'delete_subscription: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 end;
@@ -1765,8 +1744,8 @@ $$;
 --                         crash-safety mechanism, not a duplicate-routing
 --                         feature (the routing worker is single-active per
 --                         subscription via the subscription lease).
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: exactly one row:
 --   inserted_count  bigint, the number of rows actually inserted
@@ -1782,7 +1761,7 @@ $$;
 --                                    malformed decision element).
 --
 -- Lock-acquisition order:
---   1. The subscriptions row keyed by (stream_id, name, shard) -- SELECT
+--   1. The subscriptions row keyed by (stream_id, name) -- SELECT
 --      FOR UPDATE; verify lease; then UPDATE last_seen.
 --   2. INSERT into subscription_work_items (PK locks per inserted row).
 --      The same-tx atomicity here is load-bearing for the SUB-A catch-up
@@ -1806,7 +1785,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_holder    text;
   v_inserted  bigint;
   v_new_last  bigint;
@@ -1844,7 +1822,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -1859,12 +1836,11 @@ begin
     from instructed.subscriptions
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
    for update;
 
   if not found then
-    raise exception 'route_batch: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'route_batch: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
   if v_holder is distinct from p_worker_id then
@@ -1876,11 +1852,10 @@ begin
   -- (2) Insert the work items. ON CONFLICT DO NOTHING absorbs crash-replay.
   with ins as (
     insert into instructed.subscription_work_items
-      (stream_id, subscription_name, shard, partition_key, event_number, state)
+      (stream_id, subscription_name, partition_key, event_number, state)
     select
       v_stream_id,
       p_subscription_name,
-      v_shard,
       (d->>'partition_key')::text,
       (d->>'event_number')::bigint,
       'pending'
@@ -1895,7 +1870,6 @@ begin
      set last_seen = greatest(s.last_seen, p_new_cursor)
    where s.stream_id = v_stream_id
      and s.subscription_name = p_subscription_name
-     and s.shard = v_shard
   returning s.last_seen into v_new_last;
 
   return query select v_inserted, v_new_last;
@@ -1932,8 +1906,8 @@ $$;
 --                         it.
 --   p_lease_seconds     integer, > 0. The claim's lease window. On expiry
 --                         the row becomes eligible to a takeover claim.
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: zero or one row:
 --   partition_key     text
@@ -1950,7 +1924,7 @@ $$;
 --
 -- Errors (closed set):
 --   IS020  subscription_not_found   no subscription row for
---                                    (stream, name, shard). The work-items
+--                                    (stream, name). The work-items
 --                                    table is FK-cascaded; a missing
 --                                    subscription means a missing queue.
 --   22023  invalid_parameter_value  null inputs or non-positive lease.
@@ -1980,7 +1954,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_now       timestamptz := now();
   v_expires   timestamptz;
 begin
@@ -2001,7 +1974,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard   := coalesce((p_options->>'shard')::smallint, 0);
   v_expires := v_now + make_interval(secs => p_lease_seconds);
 
   select stream_id into v_stream_id
@@ -2018,10 +1990,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'claim_work_item: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'claim_work_item: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2031,7 +2002,6 @@ begin
       from instructed.subscription_work_items wi
      where wi.stream_id = v_stream_id
        and wi.subscription_name = p_subscription_name
-       and wi.shard = v_shard
        and (
          wi.state = 'pending'
          or (wi.state = 'claimed' and wi.lease_expires_at < v_now)
@@ -2041,7 +2011,6 @@ begin
            from instructed.subscription_work_items earlier
           where earlier.stream_id = wi.stream_id
             and earlier.subscription_name = wi.subscription_name
-            and earlier.shard = wi.shard
             and earlier.partition_key = wi.partition_key
             and earlier.event_number  < wi.event_number
             and earlier.state in ('pending','claimed','failed')
@@ -2058,7 +2027,6 @@ begin
       from candidate c
      where w.stream_id = v_stream_id
        and w.subscription_name = p_subscription_name
-       and w.shard = v_shard
        and w.partition_key = c.partition_key
        and w.event_number  = c.event_number
     returning
@@ -2093,21 +2061,20 @@ $$;
 --   p_worker_id         text, must match the row's claimed_by.
 --   p_partition_key     text
 --   p_event_number      bigint
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: void.
 --
 -- Errors (closed set):
---   IS020  subscription_not_found   no subscription row (stream / name /
---                                    shard).
+--   IS020  subscription_not_found   no subscription row (stream / name).
 --   IS030  work_item_lease_lost     the row no longer exists, or exists
 --                                    but claimed_by != p_worker_id.
 --   22023  invalid_parameter_value  null inputs or negative event_number.
 --
 -- Lock-acquisition order:
 --   1. The subscription_work_items row keyed by
---      (stream_id, name, shard, partition_key, event_number):
+--      (stream_id, name, partition_key, event_number):
 --      SELECT ... FOR UPDATE; verify claimed_by; DELETE.
 -- ----------------------------------------------------------------------------
 create or replace function instructed.complete_work_item_projection (
@@ -2124,7 +2091,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_holder    text;
 begin
   if p_stream_uuid is null then
@@ -2148,7 +2114,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -2162,10 +2127,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'complete_work_item_projection: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'complete_work_item_projection: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2173,7 +2137,6 @@ begin
     from instructed.subscription_work_items
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number
    for update;
@@ -2192,7 +2155,6 @@ begin
   delete from instructed.subscription_work_items
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number;
 end;
@@ -2230,8 +2192,8 @@ $$;
 --   p_snapshot_data           jsonb, the staged PM state after apply.
 --   p_snapshot_metadata       jsonb, may be null. The SDK encodes
 --                               `snapshot_module_version` here per SNAP-002.
---   p_options                 jsonb, default '{}'. Recognised keys:
---                               'shard' :: smallint (default 0; ML-0013).
+--   p_options                 jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: void.
 --
@@ -2264,7 +2226,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_holder    text;
 begin
   if p_stream_uuid is null then
@@ -2304,7 +2265,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -2318,10 +2278,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'complete_work_item_pm: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'complete_work_item_pm: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2329,7 +2288,6 @@ begin
     from instructed.subscription_work_items
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number
    for update;
@@ -2354,7 +2312,6 @@ begin
          lease_expires_at = null
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number;
 
@@ -2398,8 +2355,8 @@ $$;
 --   p_subscription_name text
 --   p_partition_key     text
 --   p_snapshot_uuid     text, the PM instance's snapshot source_uuid.
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: exactly one row:
 --   work_items_deleted bigint
@@ -2429,7 +2386,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id  bigint;
-  v_shard      smallint;
   v_wi_deleted bigint;
   v_snap_del   integer;
 begin
@@ -2450,7 +2406,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -2464,10 +2419,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'complete_pm_instance: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'complete_pm_instance: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2475,7 +2429,6 @@ begin
     delete from instructed.subscription_work_items
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
        and partition_key = p_partition_key
     returning 1
   )
@@ -2509,8 +2462,8 @@ $$;
 --   p_event_number      bigint
 --   p_error_text        text, may be NULL (diagnostic only; not parsed
 --                         by the framework).
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: void.
 --
@@ -2538,7 +2491,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_holder    text;
 begin
   if p_stream_uuid is null then
@@ -2562,7 +2514,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -2576,10 +2527,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'fail_work_item: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'fail_work_item: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2587,7 +2537,6 @@ begin
     from instructed.subscription_work_items
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number
    for update;
@@ -2611,7 +2560,6 @@ begin
          lease_expires_at = null
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number;
 end;
@@ -2644,8 +2592,8 @@ $$;
 --   p_stream_uuid       text
 --   p_subscription_name text
 --   p_target            bigint, the target event_number.
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: exactly one row:
 --   caught_up  boolean
@@ -2670,7 +2618,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_last_seen bigint;
 begin
   if p_stream_uuid is null then
@@ -2686,7 +2633,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -2699,11 +2645,10 @@ begin
   select s.last_seen into v_last_seen
     from instructed.subscriptions s
    where s.stream_id = v_stream_id
-     and s.subscription_name = p_subscription_name
-     and s.shard = v_shard;
+     and s.subscription_name = p_subscription_name;
   if not found then
-    raise exception 'is_subscription_caught_up: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'is_subscription_caught_up: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2714,7 +2659,6 @@ begin
          from instructed.subscription_work_items wi
         where wi.stream_id = v_stream_id
           and wi.subscription_name = p_subscription_name
-          and wi.shard = v_shard
           and wi.event_number <= p_target
           and wi.state in ('pending','claimed','failed')
      );
@@ -2740,8 +2684,8 @@ $$;
 --   p_partition_key     text
 --   p_event_number      bigint
 --   p_lease_seconds     integer, the new lease duration (> 0).
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: exactly one row:
 --   lease_expires_at    timestamptz, the new lease expiry (= now() +
@@ -2755,7 +2699,7 @@ $$;
 --
 -- Lock-acquisition order:
 --   1. The subscription_work_items row keyed by
---      (stream_id, name, shard, partition_key, event_number):
+--      (stream_id, name, partition_key, event_number):
 --      SELECT ... FOR UPDATE; verify state='claimed' AND claimed_by;
 --      UPDATE lease_expires_at.
 -- ----------------------------------------------------------------------------
@@ -2776,7 +2720,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
   v_expires   timestamptz;
   v_state     text;
   v_holder    text;
@@ -2806,7 +2749,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard   := coalesce((p_options->>'shard')::smallint, 0);
   v_expires := now() + make_interval(secs => p_lease_seconds);
 
   select stream_id into v_stream_id
@@ -2821,10 +2763,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'extend_work_item_claim: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'extend_work_item_claim: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2832,7 +2773,6 @@ begin
     from instructed.subscription_work_items
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number
    for update;
@@ -2852,7 +2792,6 @@ begin
      set lease_expires_at = v_expires
    where stream_id = v_stream_id
      and subscription_name = p_subscription_name
-     and shard = v_shard
      and partition_key = p_partition_key
      and event_number  = p_event_number;
 
@@ -2888,8 +2827,8 @@ $$;
 --   p_partition_key     text
 --   p_event_number      bigint, exclusive upper bound (typically the
 --                         claimed event's event_number).
---   p_options           jsonb, default '{}'. Recognised keys:
---                         'shard' :: smallint (default 0; ML-0013).
+--   p_options           jsonb, default '{}'. Recognised keys: none in v1.
+--   (ML-0013 would add a partition key; v1 has none.)
 --
 -- Output: a set of rows in the read_all shape, ordered by event_number
 -- ascending. Empty set if the partition has no 'done' rows below the
@@ -2925,7 +2864,6 @@ as $$
 #variable_conflict use_column
 declare
   v_stream_id bigint;
-  v_shard     smallint;
 begin
   if p_stream_uuid is null then
     raise exception 'list_pm_rebuild_events: p_stream_uuid is null'
@@ -2944,7 +2882,6 @@ begin
       using errcode = '22023';
   end if;
 
-  v_shard := coalesce((p_options->>'shard')::smallint, 0);
 
   select stream_id into v_stream_id
     from instructed.streams
@@ -2958,10 +2895,9 @@ begin
     select 1 from instructed.subscriptions
      where stream_id = v_stream_id
        and subscription_name = p_subscription_name
-       and shard = v_shard
   ) then
-    raise exception 'list_pm_rebuild_events: subscription % on % (shard %) not found',
-      p_subscription_name, p_stream_uuid, v_shard
+    raise exception 'list_pm_rebuild_events: subscription % on % not found',
+      p_subscription_name, p_stream_uuid
       using errcode = 'IS020';
   end if;
 
@@ -2987,7 +2923,6 @@ begin
     on orig.stream_id = se.original_stream_id
   where wi.stream_id        = v_stream_id
     and wi.subscription_name = p_subscription_name
-    and wi.shard             = v_shard
     and wi.partition_key     = p_partition_key
     and wi.state             = 'done'
     and wi.event_number      < p_event_number

@@ -30,7 +30,6 @@ import type {
   RouteDecision,
   Snapshot,
   SnapshotInput,
-  SubscriptionShardOption,
 } from "./types.ts";
 
 export interface ClientOptions {
@@ -307,7 +306,6 @@ export class Client {
             ? String(options.startFrom)
             : options.startFrom;
     }
-    if (options.shard !== undefined) opts.shard = options.shard;
     const res = await this.run<{
       result: "claimed" | "already_claimed";
       last_seen: string | number;
@@ -326,7 +324,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
       },
     );
     const r = res.rows[0];
@@ -356,28 +353,24 @@ export class Client {
     streamUuid: string,
     subscriptionName: string,
     workerId: string,
-    options: SubscriptionShardOption = {},
   ): Promise<void> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     await this.run(
       `SELECT instructed.release_subscription($1, $2, $3, $4::jsonb)`,
       [streamUuid, subscriptionName, workerId, JSON.stringify(opts)],
-      { streamUuid, subscriptionName, shard: options.shard },
+      { streamUuid, subscriptionName },
     );
   }
 
   async deleteSubscription(
     streamUuid: string,
     subscriptionName: string,
-    options: SubscriptionShardOption = {},
   ): Promise<void> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     await this.run(
       `SELECT instructed.delete_subscription($1, $2, $3::jsonb)`,
       [streamUuid, subscriptionName, JSON.stringify(opts)],
-      { streamUuid, subscriptionName, shard: options.shard },
+      { streamUuid, subscriptionName },
     );
   }
 
@@ -398,10 +391,8 @@ export class Client {
     workerId: string,
     newCursor: bigint,
     decisions: RouteDecision[],
-    options: SubscriptionShardOption = {},
   ): Promise<RouteBatchResult> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     const payload = decisions.map((d) => ({
       partition_key: d.partitionKey,
       // event_number must be a JSON number (the SQL contract requires
@@ -426,7 +417,7 @@ export class Client {
         JSON.stringify(payload),
         JSON.stringify(opts),
       ],
-      { streamUuid, subscriptionName, shard: options.shard },
+      { streamUuid, subscriptionName },
     );
     const r = res.rows[0];
     return {
@@ -449,10 +440,8 @@ export class Client {
     subscriptionName: string,
     workerId: string,
     leaseSeconds: number,
-    options: SubscriptionShardOption = {},
   ): Promise<ClaimedWorkItem | null> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     const res = await this.run<{
       partition_key: string;
       event_number: string | number;
@@ -471,7 +460,7 @@ export class Client {
         leaseSeconds,
         JSON.stringify(opts),
       ],
-      { streamUuid, subscriptionName, shard: options.shard },
+      { streamUuid, subscriptionName },
     );
     if (res.rows.length === 0) return null;
     const r = res.rows[0];
@@ -499,10 +488,8 @@ export class Client {
     partitionKey: string,
     eventNumber: bigint,
     leaseSeconds: number,
-    options: SubscriptionShardOption = {},
   ): Promise<{ leaseExpiresAt: Date }> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     const res = await this.run<{ lease_expires_at: Date | string }>(
       `SELECT lease_expires_at
          FROM instructed.extend_work_item_claim($1, $2, $3, $4, $5, $6, $7::jsonb)`,
@@ -518,7 +505,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
         partitionKey,
         eventNumber,
       },
@@ -541,10 +527,8 @@ export class Client {
     workerId: string,
     partitionKey: string,
     eventNumber: bigint,
-    options: SubscriptionShardOption = {},
   ): Promise<void> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     await this.run(
       `SELECT instructed.complete_work_item_projection($1, $2, $3, $4, $5, $6::jsonb)`,
       [
@@ -558,7 +542,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
         partitionKey,
         eventNumber,
       },
@@ -579,10 +562,8 @@ export class Client {
     partitionKey: string,
     eventNumber: bigint,
     snapshot: SnapshotInput<S>,
-    options: SubscriptionShardOption = {},
   ): Promise<void> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     await this.run(
       `SELECT instructed.complete_work_item_pm(
          $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb)`,
@@ -604,7 +585,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
         partitionKey,
         eventNumber,
         sourceUuid: snapshot.sourceUuid,
@@ -623,10 +603,8 @@ export class Client {
     subscriptionName: string,
     partitionKey: string,
     snapshotUuid: string,
-    options: SubscriptionShardOption = {},
   ): Promise<CompletePmInstanceResult> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     const res = await this.run<{
       work_items_deleted: string | number;
       snapshot_deleted: boolean;
@@ -643,7 +621,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
         partitionKey,
         sourceUuid: snapshotUuid,
       },
@@ -670,10 +647,8 @@ export class Client {
     partitionKey: string,
     eventNumber: bigint,
     errorText: string | null,
-    options: SubscriptionShardOption = {},
   ): Promise<void> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     await this.run(
       `SELECT instructed.fail_work_item($1, $2, $3, $4, $5, $6, $7::jsonb)`,
       [
@@ -688,7 +663,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
         partitionKey,
         eventNumber,
       },
@@ -705,10 +679,8 @@ export class Client {
     streamUuid: string,
     subscriptionName: string,
     target: bigint,
-    options: SubscriptionShardOption = {},
   ): Promise<boolean> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     const res = await this.run<{ caught_up: boolean }>(
       `SELECT caught_up
          FROM instructed.is_subscription_caught_up($1, $2, $3, $4::jsonb)`,
@@ -718,7 +690,7 @@ export class Client {
         target.toString(),
         JSON.stringify(opts),
       ],
-      { streamUuid, subscriptionName, shard: options.shard },
+      { streamUuid, subscriptionName },
     );
     return res.rows[0].caught_up;
   }
@@ -741,10 +713,8 @@ export class Client {
     subscriptionName: string,
     partitionKey: string,
     exclusiveUpperBound: bigint,
-    options: SubscriptionShardOption = {},
   ): Promise<RecordedEvent<E>[]> {
     const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
     const res = await this.run<RawEventRow>(
       `SELECT event_id, event_number, stream_uuid, stream_version,
               event_type, causation_id, correlation_id, data, metadata, created_at
@@ -759,7 +729,6 @@ export class Client {
       {
         streamUuid,
         subscriptionName,
-        shard: options.shard,
         partitionKey,
       },
     );

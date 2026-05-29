@@ -55,7 +55,6 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     };
     expect("stream_id", "bigint", "NO");
     expect("subscription_name", "text", "NO");
-    expect("shard", "smallint", "NO");
     expect("partition_key", "text", "NO");
     expect("event_number", "bigint", "NO");
     expect("state", "text", "NO");
@@ -65,12 +64,12 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     expect("error_text", "text", "YES");
     assert.equal(
       byName.size,
-      10,
+      9,
       `unexpected extra columns: ${[...byName.keys()].sort().join(",")}`,
     );
   });
 
-  test("primary key is (stream_id, subscription_name, shard, partition_key, event_number)", async () => {
+  test("primary key is (stream_id, subscription_name, partition_key, event_number)", async () => {
     const r = await pool.query<{ attname: string; ord: number }>(
       `SELECT a.attname, k.n AS ord
          FROM pg_constraint c
@@ -88,14 +87,13 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
       [
         "stream_id",
         "subscription_name",
-        "shard",
         "partition_key",
         "event_number",
       ],
     );
   });
 
-  test("FK on (stream_id, subscription_name, shard) cascades from subscriptions", async () => {
+  test("FK on (stream_id, subscription_name) cascades from subscriptions", async () => {
     const r = await pool.query<{
       confdeltype: string;
       cols: string;
@@ -113,7 +111,7 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
           AND c.contype = 'f'`,
     );
     assert.equal(r.rowCount, 1);
-    assert.equal(r.rows[0].cols, "stream_id,subscription_name,shard");
+    assert.equal(r.rows[0].cols, "stream_id,subscription_name");
     assert.equal(r.rows[0].confdeltype, "c"); // ON DELETE CASCADE
   });
 
@@ -146,14 +144,14 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     // Seed a subscription row to satisfy the FK.
     await pool.query(
       `INSERT INTO instructed.subscriptions
-         (stream_id, subscription_name, shard, last_seen)
-       VALUES (0, 's', 0, 0)`,
+         (stream_id, subscription_name, last_seen)
+       VALUES (0, 's', 0)`,
     );
     await assert.rejects(
       pool.query(
         `INSERT INTO instructed.subscription_work_items
-           (stream_id, subscription_name, shard, partition_key, event_number, state)
-         VALUES (0, 's', 0, 'p', 1, 'bogus')`,
+           (stream_id, subscription_name, partition_key, event_number, state)
+         VALUES (0, 's', 'p', 1, 'bogus')`,
       ),
       /check constraint|violates check/i,
     );
@@ -166,16 +164,16 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
   test("per-state column invariants are enforced by CHECK constraints", async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions
-         (stream_id, subscription_name, shard, last_seen)
-       VALUES (0, 's', 0, 0)`,
+         (stream_id, subscription_name, last_seen)
+       VALUES (0, 's', 0)`,
     );
 
     // 'claimed' requires both claimed_by and lease_expires_at.
     await assert.rejects(
       pool.query(
         `INSERT INTO instructed.subscription_work_items
-           (stream_id, subscription_name, shard, partition_key, event_number, state)
-         VALUES (0, 's', 0, 'p', 1, 'claimed')`,
+           (stream_id, subscription_name, partition_key, event_number, state)
+         VALUES (0, 's', 'p', 1, 'claimed')`,
       ),
       /check/i,
       "claimed without claimed_by/lease should be rejected",
@@ -185,9 +183,9 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     await assert.rejects(
       pool.query(
         `INSERT INTO instructed.subscription_work_items
-           (stream_id, subscription_name, shard, partition_key, event_number,
+           (stream_id, subscription_name, partition_key, event_number,
             state, claimed_by, lease_expires_at)
-         VALUES (0, 's', 0, 'p', 2, 'pending', 'w1', now())`,
+         VALUES (0, 's', 'p', 2, 'pending', 'w1', now())`,
       ),
       /check/i,
       "non-claimed row with claimed_by should be rejected",
@@ -197,8 +195,8 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     await assert.rejects(
       pool.query(
         `INSERT INTO instructed.subscription_work_items
-           (stream_id, subscription_name, shard, partition_key, event_number, state)
-         VALUES (0, 's', 0, 'p', 3, 'failed')`,
+           (stream_id, subscription_name, partition_key, event_number, state)
+         VALUES (0, 's', 'p', 3, 'failed')`,
       ),
       /check/i,
       "failed without failed_at should be rejected",
@@ -208,9 +206,9 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     await assert.rejects(
       pool.query(
         `INSERT INTO instructed.subscription_work_items
-           (stream_id, subscription_name, shard, partition_key, event_number,
+           (stream_id, subscription_name, partition_key, event_number,
             state, error_text)
-         VALUES (0, 's', 0, 'p', 4, 'pending', 'boom')`,
+         VALUES (0, 's', 'p', 4, 'pending', 'boom')`,
       ),
       /check/i,
       "error_text on non-failed row should be rejected",
@@ -219,43 +217,43 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
     // Happy paths.
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number, state)
-       VALUES (0, 's', 0, 'p', 10, 'pending')`,
+         (stream_id, subscription_name, partition_key, event_number, state)
+       VALUES (0, 's', 'p', 10, 'pending')`,
     );
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number,
+         (stream_id, subscription_name, partition_key, event_number,
           state, claimed_by, lease_expires_at)
-       VALUES (0, 's', 0, 'p', 11, 'claimed', 'w1', now() + interval '30s')`,
+       VALUES (0, 's', 'p', 11, 'claimed', 'w1', now() + interval '30s')`,
     );
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number,
+         (stream_id, subscription_name, partition_key, event_number,
           state, failed_at, error_text)
-       VALUES (0, 's', 0, 'p', 12, 'failed', now(), 'boom')`,
+       VALUES (0, 's', 'p', 12, 'failed', now(), 'boom')`,
     );
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number, state)
-       VALUES (0, 's', 0, 'p', 13, 'done')`,
+         (stream_id, subscription_name, partition_key, event_number, state)
+       VALUES (0, 's', 'p', 13, 'done')`,
     );
   });
 
   test("FK cascade: deleting a subscription removes its work items", async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions
-         (stream_id, subscription_name, shard, last_seen)
-       VALUES (0, 's', 0, 0)`,
+         (stream_id, subscription_name, last_seen)
+       VALUES (0, 's', 0)`,
     );
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number, state)
-       VALUES (0, 's', 0, 'p', 1, 'pending'),
-              (0, 's', 0, 'p', 2, 'pending')`,
+         (stream_id, subscription_name, partition_key, event_number, state)
+       VALUES (0, 's', 'p', 1, 'pending'),
+              (0, 's', 'p', 2, 'pending')`,
     );
     await pool.query(
       `DELETE FROM instructed.subscriptions
-        WHERE stream_id = 0 AND subscription_name = 's' AND shard = 0`,
+        WHERE stream_id = 0 AND subscription_name = 's'`,
     );
     const r = await pool.query<{ c: string }>(
       `SELECT count(*)::text AS c FROM instructed.subscription_work_items`,
@@ -266,27 +264,27 @@ describe("SUB-A slice 1 — subscription_work_items schema", () => {
   test("primary key prevents duplicate (subscription, partition, event_number)", async () => {
     await pool.query(
       `INSERT INTO instructed.subscriptions
-         (stream_id, subscription_name, shard, last_seen)
-       VALUES (0, 's', 0, 0)`,
+         (stream_id, subscription_name, last_seen)
+       VALUES (0, 's', 0)`,
     );
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number, state)
-       VALUES (0, 's', 0, 'p', 1, 'pending')`,
+         (stream_id, subscription_name, partition_key, event_number, state)
+       VALUES (0, 's', 'p', 1, 'pending')`,
     );
     await assert.rejects(
       pool.query(
         `INSERT INTO instructed.subscription_work_items
-           (stream_id, subscription_name, shard, partition_key, event_number, state)
-         VALUES (0, 's', 0, 'p', 1, 'pending')`,
+           (stream_id, subscription_name, partition_key, event_number, state)
+         VALUES (0, 's', 'p', 1, 'pending')`,
       ),
       /duplicate key|unique/i,
     );
     // Same event_number but different partition_key is fine.
     await pool.query(
       `INSERT INTO instructed.subscription_work_items
-         (stream_id, subscription_name, shard, partition_key, event_number, state)
-       VALUES (0, 's', 0, 'q', 1, 'pending')`,
+         (stream_id, subscription_name, partition_key, event_number, state)
+       VALUES (0, 's', 'q', 1, 'pending')`,
     );
   });
 });

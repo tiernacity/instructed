@@ -32,10 +32,11 @@ over whatever partition shape the application declares.
 
 **Implications:**
 
-- The `subscriptions` table identity is
-  `(stream_id, name, shard)` with `shard = 0` reserved at v1
-  for a future operator-facing shard dimension. The
-  per-subscription routing lease lives on this table.
+- The `subscriptions` table identity is `(stream_id, name)`.
+  (The speculative `shard` column that once reserved a partition
+  dimension was removed in slice A4; ML-0013 would re-add one
+  additively.) The per-subscription routing lease lives on this
+  table.
 - A second table `subscription_work_items` carries the queue;
   the per-item lease lives on its rows. Processing workers
   claim items with `FOR UPDATE SKIP LOCKED` plus a

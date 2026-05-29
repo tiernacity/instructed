@@ -365,13 +365,17 @@ holding live leases simultaneously.
 
 **Forward-compat constraints on v1:**
 
-- The `shard` column reserved on `subscriptions` (v1 default 0;
-  see invariants.md "Identity" paragraph for Part E) is the
-  forward-compat hook. Identity is `(stream_uuid, name, shard)`;
-  v1 collapses to one shard per `(stream_uuid, name)`.
+- The speculative `shard` column that once reserved this design
+  space on `subscriptions` was removed (slice A4) as dead weight.
+  Re-introducing a partition dimension stays additive: every
+  routing/claim/complete procedure already takes `p_options jsonb`,
+  and a partition column can be re-added to `subscriptions` /
+  `subscription_work_items` with a defaulted migration. v1 identity
+  is `(stream_uuid, name)`; a sharded variant would extend it to
+  `(stream_uuid, name, partition)`.
 - `IS021 subscription_already_claimed` is reserved but not raised
   in v1 (sql-contract.md). A multi-routing-worker variant would
-  raise it once the per-shard claim count exceeded
+  raise it once the per-partition claim count exceeded
   `concurrency_limit`.
 - A partition-selector API (per ML-0003) becomes a prerequisite
   for stickiness across routing workers, not just within a

@@ -23,8 +23,8 @@ Procedures follow three conventions, borrowed from absurd:
 - **Caller-tunable knobs go through a `p_options jsonb` parameter**,
   not positional arguments. The set of recognised keys is documented
   in each procedure's docstring; unknown keys are silently ignored.
-  This is the forward-compatibility lever for the operator-facing
-  `shard` dimension on `subscriptions` and for ML-0002
+  This is the forward-compatibility lever for a future operator-facing
+  partition dimension on `subscriptions` (ML-0013) and for ML-0002
   (`LISTEN`/`NOTIFY`).
 - **Errors are a closed set per procedure**, raised with custom
   SQLSTATEs in class `IS` (table below). SDKs translate each
@@ -41,7 +41,7 @@ Procedures follow three conventions, borrowed from absurd:
 | `events`          | Caller-keyed event rows. Append-only. | INV-APPEND-001, INV-APPEND-030, INV-APPEND-040 |
 | `stream_events`   | (event, stream) join. Carries per-stream + original-stream positions. Unique `(stream_id, stream_version)` is the OCC mechanism ([D-0005](decisions.md#d-0005)). | INV-APPEND-002/022, INV-READ-005..008 |
 | `snapshots`       | At most one per `source_uuid`. Used by aggregates and PMs (PM-020..024). | INV-SNAP-001..004 |
-| `subscriptions`   | Persistent routing cursor + lease per `(stream_id, name, shard)`. Routing-worker hot path. | INV-SUB-P-001/002/010..012, [D-0002](decisions.md#d-0002), [D-0006](decisions.md#d-0006) |
+| `subscriptions`   | Persistent routing cursor + lease per `(stream_id, name)`. Routing-worker hot path. | INV-SUB-P-001/002/010..012, [D-0002](decisions.md#d-0002), [D-0006](decisions.md#d-0006) |
 | `subscription_work_items` | Per-subscription work queue. One row per routed event per partition; carries the per-item lease processing workers compete on. PK absorbs duplicate INSERTs on routing-worker re-run. ON DELETE CASCADE from `subscriptions`. | INV-SUB-W-001..030, [D-0002](decisions.md#d-0002) |
 
 Triggers `events_no_update / events_no_delete /
@@ -162,10 +162,10 @@ reference. Authoritative copy lives in the SQL file.)
 | `read_stream`, `read_all`       | none (MVCC reads)                                                        |
 | `record_snapshot`, `delete_snapshot` | `snapshots[source_uuid]`                                            |
 | `read_snapshot`                 | none                                                                     |
-| `claim_subscription`            | `subscriptions[stream,name,shard]`                                       |
-| `release_subscription`          | `subscriptions[stream,name,shard]`                                       |
-| `route_batch`                   | `subscriptions[stream,name,shard]` → `subscription_work_items[*]` (PK)   |
-| `delete_subscription`           | `subscriptions[stream,name,shard]` → cascaded `subscription_work_items`  |
+| `claim_subscription`            | `subscriptions[stream,name]`                                             |
+| `release_subscription`          | `subscriptions[stream,name]`                                             |
+| `route_batch`                   | `subscriptions[stream,name]` → `subscription_work_items[*]` (PK)         |
+| `delete_subscription`           | `subscriptions[stream,name]` → cascaded `subscription_work_items`        |
 | `claim_work_item`               | `subscription_work_items[row]` (`FOR UPDATE SKIP LOCKED`)                |
 | `extend_work_item_claim`        | `subscription_work_items[row]`                                           |
 | `complete_work_item_projection` | `subscription_work_items[row]`                                           |
