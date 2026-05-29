@@ -50,11 +50,9 @@ interface ReadRow {
   created_at: Date
 }
 
-function append(streamUuid: string, events: InputEvent[]): Promise<void> {
-  return appendAny(pool, streamUuid, events)
-}
-
-function asReadRow(row: {
+// The raw row shape returned by read_stream / read_all (bigints arrive as
+// strings over the wire); asReadRow maps it to ReadRow.
+interface RawReadRow {
   event_id: string
   event_number: string
   stream_uuid: string
@@ -65,7 +63,13 @@ function asReadRow(row: {
   data: unknown
   metadata: unknown
   created_at: Date
-}): ReadRow {
+}
+
+function append(streamUuid: string, events: InputEvent[]): Promise<void> {
+  return appendAny(pool, streamUuid, events)
+}
+
+function asReadRow(row: RawReadRow): ReadRow {
   return {
     event_id: row.event_id,
     event_number: BigInt(row.event_number),
@@ -85,19 +89,20 @@ async function readStream(
   fromStreamVersion: bigint,
   qty: number,
 ): Promise<ReadRow[]> {
-  const r = await pool.query(`SELECT * FROM instructed.read_stream($1, $2, $3)`, [
+  const r = await pool.query<RawReadRow>(`SELECT * FROM instructed.read_stream($1, $2, $3)`, [
     streamUuid,
     fromStreamVersion,
     qty,
   ])
-  // deno-lint-ignore no-explicit-any
-  return r.rows.map((row: any) => asReadRow(row))
+  return r.rows.map(asReadRow)
 }
 
 async function readAll(fromEventNumber: bigint, qty: number): Promise<ReadRow[]> {
-  const r = await pool.query(`SELECT * FROM instructed.read_all($1, $2)`, [fromEventNumber, qty])
-  // deno-lint-ignore no-explicit-any
-  return r.rows.map((row: any) => asReadRow(row))
+  const r = await pool.query<RawReadRow>(`SELECT * FROM instructed.read_all($1, $2)`, [
+    fromEventNumber,
+    qty,
+  ])
+  return r.rows.map(asReadRow)
 }
 
 // =============================================================================
