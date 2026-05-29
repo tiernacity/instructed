@@ -188,7 +188,12 @@ type-check` + `npm test`.
       barrel surface must be unchanged.
 - [x] **B4 — `aggregate.ts` (+ `aggregate-snapshots.ts`, `snapshot-version.ts`) → `aggregate/`.**
 - [x] **B5 — workers → `workers/{routing,processing,projection,pm}/`** (+ `pm-substrate`, `error-policies`).
-- [ ] **B6 — facade + consistency → `facade/`, `consistency/`** (+ `command-router`, `partition-by`, `routing-helpers`, `logger`).
+- [x] **B6 — facade + consistency → `facade/`, `consistency/`** (+ `command-router`, `partition-by`, `routing-helpers`, `logger`).
+      NOTE: `core.ts` + `index.ts` intentionally kept at `src/` root
+      (public package entry points wired into `package.json` `exports`
+      + build). The tree's `core/index.ts` would force a package-exports
+      + dist-path change; left as an optional follow-up, out of B6's
+      "public barrels keep the same surface" guarantee.
 
 ---
 
@@ -575,3 +580,36 @@ revert was for risk/context management, not because it was broken.
   * `mkdir -p` the four subdirs first (git mv won't create them).
   * Gates: SDK 162/162 + type-check; conformance 148/148; core/full
     export surface verified.
+- 2026-05-29 — **B6** (facade + consistency + logger → own dirs).
+  Commit `7ab9a3b`. Final B-stream slice. `git mv` of `instructed.ts`,
+  `command-router.ts`, `partition-by.ts`, `routing-helpers.ts` →
+  `facade/`; `consistency.ts` → `consistency/`; `logger.ts` →
+  `logger/`; each behind a barrel. src/ root now holds only the two
+  public entry barrels (`index.ts`, `core.ts`) + the directory tree.
+  Surprises / notes:
+  * Deliberately did NOT move `core.ts` → `core/index.ts` (the §2.4
+    tree's last item): it's the `instructed-sdk/core` package entry in
+    `package.json` `exports` and the build emits `dist/core.js` from
+    it; relocating would change the published dist path and break the
+    "nothing downstream changes" guarantee. Ran `npm run build` to
+    confirm both entry points still emit. Logged as an optional
+    follow-up if we ever want the tree 100% literal.
+  * Cycle avoidance: `pm-worker` (workers/pm) imports `CommandRouter`
+    from the facade *file* (`../../facade/command-router.ts`), not the
+    facade barrel, so the facade↔workers edge stays acyclic. (It's a
+    type-only import anyway.)
+  * Same dynamic-import vigilance as B3/B5 — checked `import("` in the
+    moved files; none beyond the already-handled pm-worker logger ref.
+  * Gates: SDK 162/162 + type-check; `npm run build` OK; conformance
+    148/148; core/full export surfaces verified unchanged.
+
+---
+
+## Status: Workstreams A and B COMPLETE.
+
+A1–A6 (schema + core cleanup, incl. the two optional A5 helper
+extractions and A6 folded into B3) and B1–B6 (full directory
+restructure) are all done; every commit left SQL-install, SDK
+(162 tests + type-check), and conformance (148 tests, coverage
+MISSING 0) green. Sole intentional deviation from the §2.4 target:
+`core.ts` kept at `src/` root (see B6 note) — optional follow-up only.
