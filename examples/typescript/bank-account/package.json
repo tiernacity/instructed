@@ -10,7 +10,6 @@
     "open-account": "node --conditions=development scripts/open-account.ts",
     "deposit": "node --conditions=development scripts/deposit.ts",
     "transfer": "node --conditions=development scripts/transfer.ts",
-    "type-check": "tsc --noEmit",
     "format:check": "npx oxfmt --check .",
     "format:fix": "npx oxfmt --write .",
     "lint:check": "npx oxlint",

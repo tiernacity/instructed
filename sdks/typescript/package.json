@@ -33,7 +33,6 @@
   },
   "scripts": {
     "build": "tsc --project tsconfig.build.json && tsc --project tsconfig.cjs.json && echo '{\"type\":\"commonjs\"}' > dist/cjs/package.json",
-    "type-check": "tsc --noEmit",
     "test": "node --test --test-concurrency=1 'test/*.test.ts'",
     "test:watch": "node --test --test-concurrency=1 --watch 'test/*.test.ts'",
     "format:check": "npx oxfmt --check .",
