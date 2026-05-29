@@ -187,7 +187,7 @@ type-check` + `npm test`.
       A6 has no separate slice — it is closed out by B3. The public
       barrel surface must be unchanged.
 - [x] **B4 — `aggregate.ts` (+ `aggregate-snapshots.ts`, `snapshot-version.ts`) → `aggregate/`.**
-- [ ] **B5 — workers → `workers/{routing,processing,projection,pm}/`** (+ `pm-substrate`, `error-policies`).
+- [x] **B5 — workers → `workers/{routing,processing,projection,pm}/`** (+ `pm-substrate`, `error-policies`).
 - [ ] **B6 — facade + consistency → `facade/`, `consistency/`** (+ `command-router`, `partition-by`, `routing-helpers`, `logger`).
 
 ---
@@ -558,3 +558,20 @@ revert was for risk/context management, not because it was broken.
   * `aggregate.ts` substring does not match `aggregate-snapshots.ts`, so
     the two `"./aggregate*.ts"` patterns were safe to run together.
   * Gates: SDK 162/162 + type-check; core/full export surface verified.
+- 2026-05-29 — **B5** (workers → `workers/`). Commit `822ce66`.
+  `git mv` of the six worker modules into `workers/{routing,processing,
+  projection,pm}/`, each subdir with its own barrel. `error-policies.ts`
+  sits in `processing/` (composes over `ErrorPolicy`); its barrel
+  re-exports it. `pm-substrate.ts` + `pm-worker.ts` share `pm/`.
+  Surprises / notes:
+  * Depth-2 rebase: blanket `from "./" → from "../../"` then fix the
+    cross-worker refs — same-dir siblings back to `./`
+    (error-policies→processing-worker, pm-worker→pm-substrate),
+    cross-dir to the sibling barrel (`../processing/index.ts`).
+  * B3 lesson paid off again: a *dynamic* `import("./logger.ts")` inside
+    a TS type position in pm-worker (`import("./logger.ts").Logger`)
+    was invisible to the `from "./"` sed; type-check (TS2307) caught it,
+    fixed to `../../logger.ts`. Grep `import("` in the moved dir next time.
+  * `mkdir -p` the four subdirs first (git mv won't create them).
+  * Gates: SDK 162/162 + type-check; conformance 148/148; core/full
+    export surface verified.
