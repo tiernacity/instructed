@@ -61,6 +61,8 @@
 -- Internal helpers (underscore-prefixed; not part of the public surface):
 --   _require_subscription -- IS020 existence guard shared by the work-item
 --                            procedures.
+--   _upsert_snapshot      -- full-row snapshot upsert shared by
+--                            record_snapshot and complete_work_item_pm.
 --
 -- All procedures that accept caller-tunable knobs do so via a `p_options jsonb`
 -- parameter rather than positional arguments, so that ML-0013 / ML-0002 can
@@ -1044,6 +1046,40 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
+-- _upsert_snapshot  (internal helper)
+--
+-- The full-row snapshot upsert (INV-SNAP-001 at-most-one, INV-SNAP-002
+-- wholesale replace) shared by `record_snapshot` and the co-transactional
+-- PM-snapshot write inside `complete_work_item_pm`. Centralised so the two
+-- writers cannot drift. Input validation stays with the callers (their
+-- error messages name the calling procedure); this helper only does the
+-- write. `created_at` is stamped `now()` on both insert and update.
+-- ----------------------------------------------------------------------------
+create or replace function instructed._upsert_snapshot (
+  p_source_uuid    text,
+  p_source_type    text,
+  p_source_version bigint,
+  p_data           jsonb,
+  p_metadata       jsonb
+) returns void
+language plpgsql
+as $$
+begin
+  insert into instructed.snapshots
+    (source_uuid, source_type, source_version, data, metadata, created_at)
+  values
+    (p_source_uuid, p_source_type, p_source_version, p_data, p_metadata, now())
+  on conflict (source_uuid) do update
+    set source_type    = excluded.source_type,
+        source_version = excluded.source_version,
+        data           = excluded.data,
+        metadata       = excluded.metadata,
+        created_at     = excluded.created_at;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
 -- record_snapshot
 --
 -- Full-row upsert of a snapshot keyed by `source_uuid`. Realises INV-SNAP-001
@@ -1113,16 +1149,8 @@ begin
       using errcode = '22023';
   end if;
 
-  insert into instructed.snapshots
-    (source_uuid, source_type, source_version, data, metadata, created_at)
-  values
-    (p_source_uuid, p_source_type, p_source_version, p_data, p_metadata, now())
-  on conflict (source_uuid) do update
-    set source_type    = excluded.source_type,
-        source_version = excluded.source_version,
-        data           = excluded.data,
-        metadata       = excluded.metadata,
-        created_at     = excluded.created_at;
+  perform instructed._upsert_snapshot(
+    p_source_uuid, p_source_type, p_source_version, p_data, p_metadata);
 end;
 $$;
 
@@ -2332,19 +2360,12 @@ begin
      and partition_key = p_partition_key
      and event_number  = p_event_number;
 
-  -- (2) Upsert the snapshot. Mirrors record_snapshot semantics, inlined so
-  -- both writes commit together.
-  insert into instructed.snapshots
-    (source_uuid, source_type, source_version, data, metadata, created_at)
-  values
-    (p_snapshot_uuid, p_snapshot_type, p_snapshot_version,
-     p_snapshot_data, p_snapshot_metadata, now())
-  on conflict (source_uuid) do update
-    set source_type    = excluded.source_type,
-        source_version = excluded.source_version,
-        data           = excluded.data,
-        metadata       = excluded.metadata,
-        created_at     = excluded.created_at;
+  -- (2) Upsert the snapshot via the shared helper, so this co-transactional
+  -- PM-snapshot write and record_snapshot stay in lockstep. Both writes
+  -- commit together in this tx (D-0016 / PM-023).
+  perform instructed._upsert_snapshot(
+    p_snapshot_uuid, p_snapshot_type, p_snapshot_version,
+    p_snapshot_data, p_snapshot_metadata);
 end;
 $$;
 
