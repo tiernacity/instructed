@@ -250,19 +250,19 @@ export function projectorSlot(opts: ProjectorSlotOptions): SlotInternal {
   }
 }
 
-export interface PmSlotOptions {
+export interface PmSlotOptions<S = unknown> {
   client: Client
   /** Routing-worker side of the PM. */
   routingDef: RoutingDefinition
   /** Processing-worker side of the PM (apply + handle). */
-  pmDef: PmDefinition<any, any>
+  pmDef: PmDefinition<S>
   slotLabel: string
   leaseSeconds: number
   pollInterval: number
   metrics: SoakMetrics
 }
 
-export function pmSlot(opts: PmSlotOptions): SlotInternal {
+export function pmSlot<S>(opts: PmSlotOptions<S>): SlotInternal {
   const stream = opts.routingDef.stream ?? '$all'
   // Processing-side heartbeat is still in effect; routing-side
   // heartbeat was removed in D-0025 (per-batch claim/release).
