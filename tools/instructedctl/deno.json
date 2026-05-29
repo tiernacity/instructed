@@ -1,0 +1,22 @@
+{
+  "name": "instructedctl",
+  "version": "0.0.0",
+  "exports": "./src/main.ts",
+  "tasks": {
+    "dev": "deno run -A src/main.ts",
+    "check": "deno check src/main.ts",
+    "fmt": "deno fmt",
+    "lint": "deno lint",
+    "compile": "deno compile -A --output instructedctl src/main.ts"
+  },
+  "imports": {
+    "@db/postgres": "jsr:@db/postgres@^0.19.5"
+  },
+  "fmt": {
+    "useTabs": false,
+    "lineWidth": 88,
+    "indentWidth": 2,
+    "semiColons": true,
+    "singleQuote": false
+  }
+}
