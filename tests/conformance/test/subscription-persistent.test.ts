@@ -2,7 +2,6 @@
  * Part E — Persistent subscriptions conformance (Phase 9, step 5/8).
  *
  * Drives `instructed.claim_subscription`,
- * `instructed.extend_subscription_claim`,
  * `instructed.release_subscription`,
  * `instructed.read_subscription_batch`,
  * `instructed.advance_subscription`,
@@ -76,19 +75,6 @@ async function claim(
     claimed_by: row.claimed_by,
     claim_expires_at: row.claim_expires_at,
   };
-}
-
-async function extend(
-  streamUuid: string,
-  name: string,
-  workerId: string,
-  leaseSeconds = 30,
-): Promise<Date> {
-  const r = await pool.query<{ claim_expires_at: Date }>(
-    `SELECT * FROM instructed.extend_subscription_claim($1, $2, $3, $4)`,
-    [streamUuid, name, workerId, leaseSeconds],
-  );
-  return r.rows[0].claim_expires_at;
 }
 
 async function release(
@@ -337,33 +323,6 @@ describe("subscriptions — single-active-subscriber and failover", () => {
     const r = await claim(s, "h", "w1");
     assert.equal(r.result, "claimed");
     assert.equal(r.claimed_by, "w1");
-  });
-
-  // INV-SUB-P-012 (mechanism): extend_subscription_claim is the heartbeat.
-  //   The holder extends; a different worker cannot.
-  test("extend_subscription_claim updates expiry for the holder", async () => {
-    const s = await seedStream(1);
-    const first = await claim(s, "h", "w1", 30);
-    // Wait a tick so timestamps are observably different.
-    await new Promise((r) => setTimeout(r, 10));
-    const newExpiry = await extend(s, "h", "w1", 60);
-    assert.ok(
-      newExpiry.getTime() > first.claim_expires_at.getTime(),
-      "heartbeat must move the expiry forward",
-    );
-  });
-
-  // INV-SUB-P-012 (mechanism): a non-holder heartbeat fails with IS022.
-  test("extend_subscription_claim by a non-holder raises IS022 lease_lost", async () => {
-    const s = await seedStream(1);
-    await claim(s, "h", "w1");
-    await rejectsWithCode(() => extend(s, "h", "w2"), "IS022");
-  });
-
-  // INV-SUB-P-012 (mechanism): heartbeat on a missing subscription → IS020.
-  test("extend_subscription_claim on a missing subscription raises IS020", async () => {
-    const s = await seedStream(1);
-    await rejectsWithCode(() => extend(s, "no-such", "w1"), "IS020");
   });
 
   // claim_subscription contention race (TODO #15): when the
@@ -748,10 +707,10 @@ describe("subscriptions — lifecycle", () => {
   // INV-SUB-P-011 (composed lease-expiry → takeover → IS022 on
   //   original): the routing-side three-step case called out in
   //   TODO #11 / §4 gap-list item 7. SP:322 covers "different worker
-  //   claims after expiry"; SP:357 covers "non-holder heartbeat
-  //   raises IS022"; this one composes them into the single
-  //   end-to-end sequence the invariant's wording promises, with
-  //   *no* administrative action in between.
+  //   claims after expiry"; this one composes that with the
+  //   non-holder-fails case into the single end-to-end sequence the
+  //   invariant's wording promises, with *no* administrative action
+  //   in between.
   test("after lease expiry + takeover, the original holder's next op raises IS022", async () => {
     const s = await seedStream(2);
     const w1 = await claim(s, "h", "worker-A", 30);
@@ -765,9 +724,8 @@ describe("subscriptions — lifecycle", () => {
     assert.equal(w2.result, "claimed");
     assert.equal(w2.claimed_by, "worker-B");
 
-    // Original holder's *next* op on any of the three routing-side
+    // Original holder's *next* op on any of the routing-side
     // procedures must raise IS022 (subscription_lease_lost).
-    await rejectsWithCode(() => extend(s, "h", "worker-A"), "IS022");
     await rejectsWithCode(
       () => readBatch(s, "h", "worker-A", 10),
       "IS022",

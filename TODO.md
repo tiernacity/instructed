@@ -359,9 +359,8 @@ should get right once.
   `sdks/typescript/src/client.ts` and re-exports through
   `index.ts`.
 - Audit other procedure wrappers in `client.ts` for the same
-  shape -- in particular `extend_subscription_claim` and the
-  work-item analogues -- and confirm no other call sites are
-  silently null-mistyped.
+  shape -- in particular the work-item analogues -- and confirm
+  no other call sites are silently null-mistyped.
 - Conformance test covering the contention-race branch (assert
   the SQL function returns NULL fields when the
   FOR UPDATE SKIP LOCKED step finds zero rows). The branch is

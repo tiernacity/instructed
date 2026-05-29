@@ -71,9 +71,9 @@
  *     duplicate INSERTs (`ON CONFLICT DO NOTHING` in the SQL
  *     procedure). The same property absorbs duplicates from an
  *     `IS022`-aborted batch.
- *   * The SDK does **not** heartbeat. `extend_subscription_claim`
- *     remains in the SQL contract for custom long-lease loops above
- *     the `Client` layer; this worker doesn't call it.
+ *   * The SDK does **not** heartbeat. The lease covers one batch;
+ *     `route_batch` re-verifies `claimed_by` on each call, so a
+ *     lost lease surfaces as `IS022` rather than via a heartbeat.
  */
 
 import type { Client } from "./client.ts";

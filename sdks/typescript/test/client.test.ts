@@ -349,27 +349,6 @@ describe("Client.subscriptions", () => {
     assert.equal(r.result, "claimed");
   });
 
-  test("extend extends the lease; lease-loss raises (IS022)", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [ev("A")]);
-    await client.claimSubscription(s, "sub", "w1", 30);
-    const ext = await client.extendSubscriptionClaim(s, "sub", "w1", 60);
-    assert.ok(ext.claimExpiresAt instanceof Date);
-    await assert.rejects(
-      () => client.extendSubscriptionClaim(s, "sub", "w-other", 30),
-      (err) => err instanceof SubscriptionLeaseLost && err.code === "IS022",
-    );
-  });
-
-  test("extend on missing subscription raises SubscriptionNotFound (IS020)", async () => {
-    const s = randomUUID();
-    await client.appendToStream(s, expected.noStream, [ev("A")]);
-    await assert.rejects(
-      () => client.extendSubscriptionClaim(s, "nope", "w1", 30),
-      (err) => err instanceof SubscriptionNotFound && err.code === "IS020",
-    );
-  });
-
   test("release clears holder; subsequent claim resumes from last_seen", async () => {
     const s = randomUUID();
     await client.appendToStream(s, expected.noStream, [ev("A"), ev("B")]);

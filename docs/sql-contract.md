@@ -73,7 +73,6 @@ raises it. SDKs that see it have bypassed the contract.
 | Procedure                       | Returns                  | Purpose |
 |---------------------------------|--------------------------|---------|
 | `claim_subscription`            | `(result, last_seen, claimed_by, claim_expires_at)` | Acquire routing-side lease on first create or expiry; returns `already_claimed` (not an error) when a live lease is held by someone else or the row is being concurrently written. Uses MVCC pre-check + `FOR UPDATE SKIP LOCKED` internally per [D-0025](decisions.md#d-0025) so contended callers never queue on a row lock. In the `'already_claimed'` outcome `claimed_by` and `claim_expires_at` are diagnostic and **may be NULL** when the `FOR UPDATE SKIP LOCKED` step finds the row locked: the released-between-batches D-0025 state and the row-deleted-between-checks race both surface as NULL fields. SDK wrappers MUST type both fields as nullable in the `'already_claimed'` branch. |
-| `extend_subscription_claim`     | `(claim_expires_at)`     | Routing-worker heartbeat |
 | `release_subscription`          | `void`                   | Clean release; cursor and queue preserved |
 | `read_subscription_position`    | `(last_seen)`            | Read routing cursor |
 | `delete_subscription`           | `void`                   | Removes row + cascaded work items; raises `IS020` on missing ([D-0009](decisions.md#d-0009)) |
@@ -127,9 +126,9 @@ error type.
 | `IS005`  | `reserved_stream_uuid`        | `append_to_stream`, `read_stream` (on `'$all'`)                           | INV-STREAM-003 |
 | `IS006`  | append-only violation         | triggers on `events` / `stream_events` direct UPDATE/DELETE only          | INV-APPEND-040 — **never** raised by a procedure |
 | `IS010`  | `snapshot_not_found`          | `read_snapshot`                                                           | INV-SNAP-003 |
-| `IS020`  | `subscription_not_found`      | `extend_subscription_claim`, `release_subscription`, `route_batch`, `read_subscription_position`, `delete_subscription`, `claim_work_item`, `extend_work_item_claim`, `complete_work_item_*`, `complete_pm_instance`, `fail_work_item`, `is_subscription_caught_up`, `list_pm_rebuild_events` | INV-SUB-P-062, [D-0009](decisions.md#d-0009) |
+| `IS020`  | `subscription_not_found`      | `release_subscription`, `route_batch`, `read_subscription_position`, `delete_subscription`, `claim_work_item`, `extend_work_item_claim`, `complete_work_item_*`, `complete_pm_instance`, `fail_work_item`, `is_subscription_caught_up`, `list_pm_rebuild_events` | INV-SUB-P-062, [D-0009](decisions.md#d-0009) |
 | `IS021`  | `subscription_already_claimed` | (reserved; v1 surfaces this case as a non-error `result = 'already_claimed'` row from `claim_subscription`. The SQLSTATE is retained in the catalogue for forward use if a future variant of `claim_subscription` chooses to raise.) | [D-0006](decisions.md#d-0006) |
-| `IS022`  | `subscription_lease_lost`     | `extend_subscription_claim`, `release_subscription`, `route_batch` — the routing-worker surface | [D-0006](decisions.md#d-0006) |
+| `IS022`  | `subscription_lease_lost`     | `release_subscription`, `route_batch` — the routing-worker surface | [D-0006](decisions.md#d-0006) |
 | `IS030`  | `work_item_lease_lost`        | `extend_work_item_claim`, `complete_work_item_projection`, `complete_work_item_pm`, `fail_work_item` — the processing-worker terminal surface. Covers both "row gone" (taken over) and "`claimed_by` mismatch"; either way the worker should stop and let redelivery happen. | INV-SUB-W-012 |
 | `22023`  | `invalid_parameter_value`     | every procedure, on null / malformed / out-of-range input                 | (standard SQLSTATE) |
 | `0A000`  | `feature_not_supported`       | reserved; not raised by any v1 procedure                                  | (standard SQLSTATE) |
@@ -165,7 +164,6 @@ reference. Authoritative copy lives in the SQL file.)
 | `record_snapshot`, `delete_snapshot` | `snapshots[source_uuid]`                                            |
 | `read_snapshot`                 | none                                                                     |
 | `claim_subscription`            | `subscriptions[stream,name,shard]`                                       |
-| `extend_subscription_claim`     | `subscriptions[stream,name,shard]`                                       |
 | `release_subscription`          | `subscriptions[stream,name,shard]`                                       |
 | `route_batch`                   | `subscriptions[stream,name,shard]` → `subscription_work_items[*]` (PK)   |
 | `read_subscription_position`    | none                                                                     |
@@ -262,10 +260,10 @@ INSERTs (`ON CONFLICT DO NOTHING`), so a crashed or
 next worker re-reads from `last_seen` and the re-inserts are
 no-ops.
 
-Under D-0025 the SDK does not call `extend_subscription_claim`;
-the lease covers one batch and is released explicitly. The
-procedure remains in the contract for callers implementing
-custom long-lease routing loops above the `Client` layer.
+Under D-0025 there is no routing-side heartbeat: the lease
+covers one batch, `route_batch` re-verifies `claimed_by` on
+each call, and the lease is released explicitly. A lost lease
+surfaces as `IS022` rather than via a heartbeat.
 
 ### Processing worker ([D-0016](decisions.md#d-0016))
 

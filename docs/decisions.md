@@ -128,9 +128,11 @@ of bug the design exists to avoid.
 
 The `subscriptions` table carries `claimed_by TEXT NULL` and
 `claim_expires_at TIMESTAMPTZ NULL`. Workers claim via
-`claim_subscription`, heartbeat via `extend_subscription_claim`,
-and release cleanly via `release_subscription`. Lease takeover
-on expiry is automatic in the next claim.
+`claim_subscription` and release cleanly via
+`release_subscription`. Lease takeover on expiry is automatic in
+the next claim. (The original heartbeat procedure
+`extend_subscription_claim` was removed once D-0025 made the
+lease per-batch — see that decision.)
 
 **Why:** Session-locked subscriptions (the alternative —
 `pg_try_advisory_lock` held for the lifetime of the connection)
@@ -141,11 +143,11 @@ connection lifetime and survives the pool cleanly.
 
 **Implications:**
 
-- The worker loop runs a heartbeat alongside its processing
-  loop. If `extend_subscription_claim` raises
-  `IS022 subscription_lease_lost` the worker MUST stop
-  processing immediately; otherwise it risks double-delivery
-  with the new holder.
+- A worker that detects a lost lease (`IS022
+  subscription_lease_lost` from `route_batch` or
+  `release_subscription`) MUST stop processing immediately;
+  otherwise it risks double-delivery with the new holder. (D-0025
+  later replaced the heartbeat loop with per-batch lease checks.)
 - A crashed worker keeps the subscription unavailable until its
   lease expires. Lease TTL tuning is the operational knob.
 
@@ -485,10 +487,9 @@ loop while not closing:
   release_subscription(stream, name, workerId)
 ```
 
-The lease covers one batch. `extend_subscription_claim` is no
-longer called by the SDK routing worker (the procedure stays in
-the SQL contract for callers who want long-lease semantics above
-the `Client` layer). `IS022` during `route_batch` is not fatal;
+The lease covers one batch. There is no routing-side heartbeat
+(the `extend_subscription_claim` procedure was removed). `IS022`
+during `route_batch` is not fatal;
 it means "your lease expired mid-batch, another worker may have
 claimed; drop this batch and loop". The work-item PK +
 `ON CONFLICT DO NOTHING` absorbs any duplicate INSERTs the dropped
@@ -510,7 +511,7 @@ lock.
 **Lock vs lease.** The schema distinguishes two mechanisms:
 
 - **Postgres row lock** — held by `FOR UPDATE` inside one
-  procedure call (claim / extend / route_batch / release).
+  procedure call (claim / route_batch / release).
   Microseconds. Released at commit.
 - **Application-level lease** — the `claimed_by` /
   `claim_expires_at` columns. Consulted by `route_batch` etc.
@@ -539,7 +540,8 @@ duration; if you can't bound that, shrink `batch_size`.
 
 - SDK option `heartbeatInterval` is removed from
   `RoutingWorkerOptions` (the SDK no longer heartbeats). The
-  `extend_subscription_claim` SQL procedure remains.
+  `extend_subscription_claim` SQL procedure has since been
+  removed entirely.
 - `claim_subscription` returning `'already_claimed'` is no
   longer a fatal startup error in the SDK; it is a back-off
   signal handled inside the loop.

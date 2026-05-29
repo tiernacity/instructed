@@ -193,10 +193,10 @@ Key points:
   than `lease_seconds`) and another worker may have taken over.
   The SDK drops the partial batch and loops; the next
   `claim_subscription` decides what to do.
-- **The SDK does not heartbeat.** `extend_subscription_claim`
-  remains in the SQL contract for callers implementing custom
-  routing loops above the `Client` layer; the per-batch loop
-  doesn't need it.
+- **The SDK does not heartbeat.** The lease covers one batch;
+  `route_batch` re-verifies `claimed_by` on each call, so a lost
+  lease surfaces as `IS022` and the per-batch loop never needs a
+  separate heartbeat.
 
 ### Processing worker (parallel per subscription)
 
@@ -329,15 +329,11 @@ live lease from the snapshot or gets 0 rows from `SKIP LOCKED`,
 and both translate to `'already_claimed'`. See
 [D-0025](decisions.md#d-0025).
 
-`extend_subscription_claim` is a heartbeat for callers that
-choose to hold long leases (custom routing loops above the
-`Client` layer). The SDK's built-in routing worker does **not**
-call it under D-0025 — the lease covers one batch and is
-released explicitly. If a long-lease caller pauses long enough
-for its lease to expire and another worker takes over, the
-original caller's next call to `extend_subscription_claim`,
-`route_batch`, or `release_subscription` raises
-`IS022 subscription_lease_lost`.
+There is no routing-side heartbeat under D-0025: the lease
+covers one batch and is released explicitly. If a worker pauses
+long enough for its lease to expire and another worker takes
+over, the original worker's next call to `route_batch` or
+`release_subscription` raises `IS022 subscription_lease_lost`.
 
 `release_subscription` is called per batch by the SDK routing
 worker in the steady state, and also on graceful shutdown if
@@ -420,7 +416,7 @@ targets are exempt; they validly observe every append.
 | Two appenders, same stream, same expected version | Unique constraint on `stream_events (stream_id, stream_version)`. One wins, the other gets `IS001`. |
 | Two appenders, any streams, both targeting `'any_version'` | Row lock on `streams[target]` serialises same-stream; row lock on `streams[$all]` orders globally. |
 | Two routing workers, same subscription | MVCC pre-check + `FOR UPDATE SKIP LOCKED` in `claim_subscription` — only one holds the subscription lease at a time; the loser sees `already_claimed` without queueing on a row lock. Under D-0025 the lease is released per batch, so the next tick is a fresh race. |
-| One routing worker, action after another worker has taken over the lease | `route_batch` / `extend_subscription_claim` / `release_subscription` check `claimed_by`; raise `IS022 subscription_lease_lost` if it doesn't match. Under D-0025 `IS022` is recoverable: the worker drops the batch and loops. |
+| One routing worker, action after another worker has taken over the lease | `route_batch` / `release_subscription` check `claimed_by`; raise `IS022 subscription_lease_lost` if it doesn't match. Under D-0025 `IS022` is recoverable: the worker drops the batch and loops. |
 | Two processing workers, same subscription, same partition | Per-partition predicate in `claim_work_item` -- only the next-eligible item in a partition can be claimed; other workers skip to other partitions. Within a partition, processing is serial. |
 | Two processing workers, same subscription, different partitions | `FOR UPDATE SKIP LOCKED` on the work-items row — both workers proceed concurrently. |
 | One processing worker, terminal call after another worker has taken over its item | `complete_work_item_*` / `extend_work_item_claim` / `fail_work_item` check `claimed_by`; raise `IS030 work_item_lease_lost` if it doesn't match. |

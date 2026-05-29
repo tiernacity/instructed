@@ -223,8 +223,7 @@ extension.
   row with TTL-bounded leases. A routing worker whose
   `worker_id` no longer matches the current `claimed_by` raises
   `IS022 subscription_lease_lost` on its next
-  `extend_subscription_claim`, `route_batch`, or
-  `release_subscription`.
+  `route_batch` or `release_subscription`.
 - **INV-SUB-P-012** — When a routing worker fails (process exit,
   network failure, lease expiry without renewal), the
   subscription slot MUST become available for another routing

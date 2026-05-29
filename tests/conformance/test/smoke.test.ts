@@ -71,7 +71,6 @@ describe("conformance harness — smoke", () => {
       "read_snapshot",
       "delete_snapshot",
       "claim_subscription",
-      "extend_subscription_claim",
       "release_subscription",
       "read_subscription_batch",
       "advance_subscription",

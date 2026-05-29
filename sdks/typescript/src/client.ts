@@ -352,30 +352,6 @@ export class Client {
     };
   }
 
-  async extendSubscriptionClaim(
-    streamUuid: string,
-    subscriptionName: string,
-    workerId: string,
-    leaseSeconds: number,
-    options: SubscriptionShardOption = {},
-  ): Promise<{ claimExpiresAt: Date }> {
-    const opts: Record<string, unknown> = {};
-    if (options.shard !== undefined) opts.shard = options.shard;
-    const res = await this.run<{ claim_expires_at: Date | string }>(
-      `SELECT claim_expires_at
-         FROM instructed.extend_subscription_claim($1, $2, $3, $4, $5::jsonb)`,
-      [
-        streamUuid,
-        subscriptionName,
-        workerId,
-        leaseSeconds,
-        JSON.stringify(opts),
-      ],
-      { streamUuid, subscriptionName, shard: options.shard },
-    );
-    return { claimExpiresAt: toDate(res.rows[0].claim_expires_at) };
-  }
-
   async releaseSubscription(
     streamUuid: string,
     subscriptionName: string,
@@ -403,9 +379,8 @@ export class Client {
    * insert work items atomically. This procedure survives from the
    * pre-SUB-A single-cursor subscription model and remains part of
    * the SQL contract for callers writing bespoke long-lease loops
-   * above the `Client` layer (paired with `advanceSubscription` and
-   * `extendSubscriptionClaim` for heartbeating). New code should
-   * prefer the routing-worker substrate.
+   * above the `Client` layer (paired with `advanceSubscription`).
+   * New code should prefer the routing-worker substrate.
    */
   async readSubscriptionBatch<E extends Event = Event>(
     streamUuid: string,
