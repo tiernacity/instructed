@@ -50,16 +50,16 @@
  * "snapshot is best-effort" semantics).
  */
 
-import type { Client } from "./client/index.ts";
+import type { Client } from "../client/index.ts";
 import {
   runCommandAndApply,
   type AggregateDefinition,
   type DomainEvent,
   type RunCommandOptions,
-} from "./aggregate.ts";
-import { DEFAULT_LOGGER_IMPL, Logger } from "./logger.ts";
+} from "./run-command.ts";
+import { DEFAULT_LOGGER_IMPL, Logger } from "../logger.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
-import type { AppendedEvent } from "./types/index.ts";
+import type { AppendedEvent } from "../types/index.ts";
 
 /**
  * Run a command against an aggregate stream with snapshot

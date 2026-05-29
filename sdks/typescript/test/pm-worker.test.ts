@@ -32,8 +32,8 @@ import {
   type DispatchedCommand,
   type PmDefinition,
 } from "../src/pm-worker.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "../src/snapshot-version.ts";
-import type { AggregateDefinition, DomainEvent } from "../src/aggregate.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "../src/aggregate/index.ts";
+import type { AggregateDefinition, DomainEvent } from "../src/aggregate/index.ts";
 import type { RecordedEvent } from "../src/types/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";

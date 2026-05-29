@@ -61,7 +61,7 @@ export { onlyTypes } from "./routing-helpers.ts";
 // per `def.snapshotPolicy`. The `Instructed` facade and the PM
 // worker both delegate to this; direct callers who want snapshot
 // orchestration without the facade also use this entry.
-export { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
+export { runCommandWithSnapshots } from "./aggregate/index.ts";
 
 // PM worker wrapper (L3): thin convenience over `startPmSubstrate`
 // (L2, exported from `instructed-sdk/core`) that interprets a

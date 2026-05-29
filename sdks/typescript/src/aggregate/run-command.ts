@@ -35,22 +35,23 @@
  * them into one atomic write would conflate the two failure modes.
  */
 
-import type { Client } from "./client/index.ts";
-import { DEFAULT_LOGGER_IMPL, Logger } from "./logger.ts";
+import type { Client } from "../client/index.ts";
+import { DEFAULT_LOGGER_IMPL, Logger } from "../logger.ts";
 import {
   RetryBudgetExhausted,
   SnapshotNotFound,
   StreamNotFound,
   WrongExpectedVersion,
-} from "./errors/index.ts";
+} from "../errors/index.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
-import { expected as ev } from "./types/index.ts";
+import { expected as ev } from "../types/index.ts";
 import type {
   AppendedEvent,
   ExpectedVersion,
   NewEvent,
   RecordedEvent,
-} from "./types/index.ts";
+} from "../types/index.ts";
+import type { SnapshotPolicy } from "./snapshot-policy.ts";
 
 /**
  * Per-dispatch context handed to {@link AggregateDefinition.execute}
@@ -75,36 +76,6 @@ export interface DomainEvent {
   type: string;
   data: unknown;
   metadata?: unknown;
-}
-
-/**
- * Aggregate snapshot policy — the contract half of the
- * snapshot-policy extension point (see `sdks/porting-checklist.md`
- * §4.2).
- *
- * `eventsSinceLast` counts events folded into the current state
- * since the last persisted snapshot (or since `initialState()`
- * for a never-snapshotted stream). The policy is consulted by the
- * L3 `runCommandWithSnapshots` wrapper, not by the L2 `runCommand`
- * primitive.
- */
-export interface SnapshotPolicy<S> {
-  shouldSnapshot(state: S, version: bigint, eventsSinceLast: number): boolean;
-}
-
-/**
- * Standard-library policy: snapshot once `eventsSinceLast` reaches
- * `n`. The only shipped policy as of step-5 slice 2; further
- * helpers (time-elapsed, state-size-threshold) will be added if a
- * concrete use case demands them.
- */
-export function everyN<S>(n: number): SnapshotPolicy<S> {
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new RangeError(`everyN: n must be a positive integer, got ${n}`);
-  }
-  return {
-    shouldSnapshot: (_s, _v, eventsSinceLast) => eventsSinceLast >= n,
-  };
 }
 
 /**

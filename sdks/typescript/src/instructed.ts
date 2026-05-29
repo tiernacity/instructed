@@ -47,8 +47,8 @@ import {
   type DispatchContext,
   type DomainEvent,
   type RunCommandOptions,
-} from "./aggregate.ts";
-import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
+} from "./aggregate/index.ts";
+import { runCommandWithSnapshots } from "./aggregate/index.ts";
 import {
   startRoutingWorker,
   DEFAULT_ROUTING_BATCH_SIZE,

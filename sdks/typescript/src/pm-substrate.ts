@@ -65,9 +65,9 @@
  */
 
 import type { Client } from "./client/index.ts";
-import { prefixType } from "./aggregate.ts";
+import { prefixType } from "./aggregate/index.ts";
 import { SnapshotNotFound } from "./errors/index.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "./aggregate/index.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,

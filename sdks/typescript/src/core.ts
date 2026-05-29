@@ -96,7 +96,7 @@ export {
   type RunCommandOptions,
   type SnapshotPolicy,
   type DomainEvent,
-} from "./aggregate.ts";
+} from "./aggregate/index.ts";
 
 // Pluggable logger surface (TODO #16). The contract is required
 // core (porters reproduce the four optional-method shape and the
@@ -179,7 +179,7 @@ export {
 // use for snapshot module versioning. Part of the porting checklist:
 // every conformant port reproduces the same key string so cross-SDK
 // snapshot reads work.
-export { SNAPSHOT_MODULE_VERSION_KEY } from "./snapshot-version.ts";
+export { SNAPSHOT_MODULE_VERSION_KEY } from "./aggregate/index.ts";
 
 // Shared worker handle (L2 interface; the loop functions above all
 // return one).

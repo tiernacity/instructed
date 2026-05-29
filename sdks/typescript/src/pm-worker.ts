@@ -51,8 +51,8 @@
  */
 
 import type { Client } from "./client/index.ts";
-import { prefixType, type AggregateDefinition } from "./aggregate.ts";
-import { runCommandWithSnapshots } from "./aggregate-snapshots.ts";
+import { prefixType, type AggregateDefinition } from "./aggregate/index.ts";
+import { runCommandWithSnapshots } from "./aggregate/index.ts";
 import type { CommandRouter } from "./command-router.ts";
 import type { Command } from "./types/index.ts";
 import {
