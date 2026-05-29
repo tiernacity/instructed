@@ -80,8 +80,8 @@ async function seed(streamUuid: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 
-describe('runCommand — happy path', () => {
-  test('appends an event, returns AppendedEvent rows', async () => {
+void describe('runCommand — happy path', () => {
+  void test('appends an event, returns AppendedEvent rows', async () => {
     const s = randomUUID()
     await seed(s)
     const rows = await runCommand(client, counter(), s, { kind: 'add', n: 3 })
@@ -89,7 +89,7 @@ describe('runCommand — happy path', () => {
     assert.equal(rows[0].stream_version, 2n)
   })
 
-  test('no-op (execute returns []) does not append and returns []', async () => {
+  void test('no-op (execute returns []) does not append and returns []', async () => {
     const s = randomUUID()
     await seed(s)
     const rows = await runCommand(client, counter(), s, { kind: 'noop' })
@@ -98,7 +98,7 @@ describe('runCommand — happy path', () => {
     assert.equal(events.length, 1) // only the Seed event
   })
 
-  test('loads state from prior events and applies command on top', async () => {
+  void test('loads state from prior events and applies command on top', async () => {
     const s = randomUUID()
     await seed(s)
     await runCommand(client, counter(), s, { kind: 'add', n: 2 })
@@ -109,7 +109,7 @@ describe('runCommand — happy path', () => {
     assert.deepEqual(events[2].data, { n: 5 })
   })
 
-  test('fills causation_id with commandId; correlation_id from opts (§11.8)', async () => {
+  void test('fills causation_id with commandId; correlation_id from opts (§11.8)', async () => {
     const s = randomUUID()
     await seed(s)
     const cmdId = randomUUID()
@@ -130,7 +130,7 @@ describe('runCommand — happy path', () => {
     assert.equal(added.correlation_id, corrId)
   })
 
-  test('respects explicit causation_id / correlation_id on a NewEvent', async () => {
+  void test('respects explicit causation_id / correlation_id on a NewEvent', async () => {
     const s = randomUUID()
     await seed(s)
     const explicitCausation = randomUUID()
@@ -161,7 +161,7 @@ describe('runCommand — happy path', () => {
     assert.equal(events[1].correlation_id, explicitCorrelation)
   })
 
-  test('apply receives DomainEvent shape, not RecordedEvent (§11.3)', async () => {
+  void test('apply receives DomainEvent shape, not RecordedEvent (§11.3)', async () => {
     const s = randomUUID()
     await seed(s)
     await runCommand(client, counter(), s, { kind: 'add', n: 7 })
@@ -188,8 +188,8 @@ describe('runCommand — happy path', () => {
   })
 })
 
-describe('runCommand — OCC retry (D-0005 / AGG-010)', () => {
-  test('two concurrent writers: one wins, the other retries and succeeds', async () => {
+void describe('runCommand — OCC retry (D-0005 / AGG-010)', () => {
+  void test('two concurrent writers: one wins, the other retries and succeeds', async () => {
     const s = randomUUID()
     await seed(s)
 
@@ -222,7 +222,7 @@ describe('runCommand — OCC retry (D-0005 / AGG-010)', () => {
     assert.equal(loaded.value, 30)
   })
 
-  test('retryBudget: 0 surfaces RetryBudgetExhausted under contention', async () => {
+  void test('retryBudget: 0 surfaces RetryBudgetExhausted under contention', async () => {
     const s = randomUUID()
     await seed(s)
 
@@ -260,7 +260,7 @@ describe('runCommand — OCC retry (D-0005 / AGG-010)', () => {
     }
   })
 
-  test('explicit expectedVersion disables retry (D-0019)', async () => {
+  void test('explicit expectedVersion disables retry (D-0019)', async () => {
     const s = randomUUID()
     await seed(s)
     // Stream is at version 1. Ask the SDK to assert version 99.
@@ -282,12 +282,12 @@ describe('runCommand — OCC retry (D-0005 / AGG-010)', () => {
   })
 })
 
-describe('runCommandWithSnapshots — snapshot policy (§6)', () => {
+void describe('runCommandWithSnapshots — snapshot policy (§6)', () => {
   // Snapshot orchestration moved to L3 per step-5 slice 2; the L2
   // `runCommand` no longer invokes `def.snapshotPolicy`. These tests
   // exercise the L3 wrapper, which is what `Instructed.dispatch` and
   // the PM worker delegate to.
-  test('everyN(n) writes a snapshot after the threshold is crossed', async () => {
+  void test('everyN(n) writes a snapshot after the threshold is crossed', async () => {
     const s = randomUUID()
     await seed(s)
     const def: AggregateDefinition<CounterState, CounterCommand, CounterEvent> = {
@@ -304,7 +304,7 @@ describe('runCommandWithSnapshots — snapshot policy (§6)', () => {
     assert.deepEqual(snap.data, { value: 4 })
   })
 
-  test('subsequent loads use the snapshot (no full re-fold)', async () => {
+  void test('subsequent loads use the snapshot (no full re-fold)', async () => {
     const s = randomUUID()
     await seed(s)
     // Snapshot after every command so the second command's load hits a
@@ -335,7 +335,7 @@ describe('runCommandWithSnapshots — snapshot policy (§6)', () => {
     assert.equal(snap.sourceVersion, 3n)
   })
 
-  test('L2 runCommand does NOT invoke snapshotPolicy', async () => {
+  void test('L2 runCommand does NOT invoke snapshotPolicy', async () => {
     // Step-5 slice 2 contract: snapshot orchestration is L3, not L2.
     // A direct call to runCommand must not write a snapshot even if
     // the def declares a policy.
@@ -353,13 +353,13 @@ describe('runCommandWithSnapshots — snapshot policy (§6)', () => {
   })
 })
 
-describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => {
+void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => {
   // Generalises the PM substrate's module-version mechanism to
   // aggregates. The metadata key (`SNAPSHOT_MODULE_VERSION_KEY`)
   // is shared between L2 aggregate and L2 PM substrate.
   // Comparison is strict: undefined matches only undefined.
 
-  test('matching version: snapshot is used', async () => {
+  void test('matching version: snapshot is used', async () => {
     const s = randomUUID()
     await seed(s)
     const def: AggregateDefinition<CounterState, CounterCommand, CounterEvent> = {
@@ -387,7 +387,7 @@ describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => {
     assert.equal(appliesSeen, 1, 'snapshot should have been used')
   })
 
-  test('mismatched version: snapshot discarded, full replay from origin', async () => {
+  void test('mismatched version: snapshot discarded, full replay from origin', async () => {
     const s = randomUUID()
     await seed(s)
 
@@ -434,7 +434,7 @@ describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => {
     assert.equal((final.metadata as Record<string, unknown>)['snapshot_module_version'], 'v2')
   })
 
-  test('strict: snapshot has version but def does not -> mismatch', async () => {
+  void test('strict: snapshot has version but def does not -> mismatch', async () => {
     const s = randomUUID()
     await seed(s)
 
@@ -461,7 +461,7 @@ describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => {
     assert.equal(appliesSeen, 2, 'v1 snapshot should be rejected by unversioned def')
   })
 
-  test('strict: def has version but snapshot does not -> mismatch', async () => {
+  void test('strict: def has version but snapshot does not -> mismatch', async () => {
     const s = randomUUID()
     await seed(s)
 

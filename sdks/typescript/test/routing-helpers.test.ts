@@ -43,8 +43,8 @@ function fake(type: E['type'], data: unknown = {}): RecordedEvent<E> {
   } as RecordedEvent<E>
 }
 
-describe('onlyTypes', () => {
-  test('delegates matching events to inner and ignores the rest', async () => {
+void describe('onlyTypes', () => {
+  void test('delegates matching events to inner and ignores the rest', async () => {
     const seen: string[] = []
     const inner: RoutingFn<E> = (event) => {
       seen.push(event.type)
@@ -59,7 +59,7 @@ describe('onlyTypes', () => {
     assert.deepEqual(seen, ['Added', 'Removed'])
   })
 
-  test("inner sees the user's typed event union (narrowing through switch)", async () => {
+  void test("inner sees the user's typed event union (narrowing through switch)", async () => {
     // Pure compile-time check: inside `inner`, `event.data` narrows
     // per `event.type`. Runtime assertion is just that the routing
     // decision flows back unchanged.
@@ -73,7 +73,7 @@ describe('onlyTypes', () => {
     assert.deepEqual(await fn(fake('Added', { n: 42 })), { partitionKey: '42' })
   })
 
-  test('empty types list ignores everything', async () => {
+  void test('empty types list ignores everything', async () => {
     let called = false
     const fn = onlyTypes<E>([], () => {
       called = true

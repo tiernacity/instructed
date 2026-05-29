@@ -190,8 +190,8 @@ function startRouter(name: string, stream: string, pk: string): RunningWorker {
 // Happy path: snapshot present, non-terminal complete
 // ============================================================================
 
-describe('startPmWorker — non-terminal complete', () => {
-  test("UPDATE work-item to 'done' and UPSERT snapshot in one logical step", async () => {
+void describe('startPmWorker — non-terminal complete', () => {
+  void test("UPDATE work-item to 'done' and UPSERT snapshot in one logical step", async () => {
     const name = `pm-happy-${randomUUID().slice(0, 8)}`
     const { stream, ens } = await appendN('ev', [
       { type: 'T', data: { tag: 'a' } },
@@ -228,8 +228,8 @@ describe('startPmWorker — non-terminal complete', () => {
 // Multi-command dispatch in declaration order
 // ============================================================================
 
-describe('startPmWorker — multi-command dispatch', () => {
-  test('commands dispatch in declaration order; causation = triggering event_id', async () => {
+void describe('startPmWorker — multi-command dispatch', () => {
+  void test('commands dispatch in declaration order; causation = triggering event_id', async () => {
     const name = `pm-cmds-${randomUUID().slice(0, 8)}`
     const aggStream = `agg-${randomUUID().slice(0, 8)}`
     const { stream } = await appendN('trig', [{ type: 'T', data: { tag: 'x' } }])
@@ -291,8 +291,8 @@ describe('startPmWorker — multi-command dispatch', () => {
 // Terminal complete (PM-F `complete: true`)
 // ============================================================================
 
-describe('startPmWorker — complete: true (PM-F terminal)', () => {
-  test('DELETEs both the snapshot AND every work-item for the partition', async () => {
+void describe('startPmWorker — complete: true (PM-F terminal)', () => {
+  void test('DELETEs both the snapshot AND every work-item for the partition', async () => {
     const name = `pm-term-${randomUUID().slice(0, 8)}`
     const { stream, ens } = await appendN('trig', [
       { type: 'T', data: { tag: 'a' } },
@@ -344,8 +344,8 @@ describe('startPmWorker — complete: true (PM-F terminal)', () => {
 // Rebuild path: no snapshot
 // ============================================================================
 
-describe('startPmWorker — rebuild on missing snapshot', () => {
-  test('folds prior `done` events through apply before staging the claimed event', async () => {
+void describe('startPmWorker — rebuild on missing snapshot', () => {
+  void test('folds prior `done` events through apply before staging the claimed event', async () => {
     const name = `pm-rebuild-${randomUUID().slice(0, 8)}`
     // Phase 1: append two events; PM processes them; snapshot + 2
     // `done` rows result. Worker closed before phase 2.
@@ -416,8 +416,8 @@ describe('startPmWorker — rebuild on missing snapshot', () => {
 // Rebuild path: snapshotModuleVersion mismatch
 // ============================================================================
 
-describe('startPmWorker — rebuild on snapshot_module_version mismatch', () => {
-  test('snapshot exists but version tag differs => rebuild via apply matches', async () => {
+void describe('startPmWorker — rebuild on snapshot_module_version mismatch', () => {
+  void test('snapshot exists but version tag differs => rebuild via apply matches', async () => {
     const name = `pm-mod-${randomUUID().slice(0, 8)}`
     const { stream, ens } = await appendN('e', [
       { type: 'T', data: { tag: 'a' } },
@@ -507,8 +507,8 @@ describe('startPmWorker — rebuild on snapshot_module_version mismatch', () => 
 // Failure during dispatch
 // ============================================================================
 
-describe('startPmWorker — dispatch failure leaves work-item claimed', () => {
-  test('dispatch throw -> handle throws -> retry-in; row stays `claimed`; lease retained', async () => {
+void describe('startPmWorker — dispatch failure leaves work-item claimed', () => {
+  void test('dispatch throw -> handle throws -> retry-in; row stays `claimed`; lease retained', async () => {
     const name = `pm-disp-fail-${randomUUID().slice(0, 8)}`
     const aggStream = `agg-${randomUUID().slice(0, 8)}`
     const { stream } = await appendN('e', [{ type: 'T', data: { tag: 'x' } }])
@@ -566,8 +566,8 @@ describe('startPmWorker — dispatch failure leaves work-item claimed', () => {
 // Empty handle result is valid (no commands, no complete)
 // ============================================================================
 
-describe('startPmWorker — empty handle result', () => {
-  test('{}: still records staged_state and marks the work-item done', async () => {
+void describe('startPmWorker — empty handle result', () => {
+  void test('{}: still records staged_state and marks the work-item done', async () => {
     const name = `pm-empty-${randomUUID().slice(0, 8)}`
     const { stream } = await appendN('e', [{ type: 'T', data: { tag: 'z' } }])
     const router = startRouter(name, stream, 'p1')

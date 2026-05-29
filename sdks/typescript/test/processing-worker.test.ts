@@ -139,8 +139,8 @@ function deleteCompleter(name: string) {
 
 // -- per-partition ordering ---------------------------------------------------
 
-describe('processing worker — per-partition ordering', () => {
-  test('serial within a partition under concurrent claimants', async () => {
+void describe('processing worker — per-partition ordering', () => {
+  void test('serial within a partition under concurrent claimants', async () => {
     const name = `pw-order-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [e1, e2, e3] = await append('o', 3)
@@ -174,8 +174,8 @@ describe('processing worker — per-partition ordering', () => {
   })
 })
 
-describe('processing worker — parallel across partitions', () => {
-  test('multiple workers drain disjoint partitions concurrently', async () => {
+void describe('processing worker — parallel across partitions', () => {
+  void test('multiple workers drain disjoint partitions concurrently', async () => {
     const name = `pw-par-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const ens = await append('par', 6)
@@ -241,8 +241,8 @@ describe('processing worker — parallel across partitions', () => {
 
 // -- lease takeover -----------------------------------------------------------
 
-describe('processing worker — lease takeover', () => {
-  test("dead worker's claim is taken over after lease expiry", async () => {
+void describe('processing worker — lease takeover', () => {
+  void test("dead worker's claim is taken over after lease expiry", async () => {
     const name = `pw-tako-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [e1] = await append('tk', 1)
@@ -309,7 +309,7 @@ describe('processing worker — lease takeover', () => {
     }
   })
 
-  test('lease renewal keeps a long-running handler alive past one lease window', async () => {
+  void test('lease renewal keeps a long-running handler alive past one lease window', async () => {
     const name = `pw-renew-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [e1] = await append('rn', 1)
@@ -350,8 +350,8 @@ describe('processing worker — lease takeover', () => {
 
 // -- failed row blocks its partition only -------------------------------------
 
-describe('processing worker — `failed` blocks the partition only', () => {
-  test('a failed predecessor blocks p1; p2 still drains', async () => {
+void describe('processing worker — `failed` blocks the partition only', () => {
+  void test('a failed predecessor blocks p1; p2 still drains', async () => {
     const name = `pw-fail-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [e1, e2, e3] = await append('fb', 3)
@@ -394,8 +394,8 @@ describe('processing worker — `failed` blocks the partition only', () => {
 
 // -- default error policy back-off --------------------------------------------
 
-describe('processing worker — default error policy back-off', () => {
-  test('handler keeps retrying with exponential backoff (default policy)', async () => {
+void describe('processing worker — default error policy back-off', () => {
+  void test('handler keeps retrying with exponential backoff (default policy)', async () => {
     const name = `pw-backoff-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [e1] = await append('bo', 1)
@@ -423,7 +423,7 @@ describe('processing worker — default error policy back-off', () => {
     }
   })
 
-  test('default policy returns exponential, capped retry-in', async () => {
+  void test('default policy returns exponential, capped retry-in', async () => {
     // Step-5 slice 3: ErrorPolicy now takes (err, ctx, state) and
     // returns { decision, state }. The default ignores the state
     // slot (returns undefined); decisions are still pure of attempt.
@@ -449,7 +449,7 @@ describe('processing worker — default error policy back-off', () => {
     assert.equal(r10.state, undefined)
   })
 
-  test("'stop' decision exits the worker without moving the item to failed", async () => {
+  void test("'stop' decision exits the worker without moving the item to failed", async () => {
     const name = `pw-stop-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [e1] = await append('st', 1)

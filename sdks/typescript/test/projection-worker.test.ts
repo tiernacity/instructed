@@ -156,7 +156,7 @@ function startPair<E extends Event>(
 // routingFnForPartitionBy — pure translation
 // ============================================================================
 
-describe('routingFnForPartitionBy', () => {
+void describe('routingFnForPartitionBy', () => {
   function fakeEvent<E extends Event = Event>(en: bigint, data: unknown = {}): RecordedEvent<E> {
     return {
       event_id: 'id-' + en,
@@ -172,7 +172,7 @@ describe('routingFnForPartitionBy', () => {
     } as RecordedEvent<E>
   }
 
-  test("sequential: every event routes to '_default'", async () => {
+  void test("sequential: every event routes to '_default'", async () => {
     const fn = routingFnForPartitionBy({ kind: 'sequential' })
     for (const en of [1n, 2n, 100n]) {
       const d = await fn(fakeEvent(en))
@@ -180,7 +180,7 @@ describe('routingFnForPartitionBy', () => {
     }
   })
 
-  test('per-event: partition key is String(event_number)', async () => {
+  void test('per-event: partition key is String(event_number)', async () => {
     const fn = routingFnForPartitionBy({ kind: 'per-event' })
     for (const en of [1n, 2n, 12345n]) {
       const d = await fn(fakeEvent(en))
@@ -188,7 +188,7 @@ describe('routingFnForPartitionBy', () => {
     }
   })
 
-  test('per-key: calls the user key function', async () => {
+  void test('per-key: calls the user key function', async () => {
     const fn = routingFnForPartitionBy<{ type: string; data: { k: string } }>({
       kind: 'per-key',
       key: (e) => e.data.k,
@@ -197,7 +197,7 @@ describe('routingFnForPartitionBy', () => {
     assert.deepEqual(d, { partitionKey: 'alice' })
   })
 
-  test("never emits 'ignore'", async () => {
+  void test("never emits 'ignore'", async () => {
     // The sugar layer always produces a partition; filtering belongs
     // to the raw routeFn escape hatch (option (c)).
     const seq = await routingFnForPartitionBy({ kind: 'sequential' })(fakeEvent(1n))
@@ -216,8 +216,8 @@ describe('routingFnForPartitionBy', () => {
 // PartitionBy modes end-to-end (routing + processing)
 // ============================================================================
 
-describe('projection worker — sequential mode', () => {
-  test('strict-sequential delivery; one partition; serial regardless of worker count', async () => {
+void describe('projection worker — sequential mode', () => {
+  void test('strict-sequential delivery; one partition; serial regardless of worker count', async () => {
     const name = `proj-seq-${randomUUID().slice(0, 8)}`
     const { stream, ens } = await append('seq', 5)
 
@@ -245,7 +245,7 @@ describe('projection worker — sequential mode', () => {
     }
   })
 
-  test("all routed work items use the synthetic '_default' partition key", async () => {
+  void test("all routed work items use the synthetic '_default' partition key", async () => {
     const name = `proj-seq-pk-${randomUUID().slice(0, 8)}`
     const { stream } = await append('seq-pk', 3)
 
@@ -279,8 +279,8 @@ describe('projection worker — sequential mode', () => {
   })
 })
 
-describe('projection worker — per-event mode', () => {
-  test('each event becomes its own partition; full parallelism across workers', async () => {
+void describe('projection worker — per-event mode', () => {
+  void test('each event becomes its own partition; full parallelism across workers', async () => {
     const name = `proj-pe-${randomUUID().slice(0, 8)}`
     const N = 6
     const { stream, ens } = await append('pe', N)
@@ -330,8 +330,8 @@ describe('projection worker — per-event mode', () => {
   })
 })
 
-describe('projection worker — per-key mode', () => {
-  test('parallel across keys, serial within a key', async () => {
+void describe('projection worker — per-key mode', () => {
+  void test('parallel across keys, serial within a key', async () => {
     const name = `proj-pk-${randomUUID().slice(0, 8)}`
     // 4 events: 2 for key 'a', 2 for key 'b', interleaved.
     const stream = `pk-${randomUUID().slice(0, 8)}`
@@ -402,8 +402,8 @@ describe('projection worker — per-key mode', () => {
 // PRJ-E immediate-delete; D-0016 handler-opacity invariants
 // ============================================================================
 
-describe('projection worker — PRJ-E immediate-delete', () => {
-  test('no `done` row ever persists for a projection', async () => {
+void describe('projection worker — PRJ-E immediate-delete', () => {
+  void test('no `done` row ever persists for a projection', async () => {
     const name = `proj-del-${randomUUID().slice(0, 8)}`
     const { stream } = await append('del', 4)
 
@@ -441,7 +441,7 @@ describe('projection worker — PRJ-E immediate-delete', () => {
     }
   })
 
-  test('handler throw leaves the work item `claimed`; DELETE never runs without a successful handler', async () => {
+  void test('handler throw leaves the work item `claimed`; DELETE never runs without a successful handler', async () => {
     const name = `proj-throw-${randomUUID().slice(0, 8)}`
     const { stream, ens } = await append('th', 1)
     const [e1] = ens
@@ -475,8 +475,8 @@ describe('projection worker — PRJ-E immediate-delete', () => {
   })
 })
 
-describe('projection worker — D-0016 handler opacity', () => {
-  test('ProjectionHandlerContext exposes no tx / Queryable', async () => {
+void describe('projection worker — D-0016 handler opacity', () => {
+  void test('ProjectionHandlerContext exposes no tx / Queryable', async () => {
     // Compile-time guard re-checked at runtime: only the documented
     // fields are present. This protects against future regressions
     // where someone adds a `tx` field thinking it harmless.

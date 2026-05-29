@@ -100,8 +100,8 @@ function startRouter(name: string): RunningWorker {
 
 // ---- tests -----------------------------------------------------------------
 
-describe('startPmSubstrate — L2 contract', () => {
-  test('happy path: handle returning {} writes snapshot and acks', async () => {
+void describe('startPmSubstrate — L2 contract', () => {
+  void test('happy path: handle returning {} writes snapshot and acks', async () => {
     const name = `sub-happy-${randomUUID().slice(0, 8)}`
     await appendN([{ type: 'Tick', data: { by: 1 } }])
 
@@ -141,7 +141,7 @@ describe('startPmSubstrate — L2 contract', () => {
     }
   })
 
-  test('complete: true causes complete_pm_instance (snapshot deleted)', async () => {
+  void test('complete: true causes complete_pm_instance (snapshot deleted)', async () => {
     const name = `sub-complete-${randomUUID().slice(0, 8)}`
     await appendN([{ type: 'Tick', data: { by: 7 } }])
 
@@ -178,7 +178,7 @@ describe('startPmSubstrate — L2 contract', () => {
     }
   })
 
-  test('substrate is unopinionated about side effects (handle can do its own work)', async () => {
+  void test('substrate is unopinionated about side effects (handle can do its own work)', async () => {
     // Demonstrates that the substrate doesn't care what `handle`
     // does between receiving the event and returning -- the only
     // contract is the return shape. A porter could legitimately

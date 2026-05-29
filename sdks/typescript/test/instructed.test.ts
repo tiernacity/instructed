@@ -81,8 +81,8 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
 
 // ---------------------------------------------------------------------------
 
-describe('Instructed -- dispatch (registry lookup)', () => {
-  test('dispatches a registered aggregate by name; throws UnknownAggregateType otherwise', async () => {
+void describe('Instructed -- dispatch (registry lookup)', () => {
+  void test('dispatches a registered aggregate by name; throws UnknownAggregateType otherwise', async () => {
     const app = new Instructed({ db: pool })
     const Counter = counter()
     app.register(Counter)
@@ -100,7 +100,7 @@ describe('Instructed -- dispatch (registry lookup)', () => {
     )
   })
 
-  test('does not own the user-supplied Pool; pool stays usable after dispatch', async () => {
+  void test('does not own the user-supplied Pool; pool stays usable after dispatch', async () => {
     const app = new Instructed({ db: pool })
     app.register(counter())
     await app.dispatch<CounterCommand>('Counter', randomUUID(), { kind: 'add', n: 1 })
@@ -111,8 +111,8 @@ describe('Instructed -- dispatch (registry lookup)', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('Instructed -- registerProjection validation', () => {
-  test('register rejects mutually-exclusive partitionBy + routeFn on a projection', () => {
+void describe('Instructed -- registerProjection validation', () => {
+  void test('register rejects mutually-exclusive partitionBy + routeFn on a projection', () => {
     const app = new Instructed({ db: pool })
     assert.throws(
       () =>
@@ -129,8 +129,8 @@ describe('Instructed -- registerProjection validation', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('Instructed -- poll fan-out', () => {
-  test('runs a registered projection and PM under one handle; close stops both', async () => {
+void describe('Instructed -- poll fan-out', () => {
+  void test('runs a registered projection and PM under one handle; close stops both', async () => {
     const app = new Instructed({ db: pool })
 
     const Counter = counter()
@@ -205,7 +205,7 @@ describe('Instructed -- poll fan-out', () => {
     }
   })
 
-  test('throws when no projections or PMs are registered', async () => {
+  void test('throws when no projections or PMs are registered', async () => {
     const app = new Instructed({ db: pool })
     await assert.rejects(() => app.poll(), /no projections or process managers/)
   })
@@ -213,8 +213,8 @@ describe('Instructed -- poll fan-out', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('Instructed -- dispatch consistency wait', () => {
-  test('waits for a named subscription to catch up before returning', async () => {
+void describe('Instructed -- dispatch consistency wait', () => {
+  void test('waits for a named subscription to catch up before returning', async () => {
     const app = new Instructed({ db: pool })
     app.register(counter())
 
@@ -248,8 +248,8 @@ describe('Instructed -- dispatch consistency wait', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('Instructed -- command router', () => {
-  test('dispatch(command) routes via the registered router', async () => {
+void describe('Instructed -- command router', () => {
+  void test('dispatch(command) routes via the registered router', async () => {
     const app = new Instructed({ db: pool })
     const Counter = counter()
     app.register(Counter)
@@ -271,7 +271,7 @@ describe('Instructed -- command router', () => {
     assert.deepEqual(rows[0].data, { n: 7 })
   })
 
-  test('dispatch(command) without a registered router throws', async () => {
+  void test('dispatch(command) without a registered router throws', async () => {
     const app = new Instructed({ db: pool })
     app.register(counter())
     await assert.rejects(
@@ -280,7 +280,7 @@ describe('Instructed -- command router', () => {
     )
   })
 
-  test('register(router) rejects a second router registration', () => {
+  void test('register(router) rejects a second router registration', () => {
     const app = new Instructed({ db: pool })
     const router: CommandRouter = () => ({
       aggregateType: 'X',
@@ -293,8 +293,8 @@ describe('Instructed -- command router', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('Instructed -- logger integration', () => {
-  test('info on register/poll; trace from worker; warn from handler; per-worker prefix', async () => {
+void describe('Instructed -- logger integration', () => {
+  void test('info on register/poll; trace from worker; warn from handler; per-worker prefix', async () => {
     const lines: { level: string; msg: string }[] = []
     const app = new Instructed({
       db: pool,
@@ -383,7 +383,7 @@ describe('Instructed -- logger integration', () => {
     assert.equal(stopInfos.length, 1)
   })
 
-  test('unwired levels never invoke the thunk (no console output by default for trace)', async () => {
+  void test('unwired levels never invoke the thunk (no console output by default for trace)', async () => {
     // Smoke test: with no logger supplied, the default impl handles
     // info/warn/error via console but trace is silent. We can't
     // observe console without intercepting; instead, confirm via

@@ -17,15 +17,15 @@ import { describe, test } from 'node:test'
 
 import { Logger, DEFAULT_LOGGER_IMPL, NOOP_LOGGER_IMPL } from '../src/logger/index.ts'
 
-describe('Logger -- wired levels', () => {
-  test('eager string passes through to the underlying impl', () => {
+void describe('Logger -- wired levels', () => {
+  void test('eager string passes through to the underlying impl', () => {
     const seen: string[] = []
     const log = Logger.fromImpl({ info: (m) => seen.push(m) })
     log.info('hello')
     assert.deepEqual(seen, ['hello'])
   })
 
-  test('thunk is invoked exactly once when level is wired', () => {
+  void test('thunk is invoked exactly once when level is wired', () => {
     const seen: string[] = []
     let calls = 0
     const log = Logger.fromImpl({ warn: (m) => seen.push(m) })
@@ -37,7 +37,7 @@ describe('Logger -- wired levels', () => {
     assert.deepEqual(seen, ['lazy'])
   })
 
-  test('each level routes to its own method', () => {
+  void test('each level routes to its own method', () => {
     const seen: Array<[string, string]> = []
     const log = Logger.fromImpl({
       info: (m) => seen.push(['info', m]),
@@ -58,8 +58,8 @@ describe('Logger -- wired levels', () => {
   })
 })
 
-describe('Logger -- unwired levels are no-ops', () => {
-  test('undefined impl: no thunk ever invoked', () => {
+void describe('Logger -- unwired levels are no-ops', () => {
+  void test('undefined impl: no thunk ever invoked', () => {
     let trace = 0
     let warn = 0
     const log = Logger.fromImpl(undefined)
@@ -75,7 +75,7 @@ describe('Logger -- unwired levels are no-ops', () => {
     assert.equal(warn, 0)
   })
 
-  test('partial impl: only wired levels evaluate the thunk', () => {
+  void test('partial impl: only wired levels evaluate the thunk', () => {
     const seen: string[] = []
     let traceCalls = 0
     let infoCalls = 0
@@ -98,7 +98,7 @@ describe('Logger -- unwired levels are no-ops', () => {
     assert.equal(infoCalls, 0)
   })
 
-  test('Logger.noop never invokes any thunk', () => {
+  void test('Logger.noop never invokes any thunk', () => {
     let calls = 0
     const log = Logger.noop()
     for (const level of ['info', 'warn', 'error', 'trace'] as const) {
@@ -111,8 +111,8 @@ describe('Logger -- unwired levels are no-ops', () => {
   })
 })
 
-describe('Logger -- prefix and child()', () => {
-  test('constructor prefix is prepended on wired levels', () => {
+void describe('Logger -- prefix and child()', () => {
+  void test('constructor prefix is prepended on wired levels', () => {
     const seen: string[] = []
     const log = Logger.fromImpl({ info: (m) => seen.push(m) }, '[root]')
     log.info('hi')
@@ -120,7 +120,7 @@ describe('Logger -- prefix and child()', () => {
     assert.deepEqual(seen, ['[root] hi', '[root] ho'])
   })
 
-  test('prefix is not built on unwired levels (thunk skipped)', () => {
+  void test('prefix is not built on unwired levels (thunk skipped)', () => {
     let calls = 0
     // `trace` is unwired; the prefix path should not even reach the
     // user's thunk.
@@ -132,7 +132,7 @@ describe('Logger -- prefix and child()', () => {
     assert.equal(calls, 0)
   })
 
-  test('child appends to the parent prefix', () => {
+  void test('child appends to the parent prefix', () => {
     const seen: string[] = []
     const root = Logger.fromImpl({ warn: (m) => seen.push(m) }, '[app]')
     const worker = root.child('[w1#Balances]')
@@ -140,7 +140,7 @@ describe('Logger -- prefix and child()', () => {
     assert.deepEqual(seen, ['[app] [w1#Balances] slow batch'])
   })
 
-  test('child of a no-prefix logger uses just the child prefix', () => {
+  void test('child of a no-prefix logger uses just the child prefix', () => {
     const seen: string[] = []
     const root = Logger.fromImpl({ warn: (m) => seen.push(m) })
     const worker = root.child('[w1#Balances]')
@@ -149,15 +149,15 @@ describe('Logger -- prefix and child()', () => {
   })
 })
 
-describe('DEFAULT_LOGGER_IMPL', () => {
-  test('info/warn/error are present; trace is absent', () => {
+void describe('DEFAULT_LOGGER_IMPL', () => {
+  void test('info/warn/error are present; trace is absent', () => {
     assert.equal(typeof DEFAULT_LOGGER_IMPL.info, 'function')
     assert.equal(typeof DEFAULT_LOGGER_IMPL.warn, 'function')
     assert.equal(typeof DEFAULT_LOGGER_IMPL.error, 'function')
     assert.equal(DEFAULT_LOGGER_IMPL.trace, undefined)
   })
 
-  test('a Logger built over the default treats trace as a no-op', () => {
+  void test('a Logger built over the default treats trace as a no-op', () => {
     let calls = 0
     const log = Logger.fromImpl(DEFAULT_LOGGER_IMPL)
     log.trace(() => {
@@ -168,8 +168,8 @@ describe('DEFAULT_LOGGER_IMPL', () => {
   })
 })
 
-describe('NOOP_LOGGER_IMPL', () => {
-  test('has no methods; every level on a wrapping Logger is a no-op', () => {
+void describe('NOOP_LOGGER_IMPL', () => {
+  void test('has no methods; every level on a wrapping Logger is a no-op', () => {
     assert.deepEqual(Object.keys(NOOP_LOGGER_IMPL), [])
     let calls = 0
     const log = Logger.fromImpl(NOOP_LOGGER_IMPL)

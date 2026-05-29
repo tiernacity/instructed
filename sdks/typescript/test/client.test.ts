@@ -47,8 +47,8 @@ function ev(type: string, data: Record<string, unknown> = {}, extra: Record<stri
   return { type, data, ...extra }
 }
 
-describe('Client.appendToStream', () => {
-  test('creates a new stream with expected.noStream and returns rows', async () => {
+void describe('Client.appendToStream', () => {
+  void test('creates a new stream with expected.noStream and returns rows', async () => {
     const streamUuid = randomUUID()
     const rows = await client.appendToStream(streamUuid, expected.noStream, [
       ev('Created', { name: 'alice' }),
@@ -63,21 +63,21 @@ describe('Client.appendToStream', () => {
     assert.ok(rows[0].event_id)
   })
 
-  test('expected.any creates or extends a stream', async () => {
+  void test('expected.any creates or extends a stream', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.any, [ev('A')])
     const rows = await client.appendToStream(s, expected.any, [ev('B')])
     assert.equal(rows[0].stream_version, 2n)
   })
 
-  test('expected.streamExists raises StreamNotFound on absent stream (IS003)', async () => {
+  void test('expected.streamExists raises StreamNotFound on absent stream (IS003)', async () => {
     await assert.rejects(
       () => client.appendToStream(randomUUID(), expected.streamExists, [ev('X')]),
       (err) => err instanceof StreamNotFound && err.code === 'IS003',
     )
   })
 
-  test('expected.noStream raises StreamExists when stream exists (IS002)', async () => {
+  void test('expected.noStream raises StreamExists when stream exists (IS002)', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await assert.rejects(
@@ -86,7 +86,7 @@ describe('Client.appendToStream', () => {
     )
   })
 
-  test('expected.exact mismatch raises WrongExpectedVersion (IS001)', async () => {
+  void test('expected.exact mismatch raises WrongExpectedVersion (IS001)', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await assert.rejects(
@@ -98,7 +98,7 @@ describe('Client.appendToStream', () => {
     )
   })
 
-  test('duplicate event_id across appends raises DuplicateEvent (IS004)', async () => {
+  void test('duplicate event_id across appends raises DuplicateEvent (IS004)', async () => {
     const s = randomUUID()
     const id = randomUUID()
     await client.appendToStream(s, expected.noStream, [{ event_id: id, type: 'A', data: {} }])
@@ -109,28 +109,28 @@ describe('Client.appendToStream', () => {
     )
   })
 
-  test("'$all' stream uuid raises ReservedStreamUuid (IS005)", async () => {
+  void test("'$all' stream uuid raises ReservedStreamUuid (IS005)", async () => {
     await assert.rejects(
       () => client.appendToStream('$all', expected.any, [ev('X')]),
       (err) => err instanceof ReservedStreamUuid && err.code === 'IS005',
     )
   })
 
-  test('empty events array raises InvalidParameterValue (22023)', async () => {
+  void test('empty events array raises InvalidParameterValue (22023)', async () => {
     await assert.rejects(
       () => client.appendToStream(randomUUID(), expected.any, []),
       (err) => err instanceof InvalidParameterValue && err.code === '22023',
     )
   })
 
-  test('fills event_id when omitted (§11.2)', async () => {
+  void test('fills event_id when omitted (§11.2)', async () => {
     const s = randomUUID()
     const rows = await client.appendToStream(s, expected.noStream, [{ type: 'A', data: {} }])
     assert.ok(rows[0].event_id)
     assert.match(rows[0].event_id, /^[0-9a-f-]{36}$/)
   })
 
-  test('persists causation_id / correlation_id when supplied verbatim', async () => {
+  void test('persists causation_id / correlation_id when supplied verbatim', async () => {
     const s = randomUUID()
     const cid = randomUUID()
     const corr = randomUUID()
@@ -148,8 +148,8 @@ describe('Client.appendToStream', () => {
   })
 })
 
-describe('Client.readStream / readAll', () => {
-  test('readStream returns events in order from given version', async () => {
+void describe('Client.readStream / readAll', () => {
+  void test('readStream returns events in order from given version', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A'), ev('B'), ev('C')])
     const rows = await client.readStream(s, 2n, 10)
@@ -159,21 +159,21 @@ describe('Client.readStream / readAll', () => {
     assert.equal(rows[1].type, 'C')
   })
 
-  test('readStream on missing stream raises StreamNotFound (IS003)', async () => {
+  void test('readStream on missing stream raises StreamNotFound (IS003)', async () => {
     await assert.rejects(
       () => client.readStream(randomUUID(), 0n, 10),
       (err) => err instanceof StreamNotFound && err.code === 'IS003',
     )
   })
 
-  test("readStream rejects '$all' as ReservedStreamUuid (IS005)", async () => {
+  void test("readStream rejects '$all' as ReservedStreamUuid (IS005)", async () => {
     await assert.rejects(
       () => client.readStream('$all', 0n, 10),
       (err) => err instanceof ReservedStreamUuid && err.code === 'IS005',
     )
   })
 
-  test('readStream with bad qty raises InvalidParameterValue (22023)', async () => {
+  void test('readStream with bad qty raises InvalidParameterValue (22023)', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await assert.rejects(
@@ -182,7 +182,7 @@ describe('Client.readStream / readAll', () => {
     )
   })
 
-  test('readAll returns events with original stream identity', async () => {
+  void test('readAll returns events with original stream identity', async () => {
     const a = randomUUID()
     const b = randomUUID()
     await client.appendToStream(a, expected.noStream, [ev('A1')])
@@ -201,7 +201,7 @@ describe('Client.readStream / readAll', () => {
     assert.equal(rows[2].event_number, 3n)
   })
 
-  test('readAll bad qty raises InvalidParameterValue (22023)', async () => {
+  void test('readAll bad qty raises InvalidParameterValue (22023)', async () => {
     await assert.rejects(
       () => client.readAll(0n, -1),
       (err) => err instanceof InvalidParameterValue,
@@ -209,8 +209,8 @@ describe('Client.readStream / readAll', () => {
   })
 })
 
-describe('Client.snapshots', () => {
-  test('record + read round-trip', async () => {
+void describe('Client.snapshots', () => {
+  void test('record + read round-trip', async () => {
     await client.recordSnapshot({
       sourceUuid: 'src-1',
       sourceType: 'Account',
@@ -226,7 +226,7 @@ describe('Client.snapshots', () => {
     assert.deepEqual(snap.metadata, { hint: 'x' })
   })
 
-  test('record_snapshot is an upsert', async () => {
+  void test('record_snapshot is an upsert', async () => {
     await client.recordSnapshot({
       sourceUuid: 'src-1',
       sourceType: 'T',
@@ -244,14 +244,14 @@ describe('Client.snapshots', () => {
     assert.deepEqual(s.data, { v: 2 })
   })
 
-  test('readSnapshot raises SnapshotNotFound (IS010)', async () => {
+  void test('readSnapshot raises SnapshotNotFound (IS010)', async () => {
     await assert.rejects(
       () => client.readSnapshot('nope'),
       (err) => err instanceof SnapshotNotFound && err.code === 'IS010',
     )
   })
 
-  test('deleteSnapshot is idempotent (INV-SNAP-004)', async () => {
+  void test('deleteSnapshot is idempotent (INV-SNAP-004)', async () => {
     await client.deleteSnapshot('never-existed')
     await client.recordSnapshot({
       sourceUuid: 'x',
@@ -266,7 +266,7 @@ describe('Client.snapshots', () => {
     )
   })
 
-  test('recordSnapshot rejects null source_uuid (22023)', async () => {
+  void test('recordSnapshot rejects null source_uuid (22023)', async () => {
     await assert.rejects(
       () =>
         client.recordSnapshot({
@@ -280,8 +280,8 @@ describe('Client.snapshots', () => {
   })
 })
 
-describe('Client.subscriptions', () => {
-  test("claim creates a row and returns 'claimed'", async () => {
+void describe('Client.subscriptions', () => {
+  void test("claim creates a row and returns 'claimed'", async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     const r = await client.claimSubscription(s, 'sub', 'w1', 30, {
@@ -293,7 +293,7 @@ describe('Client.subscriptions', () => {
     assert.ok(r.claimExpiresAt instanceof Date)
   })
 
-  test("second worker sees 'already_claimed' (not an error)", async () => {
+  void test("second worker sees 'already_claimed' (not an error)", async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await client.claimSubscription(s, 'sub', 'w1', 30)
@@ -302,7 +302,7 @@ describe('Client.subscriptions', () => {
     assert.equal(r2.claimedBy, 'w1')
   })
 
-  test("startFrom: 'current' starts at head; ignored on re-claim", async () => {
+  void test("startFrom: 'current' starts at head; ignored on re-claim", async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A'), ev('B'), ev('C')])
     const r1 = await client.claimSubscription(s, 'sub', 'w1', 30, {
@@ -317,19 +317,19 @@ describe('Client.subscriptions', () => {
     assert.equal(r2.lastSeen, 3n)
   })
 
-  test('claim on missing stream raises StreamNotFound (IS003)', async () => {
+  void test('claim on missing stream raises StreamNotFound (IS003)', async () => {
     await assert.rejects(
       () => client.claimSubscription(randomUUID(), 'sub', 'w1', 30),
       (err) => err instanceof StreamNotFound && err.code === 'IS003',
     )
   })
 
-  test('claim on $all works (resolves to stream_id = 0)', async () => {
+  void test('claim on $all works (resolves to stream_id = 0)', async () => {
     const r = await client.claimSubscription('$all', 'all-sub', 'w1', 30)
     assert.equal(r.result, 'claimed')
   })
 
-  test('release clears holder; subsequent claim resumes from last_seen', async () => {
+  void test('release clears holder; subsequent claim resumes from last_seen', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A'), ev('B')])
     await client.claimSubscription(s, 'sub', 'w1', 30, { startFrom: 'origin' })
@@ -340,7 +340,7 @@ describe('Client.subscriptions', () => {
     assert.equal(r2.lastSeen, 1n)
   })
 
-  test('release by non-holder raises lease-lost (IS022)', async () => {
+  void test('release by non-holder raises lease-lost (IS022)', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await client.claimSubscription(s, 'sub', 'w1', 30)
@@ -350,7 +350,7 @@ describe('Client.subscriptions', () => {
     )
   })
 
-  test('delete removes the row; missing raises IS020 (D-0009, not lenient)', async () => {
+  void test('delete removes the row; missing raises IS020 (D-0009, not lenient)', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await client.claimSubscription(s, 'sub', 'w1', 30)
@@ -362,8 +362,8 @@ describe('Client.subscriptions', () => {
   })
 })
 
-describe('Append-only trigger (IS006)', () => {
-  test('direct UPDATE on events raises AppendOnlyViolation', async () => {
+void describe('Append-only trigger (IS006)', () => {
+  void test('direct UPDATE on events raises AppendOnlyViolation', async () => {
     const s = randomUUID()
     await client.appendToStream(s, expected.noStream, [ev('A')])
     await assert.rejects(
@@ -389,8 +389,8 @@ describe('Append-only trigger (IS006)', () => {
   })
 })
 
-describe('Error class hierarchy', () => {
-  test('every IS* class extends InstructedError', () => {
+void describe('Error class hierarchy', () => {
+  void test('every IS* class extends InstructedError', () => {
     const samples: InstructedError[] = [
       new WrongExpectedVersion('x'),
       new StreamExists('x'),

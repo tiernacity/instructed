@@ -76,8 +76,8 @@ beforeEach(async () => {
 
 // ---------------------------------------------------------------------------
 
-describe('waitForProjection -- happy path', () => {
-  test('returns once a running $all projection catches up', async () => {
+void describe('waitForProjection -- happy path', () => {
+  void test('returns once a running $all projection catches up', async () => {
     const stream = randomUUID()
     const name = `p-${randomUUID().slice(0, 8)}`
 
@@ -110,7 +110,7 @@ describe('waitForProjection -- happy path', () => {
     }
   })
 
-  test('per-stream subscription waits in event_number space (SUB-A)', async () => {
+  void test('per-stream subscription waits in event_number space (SUB-A)', async () => {
     // Under SUB-A all work-items carry the global event_number and
     // the catch-up predicate compares in that space for both `$all`
     // and per-stream subscriptions. The legacy stream_version-based
@@ -145,7 +145,7 @@ describe('waitForProjection -- happy path', () => {
     }
   })
 
-  test('empty appended / empty subscriptions are no-ops', async () => {
+  void test('empty appended / empty subscriptions are no-ops', async () => {
     await waitForProjection(client, [], [{ stream: '$all', name: 'irrelevant' }])
     const stream = randomUUID()
     const appended = await client.appendToStream(stream, expected.noStream, [
@@ -159,8 +159,8 @@ describe('waitForProjection -- happy path', () => {
 
 // ---------------------------------------------------------------------------
 
-describe('waitForProjection — timeout', () => {
-  test('throws ConsistencyTimeout listing missing subscriptions', async () => {
+void describe('waitForProjection — timeout', () => {
+  void test('throws ConsistencyTimeout listing missing subscriptions', async () => {
     const stream = randomUUID()
     // Subscription that nobody is running — claim it ourselves so the
     // row exists, then never advance it.
@@ -193,7 +193,7 @@ describe('waitForProjection — timeout', () => {
     await client.releaseSubscription('$all', stuck, 'test-worker')
   })
 
-  test('non-existent subscription times out (treated as not caught up)', async () => {
+  void test('non-existent subscription times out (treated as not caught up)', async () => {
     const stream = randomUUID()
     const appended = await client.appendToStream(stream, expected.noStream, [
       { type: 'A', data: {} },
@@ -220,8 +220,8 @@ describe('waitForProjection — timeout', () => {
 // the second conjunct under the real SUB-A routing + processing path.
 // ---------------------------------------------------------------------------
 
-describe('waitForProjection — SUB-A work-item conjunct', () => {
-  test('routed-but-pending blocks; predicate flips to true once handler completes', async () => {
+void describe('waitForProjection — SUB-A work-item conjunct', () => {
+  void test('routed-but-pending blocks; predicate flips to true once handler completes', async () => {
     const { startRoutingWorker } = await import('../src/workers/routing/index.ts')
     const { startProjectionWorker } = await import('../src/workers/projection/index.ts')
     const { routingFnForPartitionBy } = await import('../src/facade/partition-by.ts')
@@ -288,7 +288,7 @@ describe('waitForProjection — SUB-A work-item conjunct', () => {
     }
   })
 
-  test('failed work-item keeps the predicate false (operator-only resolution)', async () => {
+  void test('failed work-item keeps the predicate false (operator-only resolution)', async () => {
     const { startRoutingWorker } = await import('../src/workers/routing/index.ts')
     const stream = randomUUID()
     const name = `subA-fail-${randomUUID().slice(0, 8)}`
@@ -347,7 +347,7 @@ describe('waitForProjection — SUB-A work-item conjunct', () => {
     }
   })
 
-  test('race-safety: append + immediate wait does not spuriously return caught-up', async () => {
+  void test('race-safety: append + immediate wait does not spuriously return caught-up', async () => {
     // Load-bearing on the routing worker's atomic route_batch: cursor
     // advance and work-item INSERTs commit in one tx. If they didn't,
     // there would be a window where last_seen >= N but the work-item
@@ -411,8 +411,8 @@ describe('waitForProjection — SUB-A work-item conjunct', () => {
 // See `docs/todo/consistency.md` :: CON-B.
 // ---------------------------------------------------------------------------
 
-describe('waitForProjection \u2014 cross-stream guard (CON-B)', () => {
-  test('per-stream ref matching an appended stream resolves normally', async () => {
+void describe('waitForProjection \u2014 cross-stream guard (CON-B)', () => {
+  void test('per-stream ref matching an appended stream resolves normally', async () => {
     const stream = randomUUID()
     const name = `con-b-ok-${randomUUID().slice(0, 8)}`
     // Per-stream sources require the stream to exist before
@@ -434,7 +434,7 @@ describe('waitForProjection \u2014 cross-stream guard (CON-B)', () => {
     }
   })
 
-  test('per-stream ref differing from every appended stream rejects fast (before pollInterval)', async () => {
+  void test('per-stream ref differing from every appended stream rejects fast (before pollInterval)', async () => {
     // `waitForProjection` is async, so the pre-await throw
     // surfaces as a rejected promise on the next microtask. The
     // "synchronous" intent in CON-B is fast-fail: the rejection
@@ -472,7 +472,7 @@ describe('waitForProjection \u2014 cross-stream guard (CON-B)', () => {
     )
   })
 
-  test('mixed list: one valid ref + one invalid ref rejects (invalid prevents wait)', async () => {
+  void test('mixed list: one valid ref + one invalid ref rejects (invalid prevents wait)', async () => {
     const appendedStream = randomUUID()
     const otherStream = randomUUID()
     const validName = `con-b-mixed-${randomUUID().slice(0, 8)}`
@@ -503,7 +503,7 @@ describe('waitForProjection \u2014 cross-stream guard (CON-B)', () => {
     }
   })
 
-  test('$all refs are never rejected regardless of appended streams', async () => {
+  void test('$all refs are never rejected regardless of appended streams', async () => {
     const stream = randomUUID()
     const name = `con-b-all-${randomUUID().slice(0, 8)}`
     const worker = startProjPair(client, name, '$all', async () => {})

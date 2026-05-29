@@ -333,8 +333,8 @@ async function transferHandle(
 // The test
 // ===========================================================================
 
-describe('bank-account end-to-end (standalone)', () => {
-  test('successful transfer + refused transfer', async () => {
+void describe('bank-account end-to-end (standalone)', () => {
+  void test('successful transfer + refused transfer', async () => {
     const view = newBalancesView()
     const app = new Instructed({ db: pool })
       .register(Account)

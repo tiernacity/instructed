@@ -49,10 +49,10 @@ beforeEach(async () => {
 // Pure unit tests (no DB)
 // ============================================================================
 
-describe('exponentialBackoff', () => {
+void describe('exponentialBackoff', () => {
   const ctxBase = { workerId: 'w', partitionKey: 'p', eventNumber: 1n, logger: Logger.noop() }
 
-  test('doubles per attempt, capped', async () => {
+  void test('doubles per attempt, capped', async () => {
     const p = exponentialBackoff({ baseMs: 100, capMs: 1000 })
     const r1 = await p(new Error(), { ...ctxBase, attempt: 1 }, undefined)
     const r2 = await p(new Error(), { ...ctxBase, attempt: 2 }, undefined)
@@ -68,7 +68,7 @@ describe('exponentialBackoff', () => {
     assert.equal(r99.state, undefined)
   })
 
-  test('jitter samples in [0, computedDelay)', async () => {
+  void test('jitter samples in [0, computedDelay)', async () => {
     const p = exponentialBackoff({ baseMs: 100, capMs: 1000, jitter: true })
     // 50 samples; all in [0, 200) for attempt=2.
     for (let i = 0; i < 50; i++) {
@@ -81,17 +81,17 @@ describe('exponentialBackoff', () => {
     }
   })
 
-  test('rejects bad arguments', () => {
+  void test('rejects bad arguments', () => {
     assert.throws(() => exponentialBackoff({ baseMs: -1, capMs: 1000 }), RangeError)
     assert.throws(() => exponentialBackoff({ baseMs: NaN, capMs: 1000 }), RangeError)
     assert.throws(() => exponentialBackoff({ baseMs: 100, capMs: -1 }), RangeError)
   })
 })
 
-describe('linearBackoff', () => {
+void describe('linearBackoff', () => {
   const ctxBase = { workerId: 'w', partitionKey: 'p', eventNumber: 1n, logger: Logger.noop() }
 
-  test('grows linearly, capped', async () => {
+  void test('grows linearly, capped', async () => {
     const p = linearBackoff({ stepMs: 50, capMs: 200 })
     const r1 = await p(new Error(), { ...ctxBase, attempt: 1 }, undefined)
     const r2 = await p(new Error(), { ...ctxBase, attempt: 2 }, undefined)
@@ -103,16 +103,16 @@ describe('linearBackoff', () => {
     if (r99.decision.kind === 'retry-in') assert.equal(r99.decision.delayMs, 200)
   })
 
-  test('rejects bad arguments', () => {
+  void test('rejects bad arguments', () => {
     assert.throws(() => linearBackoff({ stepMs: -1, capMs: 100 }), RangeError)
     assert.throws(() => linearBackoff({ stepMs: 50, capMs: NaN }), RangeError)
   })
 })
 
-describe('retryUpTo', () => {
+void describe('retryUpTo', () => {
   const ctxBase = { workerId: 'w', partitionKey: 'p', eventNumber: 1n, logger: Logger.noop() }
 
-  test('delegates to inner when attempt <= max', async () => {
+  void test('delegates to inner when attempt <= max', async () => {
     const inner = exponentialBackoff({ baseMs: 100, capMs: 1000 })
     const p = retryUpTo(3, inner)
     const r1 = await p(new Error(), { ...ctxBase, attempt: 1 }, undefined)
@@ -123,7 +123,7 @@ describe('retryUpTo', () => {
     assert.equal(r3.decision.kind, 'retry-in')
   })
 
-  test('emits stop once attempt > max', async () => {
+  void test('emits stop once attempt > max', async () => {
     const inner = exponentialBackoff({ baseMs: 100, capMs: 1000 })
     const p = retryUpTo(3, inner)
     const r4 = await p(new Error(), { ...ctxBase, attempt: 4 }, undefined)
@@ -132,7 +132,7 @@ describe('retryUpTo', () => {
     assert.equal(r100.decision.kind, 'stop')
   })
 
-  test("preserves inner policy's state", async () => {
+  void test("preserves inner policy's state", async () => {
     // A stateful inner policy that counts how often it's invoked.
     interface CountState {
       calls: number
@@ -150,7 +150,7 @@ describe('retryUpTo', () => {
     assert.deepEqual(s, { calls: 3 })
   })
 
-  test('rejects bad arguments', () => {
+  void test('rejects bad arguments', () => {
     const inner = exponentialBackoff({ baseMs: 100, capMs: 1000 })
     assert.throws(() => retryUpTo(0, inner), RangeError)
     assert.throws(() => retryUpTo(-1, inner), RangeError)
@@ -196,8 +196,8 @@ async function route(name: string, decisions: Array<{ pk: string; en: bigint }>)
   }
 }
 
-describe('processing worker — PolicyState lifecycle (slice 3)', () => {
-  test('state starts undefined and threads forward across attempts on the same item', async () => {
+void describe('processing worker — PolicyState lifecycle (slice 3)', () => {
+  void test('state starts undefined and threads forward across attempts on the same item', async () => {
     const name = `ep-state-${randomUUID().slice(0, 8)}`
     await ensureSubscription(name)
     const [en] = await append('ep-state', 1)

@@ -111,8 +111,8 @@ async function waitForSubscription(name: string): Promise<void> {
   })
 }
 
-describe('routing worker — happy path', () => {
-  test('routes appended events; advances cursor; inserts work items', async () => {
+void describe('routing worker — happy path', () => {
+  void test('routes appended events; advances cursor; inserts work items', async () => {
     const name = `routing-happy-${randomUUID().slice(0, 8)}`
     await appendN('h', 2)
     const w = startRoutingWorker(client, {
@@ -137,7 +137,7 @@ describe('routing worker — happy path', () => {
     }
   })
 
-  test('"ignore" decisions produce no rows but cursor still advances', async () => {
+  void test('"ignore" decisions produce no rows but cursor still advances', async () => {
     const name = `routing-ignore-${randomUUID().slice(0, 8)}`
     const { ens } = await appendN('i', 3)
     const w = startRoutingWorker(client, {
@@ -160,7 +160,7 @@ describe('routing worker — happy path', () => {
     }
   })
 
-  test('picks up events appended after the worker is running', async () => {
+  void test('picks up events appended after the worker is running', async () => {
     const name = `routing-stream-${randomUUID().slice(0, 8)}`
     const w = startRoutingWorker(client, {
       name,
@@ -186,8 +186,8 @@ describe('routing worker — happy path', () => {
   })
 })
 
-describe('routing worker — determinism / idempotency', () => {
-  test('restart after partial run re-routes nothing new (PK absorbs)', async () => {
+void describe('routing worker — determinism / idempotency', () => {
+  void test('restart after partial run re-routes nothing new (PK absorbs)', async () => {
     const name = `routing-restart-${randomUUID().slice(0, 8)}`
     await appendN('r', 3)
     const w1 = startRoutingWorker(client, {
@@ -220,8 +220,8 @@ describe('routing worker — determinism / idempotency', () => {
   })
 })
 
-describe('routing worker — crash safety', () => {
-  test('close mid-batch leaves cursor un-advanced for un-routed events', async () => {
+void describe('routing worker — crash safety', () => {
+  void test('close mid-batch leaves cursor un-advanced for un-routed events', async () => {
     // Append more events than the batch will fit; close immediately
     // after the first routeBatch round-trip. We don't have a hook for
     // 'after first batch'; instead we kill before the first routeBatch
@@ -277,7 +277,7 @@ describe('routing worker — crash safety', () => {
     }
   })
 
-  test('re-run after crash routes the events on the next worker', async () => {
+  void test('re-run after crash routes the events on the next worker', async () => {
     // Build on the previous scenario: leave the store with N events
     // and no work items, then start a fresh worker and observe it
     // routes them.
@@ -313,8 +313,8 @@ describe('routing worker — crash safety', () => {
   })
 })
 
-describe('routing worker — race safety', () => {
-  test('last_seen >= N never observed without the corresponding work items', async () => {
+void describe('routing worker — race safety', () => {
+  void test('last_seen >= N never observed without the corresponding work items', async () => {
     // We can't introduce arbitrary scheduling, but we can hammer the
     // store with concurrent appends + polling reads of (last_seen,
     // work_items) and check the invariant on every snapshot. If
@@ -403,8 +403,8 @@ describe('routing worker — race safety', () => {
   })
 })
 
-describe('routing worker — lifecycle', () => {
-  test('`already_claimed` is not fatal under D-0025: worker waits and retries', async () => {
+void describe('routing worker — lifecycle', () => {
+  void test('`already_claimed` is not fatal under D-0025: worker waits and retries', async () => {
     // A second routing worker for the same subscription must not exit
     // when it observes `already_claimed`; it simply backs off and
     // retries on the next tick. Under the per-batch model the first
@@ -443,7 +443,7 @@ describe('routing worker — lifecycle', () => {
     }
   })
 
-  test('IS022 mid-batch is recoverable: worker drops batch and continues', async () => {
+  void test('IS022 mid-batch is recoverable: worker drops batch and continues', async () => {
     // Force-expire the lease while the worker is mid-batch (stuck in
     // routeFn). When route_batch fires it will raise IS022; under
     // D-0025 the worker drops the batch and re-enters the loop
@@ -520,7 +520,7 @@ describe('routing worker — lifecycle', () => {
     }
   })
 
-  test('close() between batches leaves the lease released', async () => {
+  void test('close() between batches leaves the lease released', async () => {
     // Under D-0025 the lease is released per batch in the steady
     // state. After a worker has processed all available events and
     // entered the idle poll, the lease is already released. close()
@@ -546,7 +546,7 @@ describe('routing worker — lifecycle', () => {
     assert.equal(r.rows[0].claimed_by, null)
   })
 
-  test('routeFn throw stops the worker without advancing cursor', async () => {
+  void test('routeFn throw stops the worker without advancing cursor', async () => {
     const name = `routing-throw-${randomUUID().slice(0, 8)}`
     await appendN('t', 2)
     const errors: Error[] = []
