@@ -65,7 +65,7 @@ function counter(): AggregateDefinition<CounterState, CounterCommand, CounterEve
     apply(state, event) {
       if (event.type === 'Added') {
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
-    const n = (event.data as { n: number }).n
+        const n = (event.data as { n: number }).n
         return { value: state.value + n }
       }
       return state

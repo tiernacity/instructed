@@ -160,7 +160,7 @@ void describe('Instructed -- poll fan-out', () => {
         e.type === 'Triggered'
           ? {
               // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test: structural read of opaque event data.
-      partitionKey: (e.data as { processId: string }).processId,
+              partitionKey: (e.data as { processId: string }).processId,
             }
           : 'ignore',
       initialState: () => ({ done: false }),
