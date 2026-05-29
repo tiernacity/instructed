@@ -26,13 +26,11 @@ import type {
 } from "instructed-sdk";
 
 import {
-  type AccountEvent,
   AccountDepositedTo,
   AccountWithdrawnFrom,
   AccountWithdrawalRefused,
 } from "../events/account/index.ts";
 import {
-  type TransferEvent,
   TransferRequested,
 } from "../events/transfer/index.ts";
 import {
