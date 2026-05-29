@@ -245,9 +245,9 @@ describe("waitForProjection — timeout", () => {
 
 describe("waitForProjection — SUB-A work-item conjunct", () => {
   test("routed-but-pending blocks; predicate flips to true once handler completes", async () => {
-    const { startRoutingWorker } = await import("../src/routing-worker.ts");
+    const { startRoutingWorker } = await import("../src/workers/routing/index.ts");
     const { startProjectionWorker } = await import(
-      "../src/projection-worker.ts"
+      "../src/workers/projection/index.ts"
     );
     const { routingFnForPartitionBy } = await import(
       "../src/partition-by.ts"
@@ -318,7 +318,7 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
   });
 
   test("failed work-item keeps the predicate false (operator-only resolution)", async () => {
-    const { startRoutingWorker } = await import("../src/routing-worker.ts");
+    const { startRoutingWorker } = await import("../src/workers/routing/index.ts");
     const stream = randomUUID();
     const name = `subA-fail-${randomUUID().slice(0, 8)}`;
     const appended = await client.appendToStream(stream, expected.noStream, [
@@ -393,9 +393,9 @@ describe("waitForProjection — SUB-A work-item conjunct", () => {
     // We source from $all so the routing worker can claim the
     // subscription before any user stream exists (per-stream sources
     // would raise IS003 at claim-time).
-    const { startRoutingWorker } = await import("../src/routing-worker.ts");
+    const { startRoutingWorker } = await import("../src/workers/routing/index.ts");
     const { startProjectionWorker } = await import(
-      "../src/projection-worker.ts"
+      "../src/workers/projection/index.ts"
     );
     const { routingFnForPartitionBy } = await import(
       "../src/partition-by.ts"

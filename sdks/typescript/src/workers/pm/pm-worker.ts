@@ -50,11 +50,11 @@
  * client / pool separation.
  */
 
-import type { Client } from "./client/index.ts";
-import { prefixType, type AggregateDefinition } from "./aggregate/index.ts";
-import { runCommandWithSnapshots } from "./aggregate/index.ts";
-import type { CommandRouter } from "./command-router.ts";
-import type { Command } from "./types/index.ts";
+import type { Client } from "../../client/index.ts";
+import { prefixType, type AggregateDefinition } from "../../aggregate/index.ts";
+import { runCommandWithSnapshots } from "../../aggregate/index.ts";
+import type { CommandRouter } from "../../command-router.ts";
+import type { Command } from "../../types/index.ts";
 import {
   startPmSubstrate,
   type PmSubstrateDefinition,
@@ -63,9 +63,9 @@ import {
 import type {
   ErrorPolicy,
   ProcessingHandlerContext,
-} from "./processing-worker.ts";
-import type { Event, RecordedEvent } from "./types/index.ts";
-import type { RunningWorker } from "./internal/running-worker.ts";
+} from "../processing/index.ts";
+import type { Event, RecordedEvent } from "../../types/index.ts";
+import type { RunningWorker } from "../../internal/running-worker.ts";
 
 // ============================================================================
 // Public surface
@@ -286,7 +286,7 @@ export function startPmWorker<S, E extends Event = Event, PolicyState = undefine
 function resolveDispatch(
   c: DispatchedCommand,
   opts: PmWorkerOptions,
-  dispatchCtx: { logger: import("./logger.ts").Logger },
+  dispatchCtx: { logger: import("../../logger.ts").Logger },
 ): {
   def: AggregateDefinition<any, any, any>;
   streamUuid: string;

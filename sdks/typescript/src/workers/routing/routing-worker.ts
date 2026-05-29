@@ -76,19 +76,19 @@
  *     lost lease surfaces as `IS022` rather than via a heartbeat.
  */
 
-import type { Client } from "./client/index.ts";
-import { Logger } from "./logger.ts";
-import { SubscriptionLeaseLost, SubscriptionNotFound } from "./errors/index.ts";
+import type { Client } from "../../client/index.ts";
+import { Logger } from "../../logger.ts";
+import { SubscriptionLeaseLost, SubscriptionNotFound } from "../../errors/index.ts";
 import type {
   Event,
   RecordedEvent,
   RouteDecision,
   StartFrom,
-} from "./types/index.ts";
-import type { RunningWorker } from "./internal/running-worker.ts";
+} from "../../types/index.ts";
+import type { RunningWorker } from "../../internal/running-worker.ts";
 export type { RunningWorker };
-import { defaultWorkerId } from "./internal/worker-id.ts";
-import { sleep } from "./internal/sleep.ts";
+import { defaultWorkerId } from "../../internal/worker-id.ts";
+import { sleep } from "../../internal/sleep.ts";
 
 /**
  * Routing-extension-point output. Either route the event to the

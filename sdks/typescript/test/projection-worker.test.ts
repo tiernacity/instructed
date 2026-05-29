@@ -25,12 +25,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
-import { startRoutingWorker } from "../src/routing-worker.ts";
+import { startRoutingWorker } from "../src/workers/routing/index.ts";
 import {
   startProjectionWorker,
   type ProjectionWorkerDefinition,
   type ProjectionHandlerContext,
-} from "../src/projection-worker.ts";
+} from "../src/workers/projection/index.ts";
 import {
   routingFnForPartitionBy,
   SEQUENTIAL_PARTITION_KEY,

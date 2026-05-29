@@ -64,18 +64,18 @@
  * PM-E work for deterministic event IDs.
  */
 
-import type { Client } from "./client/index.ts";
-import { prefixType } from "./aggregate/index.ts";
-import { SnapshotNotFound } from "./errors/index.ts";
-import { SNAPSHOT_MODULE_VERSION_KEY } from "./aggregate/index.ts";
+import type { Client } from "../../client/index.ts";
+import { prefixType } from "../../aggregate/index.ts";
+import { SnapshotNotFound } from "../../errors/index.ts";
+import { SNAPSHOT_MODULE_VERSION_KEY } from "../../aggregate/index.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
-} from "./processing-worker.ts";
-import type { Event, RecordedEvent } from "./types/index.ts";
-import type { RunningWorker } from "./internal/running-worker.ts";
+} from "../processing/index.ts";
+import type { Event, RecordedEvent } from "../../types/index.ts";
+import type { RunningWorker } from "../../internal/running-worker.ts";
 
 // ============================================================================
 // Public surface

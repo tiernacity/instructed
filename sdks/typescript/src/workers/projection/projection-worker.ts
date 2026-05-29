@@ -23,15 +23,15 @@
  * runs" for the routing / processing split.
  */
 
-import type { Client } from "./client/index.ts";
-import type { Event, RecordedEvent } from "./types/index.ts";
+import type { Client } from "../../client/index.ts";
+import type { Event, RecordedEvent } from "../../types/index.ts";
 import {
   startProcessingWorker,
   type ErrorPolicy,
   type ProcessingHandlerContext,
   type ProcessingWorkerOptions,
-} from "./processing-worker.ts";
-import type { RunningWorker } from "./internal/running-worker.ts";
+} from "../processing/index.ts";
+import type { RunningWorker } from "../../internal/running-worker.ts";
 
 // ============================================================================
 // Projection processing worker

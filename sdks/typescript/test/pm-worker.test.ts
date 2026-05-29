@@ -26,12 +26,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
-import { startRoutingWorker } from "../src/routing-worker.ts";
+import { startRoutingWorker } from "../src/workers/routing/index.ts";
 import {
   startPmWorker,
   type DispatchedCommand,
   type PmDefinition,
-} from "../src/pm-worker.ts";
+} from "../src/workers/pm/index.ts";
 import { SNAPSHOT_MODULE_VERSION_KEY } from "../src/aggregate/index.ts";
 import type { AggregateDefinition, DomainEvent } from "../src/aggregate/index.ts";
 import type { RecordedEvent } from "../src/types/index.ts";

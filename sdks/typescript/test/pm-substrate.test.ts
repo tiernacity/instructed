@@ -18,11 +18,11 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { closePool, getPool, truncateAll } from "./fixtures.ts";
 import { Client, expected } from "../src/index.ts";
-import { startRoutingWorker } from "../src/routing-worker.ts";
+import { startRoutingWorker } from "../src/workers/routing/index.ts";
 import {
   startPmSubstrate,
   type PmSubstrateDefinition,
-} from "../src/pm-substrate.ts";
+} from "../src/workers/pm/index.ts";
 import type { RecordedEvent } from "../src/types/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";

@@ -27,7 +27,7 @@ import {
   startProcessingWorker,
   type ErrorPolicy,
   type ProcessingWorkerDefinition,
-} from "../src/processing-worker.ts";
+} from "../src/workers/processing/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 

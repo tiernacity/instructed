@@ -42,7 +42,7 @@
  * separate registration call on the worker).
  */
 
-import type { RoutingFn } from "./routing-worker.ts";
+import type { RoutingFn } from "./workers/routing/index.ts";
 import type { Event, RecordedEvent } from "./types/index.ts";
 
 /**

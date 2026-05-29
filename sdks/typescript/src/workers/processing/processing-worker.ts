@@ -51,18 +51,18 @@
  * slice 9. Tests import this module directly.
  */
 
-import type { Client } from "./client/index.ts";
+import type { Client } from "../../client/index.ts";
 import {
   SubscriptionLeaseLost,
   SubscriptionNotFound,
   WorkItemLeaseLost,
-} from "./errors/index.ts";
-import { Logger } from "./logger.ts";
-import type { Event, RecordedEvent } from "./types/index.ts";
-import type { RunningWorker } from "./internal/running-worker.ts";
+} from "../../errors/index.ts";
+import { Logger } from "../../logger.ts";
+import type { Event, RecordedEvent } from "../../types/index.ts";
+import type { RunningWorker } from "../../internal/running-worker.ts";
 export type { RunningWorker };
-import { defaultWorkerId } from "./internal/worker-id.ts";
-import { sleep } from "./internal/sleep.ts";
+import { defaultWorkerId } from "../../internal/worker-id.ts";
+import { sleep } from "../../internal/sleep.ts";
 
 // ============================================================================
 // Public surface

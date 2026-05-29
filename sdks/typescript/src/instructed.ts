@@ -55,11 +55,11 @@ import {
   DEFAULT_ROUTING_LEASE_SECONDS,
   DEFAULT_ROUTING_POLL_INTERVAL_MS,
   type RoutingFn,
-} from "./routing-worker.ts";
+} from "./workers/routing/index.ts";
 import {
   startProjectionWorker,
   type ProjectionHandler,
-} from "./projection-worker.ts";
+} from "./workers/projection/index.ts";
 import {
   routingFnForPartitionBy,
   type PartitionBy,
@@ -67,9 +67,9 @@ import {
 import {
   startPmWorker,
   type PmDefinition,
-} from "./pm-worker.ts";
+} from "./workers/pm/index.ts";
 import type { CommandRouter } from "./command-router.ts";
-import type { ErrorPolicy } from "./processing-worker.ts";
+import type { ErrorPolicy } from "./workers/processing/index.ts";
 import {
   waitForProjection,
   type SubscriptionRef,

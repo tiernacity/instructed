@@ -23,7 +23,7 @@ import { Client, expected, SubscriptionLeaseLost } from "../src/index.ts";
 import {
   startRoutingWorker,
   type RoutingDecision,
-} from "../src/routing-worker.ts";
+} from "../src/workers/routing/index.ts";
 import type pg from "pg";
 import type { RunningWorker } from "../src/internal/running-worker.ts";
 

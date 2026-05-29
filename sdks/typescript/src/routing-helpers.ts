@@ -17,7 +17,7 @@
  * idiomatic TS convenience.
  */
 
-import type { RoutingFn } from "./routing-worker.ts";
+import type { RoutingFn } from "./workers/routing/index.ts";
 import type { Event } from "./types/index.ts";
 
 /**

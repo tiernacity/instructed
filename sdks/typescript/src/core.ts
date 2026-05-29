@@ -124,7 +124,7 @@ export {
   type RoutingFn,
   type RoutingDefinition,
   type RoutingWorkerOptions,
-} from "./routing-worker.ts";
+} from "./workers/routing/index.ts";
 
 // Processing worker (kind-agnostic poll loop + SUB-B error policy).
 //
@@ -147,7 +147,7 @@ export {
   type ErrorPolicyDecision,
   type ErrorPolicyContext,
   type ErrorPolicyResult,
-} from "./processing-worker.ts";
+} from "./workers/processing/index.ts";
 
 // Projection processing-worker adapter. The `PartitionBy` sugar
 // (`routingFnForPartitionBy`, `SEQUENTIAL_PARTITION_KEY`, `PartitionBy`)
@@ -159,7 +159,7 @@ export {
   type ProjectionHandlerContext,
   type ProjectionWorkerDefinition,
   type ProjectionWorkerOptions,
-} from "./projection-worker.ts";
+} from "./workers/projection/index.ts";
 
 // PM substrate (L2): snapshot+ack lifecycle, rebuild on snapshot
 // miss / module-version mismatch, lease management. The substrate's
@@ -173,7 +173,7 @@ export {
   type PmSubstrateHandleResult,
   type PmSubstrateHandlerContext,
   type PmSubstrateOptions,
-} from "./pm-substrate.ts";
+} from "./workers/pm/index.ts";
 
 // SNAP-002 — the SDK-reserved metadata key both aggregates and PMs
 // use for snapshot module versioning. Part of the porting checklist:

@@ -79,7 +79,7 @@ export {
   type PmWorkerOptions,
   type DispatchedCommand,
   type DispatchedCommandExplicit,
-} from "./pm-worker.ts";
+} from "./workers/pm/index.ts";
 
 // Command router (L3). Resolves `Command`s to
 // `(aggregateType, aggregateId)`; consumed by `Instructed.dispatch`'s
@@ -103,7 +103,7 @@ export {
   retryUpTo,
   type ExponentialBackoffOptions,
   type LinearBackoffOptions,
-} from "./error-policies.ts";
+} from "./workers/processing/index.ts";
 
 // Consistency-on-dispatch wait (polls the L1 `is_subscription_caught_up`
 // predicate). ML-0002 may eventually rework the mechanism into
