@@ -4,15 +4,12 @@
  * generic on `AggregateDefinition<S, C, E>` and as the
  * command-router type parameter.
  */
-export { OpenAccount } from "./open-account.ts";
-export { DepositToAccount } from "./deposit-to-account.ts";
-export { WithdrawFromAccount } from "./withdraw-from-account.ts";
+export { OpenAccount } from './open-account.ts'
+export { DepositToAccount } from './deposit-to-account.ts'
+export { WithdrawFromAccount } from './withdraw-from-account.ts'
 
-import type { OpenAccount } from "./open-account.ts";
-import type { DepositToAccount } from "./deposit-to-account.ts";
-import type { WithdrawFromAccount } from "./withdraw-from-account.ts";
+import type { DepositToAccount } from './deposit-to-account.ts'
+import type { OpenAccount } from './open-account.ts'
+import type { WithdrawFromAccount } from './withdraw-from-account.ts'
 
-export type AccountCommand =
-  | OpenAccount
-  | DepositToAccount
-  | WithdrawFromAccount;
+export type AccountCommand = OpenAccount | DepositToAccount | WithdrawFromAccount

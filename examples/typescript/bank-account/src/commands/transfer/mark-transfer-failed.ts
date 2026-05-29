@@ -3,9 +3,9 @@
  * the TransferProcessManager when `AccountWithdrawalRefused` is
  * observed. Idempotent at the aggregate.
  */
-export const MarkTransferFailed = "MarkTransferFailed" as const;
+export const MarkTransferFailed = 'MarkTransferFailed' as const
 export type MarkTransferFailed = {
-  type: typeof MarkTransferFailed;
-  transferId: string;
-  reason: string;
-};
+  type: typeof MarkTransferFailed
+  transferId: string
+  reason: string
+}

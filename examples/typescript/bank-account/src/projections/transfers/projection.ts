@@ -11,34 +11,32 @@
  * `queries.ts`).
  */
 
-import { onlyTypes } from "instructed-sdk";
-import type { ProjectionDefinition, RoutingFn } from "instructed-sdk";
-import type pg from "pg";
+import { onlyTypes } from 'instructed-sdk'
+import type { ProjectionDefinition, RoutingFn } from 'instructed-sdk'
+import type pg from 'pg'
 
 import {
   type TransferEvent,
   TransferRequested,
   TransferCompleted,
   TransferFailed,
-} from "../../events/transfer/index.ts";
-import { markCompleted, markFailed, upsertRequested } from "./queries.ts";
+} from '../../events/transfer/index.ts'
+import { markCompleted, markFailed, upsertRequested } from './queries.ts'
 
-export const Transfers = "Transfers" as const;
+export const Transfers = 'Transfers' as const
 
 const transfersRouteFn: RoutingFn<TransferEvent> = onlyTypes<TransferEvent>(
   [TransferRequested, TransferCompleted, TransferFailed],
   (event) => ({ partitionKey: event.data.transferId }),
-);
+)
 
-export function transfersProjection(
-  pool: pg.Pool,
-): ProjectionDefinition<TransferEvent> {
+export function transfersProjection(pool: pg.Pool): ProjectionDefinition<TransferEvent> {
   return {
     type: Transfers,
-    stream: "$all",
+    stream: '$all',
     routeFn: transfersRouteFn,
     async handler(event) {
-      const n = event.event_number;
+      const n = event.event_number
       switch (event.type) {
         case TransferRequested:
           await upsertRequested(pool, {
@@ -48,22 +46,22 @@ export function transfersProjection(
             amount: event.data.amount,
             requestedAt: event.created_at,
             eventNumber: n,
-          });
-          return;
+          })
+          return
         case TransferCompleted:
           await markCompleted(pool, {
             transferId: event.data.transferId,
             eventNumber: n,
-          });
-          return;
+          })
+          return
         case TransferFailed:
           await markFailed(pool, {
             transferId: event.data.transferId,
             reason: event.data.reason,
             eventNumber: n,
-          });
-          return;
+          })
+          return
       }
     },
-  };
+  }
 }

@@ -6,8 +6,8 @@
  * it's the event's TypeScript shape. The SDK consumes the type
  * structurally via `Event<T,D>` — no inheritance required.
  */
-export const AccountOpened = "AccountOpened" as const;
+export const AccountOpened = 'AccountOpened' as const
 export type AccountOpened = {
-  type: typeof AccountOpened;
-  data: { owner: string };
-};
+  type: typeof AccountOpened
+  data: { owner: string }
+}

@@ -9,7 +9,7 @@
 
 export const PG_URL =
   process.env.INSTRUCTED_DATABASE_URL ??
-  "postgresql://postgres:postgres@127.0.0.1:5433/bank_account";
+  'postgresql://postgres:postgres@127.0.0.1:5433/bank_account'
 
 /**
  * Resolves on the first SIGINT or SIGTERM. Callers race this against
@@ -24,21 +24,21 @@ export const PG_URL =
 export function waitForShutdown(): Promise<NodeJS.Signals> {
   return new Promise((resolve) => {
     const stop = (sig: NodeJS.Signals): void => {
-      process.stderr.write(`\n[${sig}] shutting down…\n`);
-      resolve(sig);
-    };
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-  });
+      process.stderr.write(`\n[${sig}] shutting down…\n`)
+      resolve(sig)
+    }
+    process.once('SIGINT', stop)
+    process.once('SIGTERM', stop)
+  })
 }
 
 export function requireArg(argv: string[], index: number, name: string): string {
-  const v = argv[index];
+  const v = argv[index]
   if (!v) {
-    process.stderr.write(`missing argument: <${name}>\n`);
-    process.exit(2);
+    process.stderr.write(`missing argument: <${name}>\n`)
+    process.exit(2)
   }
-  return v;
+  return v
 }
 
 // Stream-key helpers removed: identifying aggregates by their

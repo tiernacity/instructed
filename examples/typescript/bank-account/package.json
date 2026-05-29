@@ -1,8 +1,8 @@
 {
   "name": "bank-account-example",
   "private": true,
-  "type": "module",
   "description": "Bank-account example for the instructed TS SDK. Demonstrates aggregates, projections, and a process manager, each runnable in its own foreground process.",
+  "type": "module",
   "scripts": {
     "db": "node --conditions=development scripts/db.ts",
     "workers": "node --conditions=development scripts/workers.ts",

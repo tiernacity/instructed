@@ -4,11 +4,11 @@
  * id (used by the command router) and the correlation key that
  * the TransferProcessManager partitions on.
  */
-export const RequestTransfer = "RequestTransfer" as const;
+export const RequestTransfer = 'RequestTransfer' as const
 export type RequestTransfer = {
-  type: typeof RequestTransfer;
-  transferId: string;
-  from: string;
-  to: string;
-  amount: number;
-};
+  type: typeof RequestTransfer
+  transferId: string
+  from: string
+  to: string
+  amount: number
+}

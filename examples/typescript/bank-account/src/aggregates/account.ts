@@ -12,64 +12,61 @@
  * `(type, id)`; stream names are storage-layer detail.
  */
 
-import type { AggregateDefinition } from "instructed-sdk";
+import type { AggregateDefinition } from 'instructed-sdk'
+
 import {
   type AccountCommand,
   OpenAccount,
   DepositToAccount,
   WithdrawFromAccount,
-} from "../commands/account/index.ts";
+} from '../commands/account/index.ts'
 import {
   type AccountEvent,
   AccountOpened,
   AccountDepositedTo,
   AccountWithdrawnFrom,
   AccountWithdrawalRefused,
-} from "../events/account/index.ts";
+} from '../events/account/index.ts'
 
 export interface AccountState {
-  opened: boolean;
-  owner: string | null;
-  balance: number;
+  opened: boolean
+  owner: string | null
+  balance: number
 }
 
-export const Account: AggregateDefinition<
-  AccountState,
-  AccountCommand,
-  AccountEvent
-> = {
-  type: "Account",
+export const Account: AggregateDefinition<AccountState, AccountCommand, AccountEvent> = {
+  type: 'Account',
   initialState: () => ({ opened: false, owner: null, balance: 0 }),
 
   apply(state, event) {
     switch (event.type) {
       case AccountOpened:
-        return { ...state, opened: true, owner: event.data.owner };
+        return { ...state, opened: true, owner: event.data.owner }
       case AccountDepositedTo:
-        return { ...state, balance: state.balance + event.data.amount };
+        return { ...state, balance: state.balance + event.data.amount }
       case AccountWithdrawnFrom:
-        return { ...state, balance: state.balance - event.data.amount };
+        return { ...state, balance: state.balance - event.data.amount }
       case AccountWithdrawalRefused:
-        return state;
+        return state
     }
   },
 
   execute(state, command) {
     switch (command.type) {
       case OpenAccount:
-        if (state.opened) throw new Error("account already open");
+        if (state.opened) throw new Error('account already open')
         return {
           type: AccountOpened,
           data: { owner: command.owner },
-        };
+        }
       case DepositToAccount:
-        if (!state.opened) throw new Error("account not open");
+        if (!state.opened) throw new Error('account not open')
         return {
           type: AccountDepositedTo,
           data: { amount: command.amount, transferId: command.transferId },
-        };
+        }
       case WithdrawFromAccount:
-        if (!state.opened) throw new Error("account not open");
+        if (!state.opened) throw new Error('account not open')
         if (state.balance < command.amount) {
           // D-0011: refusal is a domain event, not an exception.
           // The TransferProcessManager observes it via its routes
@@ -78,11 +75,11 @@ export const Account: AggregateDefinition<
           return {
             type: AccountWithdrawalRefused,
             data: {
-              reason: "insufficient funds",
+              reason: 'insufficient funds',
               amount: command.amount,
               transferId: command.transferId,
             },
-          };
+          }
         }
         return {
           type: AccountWithdrawnFrom,
@@ -91,7 +88,7 @@ export const Account: AggregateDefinition<
             transferId: command.transferId,
             to: command.to,
           },
-        };
+        }
     }
   },
-};
+}

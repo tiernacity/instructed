@@ -9,11 +9,5 @@
   "sortImports": {
     "newlinesBetween": true
   },
-  "ignorePatterns": [
-    "node_modules/",
-    "dist/",
-    "build/",
-    "coverage/",
-    "*.md"
-  ]
+  "ignorePatterns": ["node_modules/", "dist/", "build/", "coverage/", "*.md"]
 }

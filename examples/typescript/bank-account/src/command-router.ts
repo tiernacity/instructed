@@ -15,29 +15,30 @@
  * concerns. Routing is a deployment-level lookup.
  */
 
-import { commandRouter, type CommandRouter } from "instructed-sdk";
-import { Account } from "./aggregates/account.ts";
-import { Transfer } from "./aggregates/transfer.ts";
+import { commandRouter, type CommandRouter } from 'instructed-sdk'
+
+import { Account } from './aggregates/account.ts'
+import { Transfer } from './aggregates/transfer.ts'
 import {
   type AccountCommand,
   OpenAccount,
   DepositToAccount,
   WithdrawFromAccount,
-} from "./commands/account/index.ts";
+} from './commands/account/index.ts'
 import {
   type TransferCommand,
   RequestTransfer,
   MarkTransferCompleted,
   MarkTransferFailed,
-} from "./commands/transfer/index.ts";
+} from './commands/transfer/index.ts'
 
-export type AppCommand = AccountCommand | TransferCommand;
+export type AppCommand = AccountCommand | TransferCommand
 
 export const appCommandRouter: CommandRouter = commandRouter<AppCommand>({
-  [OpenAccount]:            { aggregate: Account,  id: (c) => c.accountId },
-  [DepositToAccount]:       { aggregate: Account,  id: (c) => c.accountId },
-  [WithdrawFromAccount]:    { aggregate: Account,  id: (c) => c.accountId },
-  [RequestTransfer]:        { aggregate: Transfer, id: (c) => c.transferId },
-  [MarkTransferCompleted]:  { aggregate: Transfer, id: (c) => c.transferId },
-  [MarkTransferFailed]:     { aggregate: Transfer, id: (c) => c.transferId },
-});
+  [OpenAccount]: { aggregate: Account, id: (c) => c.accountId },
+  [DepositToAccount]: { aggregate: Account, id: (c) => c.accountId },
+  [WithdrawFromAccount]: { aggregate: Account, id: (c) => c.accountId },
+  [RequestTransfer]: { aggregate: Transfer, id: (c) => c.transferId },
+  [MarkTransferCompleted]: { aggregate: Transfer, id: (c) => c.transferId },
+  [MarkTransferFailed]: { aggregate: Transfer, id: (c) => c.transferId },
+})

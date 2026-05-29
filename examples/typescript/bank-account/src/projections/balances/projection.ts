@@ -17,19 +17,19 @@
  * (`scripts/projection-balances.ts`).
  */
 
-import { onlyTypes } from "instructed-sdk";
-import type { ProjectionDefinition, RoutingFn } from "instructed-sdk";
-import type pg from "pg";
+import { onlyTypes } from 'instructed-sdk'
+import type { ProjectionDefinition, RoutingFn } from 'instructed-sdk'
+import type pg from 'pg'
 
 import {
   type AccountEvent,
   AccountOpened,
   AccountDepositedTo,
   AccountWithdrawnFrom,
-} from "../../events/account/index.ts";
-import { bumpBalance, upsertOpened } from "./queries.ts";
+} from '../../events/account/index.ts'
+import { bumpBalance, upsertOpened } from './queries.ts'
 
-export const Balances = "Balances" as const;
+export const Balances = 'Balances' as const
 
 /**
  * Per-stream routing: one partition key per account, restricted to
@@ -39,18 +39,16 @@ export const Balances = "Balances" as const;
 const balancesRouteFn: RoutingFn<AccountEvent> = onlyTypes<AccountEvent>(
   [AccountOpened, AccountDepositedTo, AccountWithdrawnFrom],
   (event) => ({ partitionKey: event.stream_uuid }),
-);
+)
 
-export function balancesProjection(
-  pool: pg.Pool,
-): ProjectionDefinition<AccountEvent> {
+export function balancesProjection(pool: pg.Pool): ProjectionDefinition<AccountEvent> {
   return {
     type: Balances,
-    stream: "$all",
+    stream: '$all',
     routeFn: balancesRouteFn,
     async handler(event) {
-      const n = event.event_number;
-      const streamUuid = event.stream_uuid;
+      const n = event.event_number
+      const streamUuid = event.stream_uuid
       switch (event.type) {
         case AccountOpened:
           // First event on the stream — UPSERT; the ON CONFLICT
@@ -61,23 +59,23 @@ export function balancesProjection(
             streamUuid,
             owner: event.data.owner,
             eventNumber: n,
-          });
-          return;
+          })
+          return
         case AccountDepositedTo:
           await bumpBalance(pool, {
             streamUuid,
             delta: event.data.amount,
             eventNumber: n,
-          });
-          return;
+          })
+          return
         case AccountWithdrawnFrom:
           await bumpBalance(pool, {
             streamUuid,
             delta: -event.data.amount,
             eventNumber: n,
-          });
-          return;
+          })
+          return
       }
     },
-  };
+  }
 }

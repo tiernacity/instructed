@@ -6,8 +6,8 @@
  * stream as `AccountWithdrawnFrom` and decides whether to mark
  * the transfer failed.
  */
-export const AccountWithdrawalRefused = "AccountWithdrawalRefused" as const;
+export const AccountWithdrawalRefused = 'AccountWithdrawalRefused' as const
 export type AccountWithdrawalRefused = {
-  type: typeof AccountWithdrawalRefused;
-  data: { reason: string; amount: number; transferId?: string };
-};
+  type: typeof AccountWithdrawalRefused
+  data: { reason: string; amount: number; transferId?: string }
+}

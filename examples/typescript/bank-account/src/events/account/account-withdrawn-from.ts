@@ -5,8 +5,8 @@
  * of a money transfer; the TransferProcessManager observes this
  * event, then dispatches `DepositToAccount` on `to`.
  */
-export const AccountWithdrawnFrom = "AccountWithdrawnFrom" as const;
+export const AccountWithdrawnFrom = 'AccountWithdrawnFrom' as const
 export type AccountWithdrawnFrom = {
-  type: typeof AccountWithdrawnFrom;
-  data: { amount: number; transferId?: string; to?: string };
-};
+  type: typeof AccountWithdrawnFrom
+  data: { amount: number; transferId?: string; to?: string }
+}
