@@ -58,6 +58,10 @@
 --   complete_pm_instance, fail_work_item,
 --   is_subscription_caught_up, list_pm_rebuild_events.
 --
+-- Internal helpers (underscore-prefixed; not part of the public surface):
+--   _require_subscription -- IS020 existence guard shared by the work-item
+--                            procedures.
+--
 -- All procedures that accept caller-tunable knobs do so via a `p_options jsonb`
 -- parameter rather than positional arguments, so that ML-0013 / ML-0002 can
 -- grow the surface without breaking callers. (Following absurd's convention.)
@@ -1711,6 +1715,40 @@ $$;
 
 
 -- ----------------------------------------------------------------------------
+-- _require_subscription  (internal helper)
+--
+-- Surfaces IS020 ("no such subscription") distinctly from a downstream
+-- "queue empty" / "no such work item". Every work-item procedure performs
+-- this same existence check after stream resolution; centralising it keeps
+-- the IS020 contract uniform. Does NOT lock the subscriptions row -- callers
+-- that need the lease take their own SELECT ... FOR UPDATE.
+--
+-- p_proc is interpolated into the message so the raise still names the
+-- calling procedure (the SQLSTATE 'IS020' is the load-bearing part).
+-- ----------------------------------------------------------------------------
+create or replace function instructed._require_subscription (
+  p_stream_id         bigint,
+  p_subscription_name text,
+  p_stream_uuid       text,
+  p_proc              text
+) returns void
+language plpgsql
+as $$
+begin
+  if not exists (
+    select 1 from instructed.subscriptions
+     where stream_id = p_stream_id
+       and subscription_name = p_subscription_name
+  ) then
+    raise exception '%: subscription % on % not found',
+      p_proc, p_subscription_name, p_stream_uuid
+      using errcode = 'IS020';
+  end if;
+end;
+$$;
+
+
+-- ----------------------------------------------------------------------------
 -- route_batch
 --
 -- Atomically: insert N work items, advance the subscription's routing
@@ -1984,17 +2022,10 @@ begin
       using errcode = 'IS020';
   end if;
 
-  -- Existence check on the subscription itself. We do not lock it; we
-  -- only need to surface IS020 distinctly from "queue empty".
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'claim_work_item: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  -- Existence check on the subscription itself (IS020 distinct from
+  -- "queue empty"). Does not lock the subscriptions row.
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'claim_work_item');
 
   return query
   with candidate as (
@@ -2123,15 +2154,8 @@ begin
       using errcode = 'IS020';
   end if;
 
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'complete_work_item_projection: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'complete_work_item_projection');
 
   select claimed_by into v_holder
     from instructed.subscription_work_items
@@ -2274,15 +2298,8 @@ begin
       using errcode = 'IS020';
   end if;
 
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'complete_work_item_pm: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'complete_work_item_pm');
 
   select claimed_by into v_holder
     from instructed.subscription_work_items
@@ -2415,15 +2432,8 @@ begin
       using errcode = 'IS020';
   end if;
 
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'complete_pm_instance: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'complete_pm_instance');
 
   with del as (
     delete from instructed.subscription_work_items
@@ -2523,15 +2533,8 @@ begin
       using errcode = 'IS020';
   end if;
 
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'fail_work_item: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'fail_work_item');
 
   select claimed_by into v_holder
     from instructed.subscription_work_items
@@ -2759,15 +2762,8 @@ begin
       using errcode = 'IS020';
   end if;
 
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'extend_work_item_claim: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'extend_work_item_claim');
 
   select state, claimed_by into v_state, v_holder
     from instructed.subscription_work_items
@@ -2891,15 +2887,8 @@ begin
       using errcode = 'IS020';
   end if;
 
-  if not exists (
-    select 1 from instructed.subscriptions
-     where stream_id = v_stream_id
-       and subscription_name = p_subscription_name
-  ) then
-    raise exception 'list_pm_rebuild_events: subscription % on % not found',
-      p_subscription_name, p_stream_uuid
-      using errcode = 'IS020';
-  end if;
+  perform instructed._require_subscription(
+    v_stream_id, p_subscription_name, p_stream_uuid, 'list_pm_rebuild_events');
 
   return query
   select
