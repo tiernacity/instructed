@@ -11,10 +11,10 @@ executable.
 
 ## Status
 
-Early. The architecture is in place — a reusable **core** (`src/core`) and a thin
-[Cliffy](https://cliffy.io)-based **CLI** (`src/cli`) — with the `schema` and
-`subscriptions` command groups landed. The rest of the surface (streams, work items,
-snapshots, health) lands incrementally against the same shape.
+A reusable **core** (`src/core`) and a thin [Cliffy](https://cliffy.io)-based **CLI**
+(`src/cli`). All read/inspect groups are landed — `schema`, `streams`, `all`,
+`subscriptions` (incl. lifecycle), `work-items`, `snapshots`, and `health`. Remaining:
+`schema migrate` and the `work-items skip` escape hatch (see below).
 
 ## Architecture
 
@@ -175,12 +175,16 @@ psql." Now grouped noun-first. ✅ = landed.
 | Group           | Verbs                                                                           |
 | --------------- | ------------------------------------------------------------------------------- |
 | `schema`        | `status` ✅, `version` ✅, `install` ✅, `migrate`                              |
-| `streams`       | `list`, `get <uuid>`, `read <uuid> [--from --count]`                            |
-| `all`           | `read [--from --count]` (the global `$all` stream)                              |
+| `streams`       | `list` ✅, `get <uuid>` ✅, `read <uuid> [--from --count]` ✅                   |
+| `all`           | `read [--from --count]` ✅ (the global `$all` stream)                           |
 | `subscriptions` | `list` ✅, `get <name>` ✅, `release` ✅, `delete` ✅, `claim` ✅, `rebuild` ✅ |
-| `work-items`    | `list [--subscription]`, `skip <key> --audit <note>`                            |
-| `snapshots`     | `get <source_uuid>`                                                             |
-| `health`        | (bare) `$all` contiguity, orphans, expired-lease zombies                        |
+| `work-items`    | `list [--subscription]` ✅, `failed [--subscription]` ✅, `skip … --audit …`    |
+| `snapshots`     | `get <source_uuid>` ✅                                                          |
+| `health`        | (bare) `$all` contiguity, orphans, expired-lease zombies ✅                     |
+
+Not yet implemented: `schema migrate`, and `work-items skip` (the skip-with-audit escape
+hatch — depends on a future `skip_work_item_with_audit` procedure, TODO #7). `health`
+exits non-zero when any check fails, so it doubles as a monitoring probe.
 
 Absurd commands with no instructed analogue (queue/task/cron concepts): `create-queue`,
 `drop-queue`, `queue-policy`, `cron`, `cleanup`, `spawn-task`, `retry-task`,
@@ -193,27 +197,32 @@ tools/instructedctl/
   deno.json            # tasks, import map, compile.include, exports (. and ./core)
   src/
     core/              # consumable API — the testing boundary
-      db.ts            # Db interface (query / exec) — no driver import
+      db.ts            # Db interface (query / exec / transaction) — no driver import
       types.ts         # typed return shapes
-      schema.ts        # schemaPresent / getSchemaVersion / getStatus / installSchema
-      subscriptions.ts # listSubscriptions / getSubscription
+      errors.ts        # typed errors + SQLSTATE extractor
+      schema.ts        # schema lifecycle + status
+      streams.ts       # listStreams / getStream / readStream / readAll
+      subscriptions.ts # list / get / release / delete / claim / rebuild
+      work-items.ts    # listWorkItemCounts / listFailedWorkItems
+      snapshots.ts     # getSnapshot
+      health.ts        # checkHealth
       schema-sql.ts    # reads the embedded schema
       instructed.sql   # symlink -> ../../../../sql/instructed.sql (embedded at compile)
       index.ts         # re-exports the core API
     cli/               # thin Cliffy wrapper
       main.ts          # command tree + global options
       db.ts            # connection resolution + @db/postgres -> Db adapter
-      options.ts       # global-options shape + runWith helper
+      options.ts       # global-options shape + runWith + action helpers
       output.ts        # table / JSON / key-value formatting
-      commands/
-        schema.ts
-        subscriptions.ts
+      commands/        # one Cliffy builder per group
+        schema.ts  streams.ts  subscriptions.ts
+        work-items.ts  snapshots.ts  health.ts
   tests/
     support.ts         # throwaway-db harness + core Db + stdout capture
     cli_test.ts        # CLI smoke tests via Cliffy parse()
-    core/
-      schema_test.ts
-      subscriptions_test.ts
+    core/              # one test file per core module
+      schema_test.ts  streams_test.ts  subscriptions_test.ts
+      work-items_test.ts  snapshots_test.ts  health_test.ts
   README.md
 ```
 

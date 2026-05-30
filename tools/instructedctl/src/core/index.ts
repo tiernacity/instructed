@@ -5,16 +5,29 @@
 export type { Db } from "./db.ts";
 export type {
   ClaimResult,
+  EventRecord,
+  FailedWorkItem,
+  HealthCheck,
+  HealthReport,
   InstallResult,
+  Snapshot,
   StoreStatus,
+  StreamSummary,
   SubscriptionSummary,
+  WorkItemCounts,
 } from "./types.ts";
 
 export {
+  StreamNotFound,
   SubscriptionLeaseLost,
   SubscriptionNotClaimed,
   SubscriptionNotFound,
 } from "./errors.ts";
+
+export { getStream, listStreams, readAll, readStream } from "./streams.ts";
+export { getSnapshot } from "./snapshots.ts";
+export { listFailedWorkItems, listWorkItemCounts } from "./work-items.ts";
+export { checkHealth } from "./health.ts";
 
 export {
   getSchemaVersion,

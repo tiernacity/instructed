@@ -19,6 +19,13 @@ export class SubscriptionLeaseLost extends Error {
   }
 }
 
+export class StreamNotFound extends Error {
+  override readonly name = "StreamNotFound";
+  constructor(public streamUuid: string) {
+    super(`stream '${streamUuid}' not found`);
+  }
+}
+
 export class SubscriptionNotClaimed extends Error {
   override readonly name = "SubscriptionNotClaimed";
   constructor(public subscriptionName: string, public streamUuid: string) {

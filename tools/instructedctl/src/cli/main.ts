@@ -8,6 +8,10 @@
 import { Command } from "@cliffy/command";
 import { schemaCommand } from "./commands/schema.ts";
 import { subscriptionsCommand } from "./commands/subscriptions.ts";
+import { allCommand, streamsCommand } from "./commands/streams.ts";
+import { snapshotsCommand } from "./commands/snapshots.ts";
+import { workItemsCommand } from "./commands/work-items.ts";
+import { healthCommand } from "./commands/health.ts";
 
 const VERSION = "0.0.0";
 
@@ -41,7 +45,12 @@ export function buildCli(): Command {
   // deno-lint-ignore no-explicit-any
   const mount = cli as any;
   mount.command("schema", schemaCommand());
+  mount.command("streams", streamsCommand());
+  mount.command("all", allCommand());
   mount.command("subscriptions", subscriptionsCommand()).alias("subs");
+  mount.command("work-items", workItemsCommand());
+  mount.command("snapshots", snapshotsCommand());
+  mount.command("health", healthCommand());
   // The root carries a global-options generic that doesn't unify with the bare
   // `Command` return type; the cast is the type-level bridge (see note above).
   return cli as unknown as Command;
