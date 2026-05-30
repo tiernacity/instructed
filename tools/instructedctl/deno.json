@@ -1,19 +1,24 @@
 {
   "name": "instructedctl",
   "version": "0.0.0",
-  "exports": "./src/main.ts",
+  "exports": {
+    ".": "./src/cli/main.ts",
+    "./core": "./src/core/index.ts"
+  },
   "tasks": {
-    "dev": "deno run -A src/main.ts",
-    "check": "deno check src/main.ts",
+    "dev": "deno run -A src/cli/main.ts",
+    "check": "deno check src/cli/main.ts",
     "fmt": "deno fmt",
     "lint": "deno lint",
-    "compile": "deno compile -A --output instructedctl src/main.ts",
+    "compile": "deno compile -A --output instructedctl src/cli/main.ts",
     "test": "deno test -A"
   },
   "compile": {
-    "include": ["src/instructed.sql"]
+    "include": ["src/core/instructed.sql"]
   },
   "imports": {
+    "@cliffy/command": "jsr:@cliffy/command@^1.0.0-rc.8",
+    "@cliffy/table": "jsr:@cliffy/table@^1.0.0-rc.8",
     "@db/postgres": "jsr:@db/postgres@^0.19.5",
     "@std/path": "jsr:@std/path@^1.1.0",
     "@std/assert": "jsr:@std/assert@^1.0.0"

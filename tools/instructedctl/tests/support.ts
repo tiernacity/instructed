@@ -15,7 +15,11 @@
 
 import { Client } from "@db/postgres";
 import { fromFileUrl, join } from "@std/path";
-import type { DbConfig } from "../src/db.ts";
+import { type DbConfig, withDb } from "../src/cli/db.ts";
+import type { Db } from "../src/core/index.ts";
+
+export { withDb };
+export type { Db, DbConfig };
 
 const HOST = Deno.env.get("PGHOST") ?? "127.0.0.1";
 const PORT = Number(Deno.env.get("PGPORT") ?? "5432");
@@ -103,6 +107,12 @@ function configFor(name: string): DbConfig {
   };
 }
 
+// A connection URI for a throwaway database (for env-driven CLI smoke tests).
+export function uriFor(tw: Throwaway): string {
+  const c = tw.config;
+  return `postgresql://${c.user}:${c.password}@${c.host}:${c.port}/${c.database}`;
+}
+
 function dropFor(name: string): () => Promise<void> {
   return async () => {
     const a = adminClient("postgres");
@@ -119,6 +129,15 @@ function dropFor(name: string): () => Promise<void> {
       await a.end();
     }
   };
+}
+
+// Run `fn` with a core `Db` connected to the throwaway database. This is the
+// boundary core tests exercise.
+export function withThrowawayDb<T>(
+  tw: Throwaway,
+  fn: (db: Db) => Promise<T>,
+): Promise<T> {
+  return withDb(tw.config, fn);
 }
 
 // Run `fn` with console.log/console.error captured. Returns the combined

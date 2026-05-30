@@ -1,25 +1,58 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@cliffy/command@^1.0.0-rc.8": "1.1.0",
+    "jsr:@cliffy/flags@1.1.0": "1.1.0",
+    "jsr:@cliffy/internal@1.1.0": "1.1.0",
+    "jsr:@cliffy/table@1.1.0": "1.1.0",
+    "jsr:@cliffy/table@^1.0.0-rc.8": "1.1.0",
     "jsr:@db/postgres@~0.19.5": "0.19.5",
     "jsr:@std/assert@1": "1.0.19",
     "jsr:@std/bytes@^1.0.5": "1.0.6",
     "jsr:@std/crypto@^1.0.4": "1.1.0",
     "jsr:@std/encoding@^1.0.9": "1.0.10",
     "jsr:@std/fmt@^1.0.6": "1.0.10",
+    "jsr:@std/fmt@^1.0.9": "1.0.10",
     "jsr:@std/internal@^1.0.12": "1.0.14",
     "jsr:@std/internal@^1.0.14": "1.0.14",
     "jsr:@std/path@^1.0.8": "1.1.5",
-    "jsr:@std/path@^1.1.0": "1.1.5"
+    "jsr:@std/path@^1.1.0": "1.1.5",
+    "jsr:@std/text@^1.0.17": "1.0.19"
   },
   "jsr": {
+    "@cliffy/command@1.1.0": {
+      "integrity": "963019e2aa13272195b79256a7d8e0f2c60ba8c1b733e023f0aa241b4de87bf7",
+      "dependencies": [
+        "jsr:@cliffy/flags",
+        "jsr:@cliffy/internal",
+        "jsr:@cliffy/table@1.1.0",
+        "jsr:@std/fmt@^1.0.9",
+        "jsr:@std/text"
+      ]
+    },
+    "@cliffy/flags@1.1.0": {
+      "integrity": "da161133ea19997d42ae5833226485a8e7598cf82b86d7c1a2ea10e974ecf21c",
+      "dependencies": [
+        "jsr:@cliffy/internal",
+        "jsr:@std/text"
+      ]
+    },
+    "@cliffy/internal@1.1.0": {
+      "integrity": "433dd7755680d0da6b0a6186694327f6fd8e80807be314cf4bb06270bab28023"
+    },
+    "@cliffy/table@1.1.0": {
+      "integrity": "6579680c9900628ccd0e05272e89ae483391d74a4f1dfe7c55c919e8a7320bcd",
+      "dependencies": [
+        "jsr:@std/fmt@^1.0.9"
+      ]
+    },
     "@db/postgres@0.19.5": {
       "integrity": "afdbe608bd066cda2ee5dba37c416d332098b9238c51aec223331108e281954c",
       "dependencies": [
         "jsr:@std/bytes",
         "jsr:@std/crypto",
         "jsr:@std/encoding",
-        "jsr:@std/fmt",
+        "jsr:@std/fmt@^1.0.6",
         "jsr:@std/path@^1.0.8"
       ]
     },
@@ -49,10 +82,15 @@
       "dependencies": [
         "jsr:@std/internal@^1.0.14"
       ]
+    },
+    "@std/text@1.0.19": {
+      "integrity": "003a0e032d360e8c3a4e0410fb792c77a66bd6553fee9d60c6ec1bce30d29223"
     }
   },
   "workspace": {
     "dependencies": [
+      "jsr:@cliffy/command@^1.0.0-rc.8",
+      "jsr:@cliffy/table@^1.0.0-rc.8",
       "jsr:@db/postgres@~0.19.5",
       "jsr:@std/assert@1",
       "jsr:@std/path@^1.1.0"

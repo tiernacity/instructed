@@ -1,13 +1,11 @@
-// Database connection: resolution of connection settings from flags and the
-// environment, plus a thin query helper used by every command. instructedctl
-// connects directly to PostgreSQL and does not depend on any application SDK.
+// CLI database wiring: resolve connection settings from flags/env, adapt a
+// `@db/postgres` Client to the core `Db` interface, and run a function with a
+// connected adapter.
 
 import { Client } from "@db/postgres";
+import type { Db } from "../core/index.ts";
 
 export interface DbConfig {
-  // When a connection URI is supplied (via --database or INSTRUCTED_DATABASE_URL
-  // / PGDATABASE holding a URI) we pass it through verbatim. Otherwise we build
-  // a connection from discrete host/port/user/database fields.
   uri?: string;
   host?: string;
   port?: number;
@@ -16,10 +14,11 @@ export interface DbConfig {
   database?: string;
 }
 
+// Global DB options parsed by Cliffy (see ../cli/main.ts).
 export interface DbOptions {
   database?: string;
   host?: string;
-  port?: string;
+  port?: number;
   user?: string;
 }
 
@@ -29,9 +28,8 @@ function looksLikeUri(value: string): boolean {
   return /^postgres(ql)?:\/\//i.test(value);
 }
 
-// Resolve the database argument with the same precedence absurdctl uses:
-// explicit flag, then INSTRUCTED_DATABASE_URL, then PGDATABASE, then a local
-// default.
+// Precedence: explicit flag, then INSTRUCTED_DATABASE_URL, then PGDATABASE,
+// then a local default.
 function resolveDatabaseArgument(explicit?: string): string {
   return (
     explicit ||
@@ -50,20 +48,18 @@ export function configFromOptions(options: DbOptions): DbConfig {
 
   return {
     host: options.host || Deno.env.get("PGHOST") || "localhost",
-    port: Number(options.port || Deno.env.get("PGPORT") || "5432"),
+    port: options.port || Number(Deno.env.get("PGPORT") || "5432"),
     user: options.user || Deno.env.get("PGUSER") || Deno.env.get("USER") || "",
     password: Deno.env.get("PGPASSWORD") || undefined,
     database,
   };
 }
 
-// Remove the password from a URI for safe display in verbose output.
+// Remove the password from a URI for safe display.
 export function sanitizeUri(uri: string): string {
   try {
     const parsed = new URL(uri);
-    if (parsed.password) {
-      parsed.password = "****";
-    }
+    if (parsed.password) parsed.password = "****";
     return parsed.toString();
   } catch {
     return uri;
@@ -71,9 +67,7 @@ export function sanitizeUri(uri: string): string {
 }
 
 export function describeConfig(config: DbConfig): Array<[string, string]> {
-  if (config.uri) {
-    return [["URI", sanitizeUri(config.uri)]];
-  }
+  if (config.uri) return [["URI", sanitizeUri(config.uri)]];
   return [
     ["Host", String(config.host)],
     ["Port", String(config.port)],
@@ -82,27 +76,42 @@ export function describeConfig(config: DbConfig): Array<[string, string]> {
   ];
 }
 
-export async function connect(config: DbConfig): Promise<Client> {
-  const client = config.uri ? new Client(config.uri) : new Client({
+// Adapt a connected `@db/postgres` Client to the core `Db` interface.
+class PgDb implements Db {
+  constructor(private client: Client) {}
+
+  async query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+    const res = await this.client.queryObject<Record<string, unknown>>(
+      sql,
+      params as unknown[],
+    );
+    return res.rows as T[];
+  }
+
+  async exec(sql: string): Promise<void> {
+    await this.client.queryArray(sql);
+  }
+}
+
+function newClient(config: DbConfig): Client {
+  return config.uri ? new Client(config.uri) : new Client({
     hostname: config.host,
     port: config.port,
     user: config.user,
     password: config.password,
     database: config.database,
   });
-  await client.connect();
-  return client;
 }
 
-// Run a function with a connected client, guaranteeing the connection is
-// closed afterwards.
-export async function withClient<T>(
+// Connect, run `fn` with a core `Db`, and always close the connection.
+export async function withDb<T>(
   config: DbConfig,
-  fn: (client: Client) => Promise<T>,
+  fn: (db: Db) => Promise<T>,
 ): Promise<T> {
-  const client = await connect(config);
+  const client = newClient(config);
+  await client.connect();
   try {
-    return await fn(client);
+    return await fn(new PgDb(client));
   } finally {
     await client.end();
   }
