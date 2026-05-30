@@ -3,7 +3,18 @@
 // supplies a `Db` adapter.
 
 export type { Db } from "./db.ts";
-export type { InstallResult, StoreStatus, SubscriptionSummary } from "./types.ts";
+export type {
+  ClaimResult,
+  InstallResult,
+  StoreStatus,
+  SubscriptionSummary,
+} from "./types.ts";
+
+export {
+  SubscriptionLeaseLost,
+  SubscriptionNotClaimed,
+  SubscriptionNotFound,
+} from "./errors.ts";
 
 export {
   getSchemaVersion,
@@ -13,4 +24,13 @@ export {
   schemaPresent,
 } from "./schema.ts";
 
-export { getSubscription, listSubscriptions } from "./subscriptions.ts";
+export {
+  claimSubscription,
+  deleteSubscription,
+  getSubscription,
+  listSubscriptions,
+  REBUILD_WORKER_ID,
+  rebuildSubscription,
+  releaseSubscription,
+  type SubscriptionRef,
+} from "./subscriptions.ts";

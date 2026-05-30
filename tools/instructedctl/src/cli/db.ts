@@ -91,6 +91,18 @@ class PgDb implements Db {
   async exec(sql: string): Promise<void> {
     await this.client.queryArray(sql);
   }
+
+  async transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
+    await this.client.queryArray("begin");
+    try {
+      const result = await fn(this);
+      await this.client.queryArray("commit");
+      return result;
+    } catch (err) {
+      await this.client.queryArray("rollback");
+      throw err;
+    }
+  }
 }
 
 function newClient(config: DbConfig): Client {

@@ -28,3 +28,12 @@ export interface SubscriptionSummary {
   claimExpiresAt: Date | null;
   createdAt: Date;
 }
+
+export interface ClaimResult {
+  // 'claimed' when this call took the lease; 'already_claimed' when another
+  // worker holds a live lease.
+  result: "claimed" | "already_claimed";
+  lastSeen: number;
+  claimedBy: string | null;
+  claimExpiresAt: Date | null;
+}

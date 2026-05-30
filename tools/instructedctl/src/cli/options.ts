@@ -40,3 +40,15 @@ export function runWith<T>(
   }
   return withDb(config, fn);
 }
+
+// Run a command action, mapping any thrown error to a clean stderr line and a
+// non-zero exit. Core throws typed errors with operator-readable messages;
+// this is the single place that turns them into CLI failure.
+export async function action(fn: () => Promise<void>): Promise<void> {
+  try {
+    await fn();
+  } catch (err) {
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    Deno.exit(1);
+  }
+}

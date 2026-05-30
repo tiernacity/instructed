@@ -12,4 +12,7 @@ export interface Db {
   // Run one or more statements for their side effects (DDL, multi-statement
   // scripts). No rows are returned.
   exec(sql: string): Promise<void>;
+  // Run `fn` inside a transaction, committing on success and rolling back on
+  // any throw. The `Db` passed to `fn` runs on the same connection.
+  transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T>;
 }

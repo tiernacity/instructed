@@ -64,7 +64,21 @@ instructedctl schema install [--force]
 instructedctl subscriptions          # default: list   (alias: subs)
 instructedctl subscriptions list     # alias: ls
 instructedctl subscriptions get <name>
+instructedctl subscriptions release <name>             # free a stuck claim
+instructedctl subscriptions delete <name> --yes        # alias: rm; cascades work items
+instructedctl subscriptions claim <name> --worker-id w --lease-seconds 60
+instructedctl subscriptions rebuild <name> --yes       # reset cursor to origin
 ```
+
+Lifecycle notes:
+
+- `release` auto-detects the current holder; pass `--worker-id` to release on behalf of
+  a specific worker.
+- `delete` and `rebuild` are destructive and require `--yes`. `rebuild` is the
+  framework-side half of a projection rebuild (TODO #7): it forgets the subscription's
+  cursor and work items so a fresh worker re-routes from origin. Stop the worker first,
+  and wipe the read store separately — the tool does not know where it lives.
+- `claim` is a diagnostic; all verbs take `--stream <uuid>` (default `$all`).
 
 ## Running
 
@@ -158,15 +172,15 @@ user/password `postgres`).
 Derived from TODO #7 — "everything a production operator currently does by opening
 psql." Now grouped noun-first. ✅ = landed.
 
-| Group           | Verbs                                                               |
-| --------------- | ------------------------------------------------------------------- |
-| `schema`        | `status` ✅, `version` ✅, `install` ✅, `migrate`                  |
-| `streams`       | `list`, `get <uuid>`, `read <uuid> [--from --count]`                |
-| `all`           | `read [--from --count]` (the global `$all` stream)                  |
-| `subscriptions` | `list` ✅, `get <name>` ✅, `release`, `delete`, `claim`, `rebuild` |
-| `work-items`    | `list [--subscription]`, `skip <key> --audit <note>`                |
-| `snapshots`     | `get <source_uuid>`                                                 |
-| `health`        | (bare) `$all` contiguity, orphans, expired-lease zombies            |
+| Group           | Verbs                                                                           |
+| --------------- | ------------------------------------------------------------------------------- |
+| `schema`        | `status` ✅, `version` ✅, `install` ✅, `migrate`                              |
+| `streams`       | `list`, `get <uuid>`, `read <uuid> [--from --count]`                            |
+| `all`           | `read [--from --count]` (the global `$all` stream)                              |
+| `subscriptions` | `list` ✅, `get <name>` ✅, `release` ✅, `delete` ✅, `claim` ✅, `rebuild` ✅ |
+| `work-items`    | `list [--subscription]`, `skip <key> --audit <note>`                            |
+| `snapshots`     | `get <source_uuid>`                                                             |
+| `health`        | (bare) `$all` contiguity, orphans, expired-lease zombies                        |
 
 Absurd commands with no instructed analogue (queue/task/cron concepts): `create-queue`,
 `drop-queue`, `queue-policy`, `cron`, `cleanup`, `spawn-task`, `retry-task`,
