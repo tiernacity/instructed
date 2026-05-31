@@ -319,7 +319,7 @@ event = read_all(claim.event_number, 1)
 
 -- State load:
 snap = read_snapshot("{pm_name}-{partition_key}")   -- IS010 = miss
-if snap exists AND snap.metadata.snapshot_module_version == def.version:
+if snap exists AND snap.metadata["$instructed.snapshot_module_version"] == def.version:
   state = snap.data
 else:
   -- Rebuild via apply, from initialState():
@@ -346,7 +346,7 @@ else:
                         event.event_number,
                         snapshot = { ..., data: staged_state,
                                      source_version: event.event_number,
-                                     metadata: { snapshot_module_version: def.version } })
+                                     metadata: { "$instructed.snapshot_module_version": def.version } })
 ```
 
 Under [D-0026](decisions.md#d-0026) the same `Client` is used

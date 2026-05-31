@@ -21,6 +21,7 @@ import {
   RetryBudgetExhausted,
   runCommand,
   runCommandWithSnapshots,
+  SNAPSHOT_MODULE_VERSION_KEY,
   WrongExpectedVersion,
 } from '../src/index.ts'
 import type { AggregateDefinition, DomainEvent } from '../src/index.ts'
@@ -370,7 +371,7 @@ void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => 
     // First command writes a snapshot stamped with "v1".
     await runCommandWithSnapshots(client, def, s, { kind: 'add', n: 3 })
     const snap = await client.readSnapshot<CounterState>(s)
-    assert.deepEqual((snap.metadata as Record<string, unknown>)['snapshot_module_version'], 'v1')
+    assert.deepEqual((snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY], 'v1')
 
     // Second command with the same version: apply runs only for the
     // newly-appended event (1 call), not for the loaded events from
@@ -400,7 +401,7 @@ void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => 
     await runCommandWithSnapshots(client, v1, s, { kind: 'add', n: 7 })
     // Sanity: snapshot exists with v1 stamped.
     const v1Snap = await client.readSnapshot<CounterState>(s)
-    assert.equal((v1Snap.metadata as Record<string, unknown>)['snapshot_module_version'], 'v1')
+    assert.equal((v1Snap.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY], 'v1')
 
     // Phase 2: a NEW def with version "v2" loads. The v1 snapshot
     // is mismatched -> discarded; the load pages all events from
@@ -431,7 +432,7 @@ void describe('aggregate snapshot module versioning (SNAP-002, TODO #5)', () => 
     const final = await client.readSnapshot<CounterState>(s)
     assert.equal(final.data.value, 11)
     // And the snapshot is now stamped with v2.
-    assert.equal((final.metadata as Record<string, unknown>)['snapshot_module_version'], 'v2')
+    assert.equal((final.metadata as Record<string, unknown>)[SNAPSHOT_MODULE_VERSION_KEY], 'v2')
   })
 
   void test('strict: snapshot has version but def does not -> mismatch', async () => {

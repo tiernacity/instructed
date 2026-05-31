@@ -23,6 +23,42 @@ End-to-end example:
 cd examples/typescript/bank-account && docker compose up
 ```
 
+## Imports and reserved names
+
+A CQRS/ES library's core nouns — `Event`, `Command`, `Snapshot`,
+`Client`, `Logger` — are exactly the nouns a domain modeller wants
+to use. The SDK does **not** force you to give them up:
+
+- **You define your own events and commands as plain data.** The
+  SDK consumes them *structurally* (e.g. `RecordedEvent<E>`,
+  `AggregateDefinition<S, C, E>`), so you never import the SDK's
+  `Event`/`Command` to model a domain `Event` (a concert), a
+  `Command`, etc. See `examples/typescript/bank-account`.
+- **Recommended: namespace import**, so no SDK name lands in your
+  module's flat namespace:
+
+  ```ts
+  import * as instructed from "instructed-sdk"
+
+  const app = new instructed.Instructed({ db: pool })
+  type MyDef = instructed.AggregateDefinition<S, C, E>
+  ```
+
+  Use named imports for the handful of symbols you reference a lot
+  (`Instructed`, `commandRouter`, `onlyTypes`) if you prefer — just
+  alias anything that clashes with your domain vocabulary.
+
+**Reserved names.** The library namespaces everything it reserves
+so application code can't collide with it:
+
+- **Streams:** the global stream is `$all` (the `$` sigil marks it
+  reserved); you choose every other stream name.
+- **Storage:** the Postgres schema is `instructed`; errors are
+  SQLSTATE class `IS`.
+- **Metadata:** library-reserved metadata keys are prefixed
+  `$instructed.` (e.g. `$instructed.snapshot_module_version`,
+  SNAP-002). Any metadata key *without* that prefix is yours.
+
 ## Layer structure
 
 Per [D-0027](../../docs/decisions.md#d-0027) the SDK ships as one

@@ -408,8 +408,9 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
   and folding via the aggregate's applier.
 - **AGG-002** — The event applier MUST NOT fail. Once stored,
   an event is replayed without veto.
-- **AGG-003** — If a snapshot's `metadata.snapshot_module_version`
-  does not match the configured value, the snapshot MUST be
+- **AGG-003** — If a snapshot's
+  `metadata."$instructed.snapshot_module_version"` does not match
+  the configured value, the snapshot MUST be
   ignored and the aggregate MUST hydrate from the full event
   stream. The v1 TypeScript SDK enforces this in
   `loadAggregate` (`aggregate.ts`): the metadata's
@@ -440,8 +441,11 @@ own idiomatic shape (see [`architecture.md`](architecture.md)
 
 - **SNAP-001** — Snapshots are taken according to a policy
   attached to each aggregate (`snapshot_every: N`).
-- **SNAP-002** — `metadata.snapshot_module_version` is the
-  aggregate-module schema marker. Mismatch on read MUST cause
+- **SNAP-002** — `metadata."$instructed.snapshot_module_version"`
+  is the aggregate-module schema marker. The `$instructed.` prefix
+  namespaces all library-reserved metadata keys (mirroring the
+  `$all` reserved-stream sigil) so application metadata can never
+  collide. Mismatch on read MUST cause
   the snapshot to be ignored and the source to be rebuilt from
   events. The v1 TS SDK enforces this for **both** aggregate
   snapshots (`loadAggregate` in `aggregate.ts`) and
@@ -492,8 +496,8 @@ what to do with it.
 - **PM-002** — The `apply` callback is
   `(state, event) -> state`. It is a pure fold; the framework
   invokes it during PM-state rebuild (when the snapshot is
-  missing, or carries a `snapshot_module_version` that no
-  longer matches `def.snapshotModuleVersion`) and on the
+  missing, or carries a `$instructed.snapshot_module_version` that
+  no longer matches `def.snapshotModuleVersion`) and on the
   claimed event before `handle`. It MUST NOT have side effects.
 - **PM-010** — The `handle` callback is
   `(staged_state, event) -> { commands?, complete? }`.

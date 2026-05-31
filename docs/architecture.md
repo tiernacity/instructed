@@ -246,7 +246,7 @@ A PM processing worker adds a state-load step before `handle`
 and a dispatch step after:
 
 1. Load state: read the partition's snapshot if its
-   `snapshot_module_version` matches; otherwise rebuild by
+   `$instructed.snapshot_module_version` matches; otherwise rebuild by
    folding every prior `done` work-item's event through
    `apply` from `initialState()`.
 2. `apply(state, event)` -> staged_state.
@@ -494,8 +494,9 @@ For each, the application is on its own:
   PUTs, etc.).
 - **Snapshot module versioning** — the store has a `metadata`
   column on snapshots; an application that evolves its
-  aggregate state schema should stamp a `snapshot_module_version`
-  into metadata and reject mismatched snapshots on load. The
+  aggregate state schema should stamp a
+  `$instructed.snapshot_module_version` into metadata and reject
+  mismatched snapshots on load. The
   v1 TypeScript SDK does not do this automatically.
 - **Throughput scaling for a single subscription** — single
   active worker per cursor. Throughput scales by splitting into

@@ -581,7 +581,7 @@ commit to it (TODO.md is the stably-numbered canonical backlog).
 
 | # | Improvement | Why first | Lesson | Priority |
 |---|---|---|---|---|
-| P1 | **SDK type/module namespacing** — *audited (TODO #17)*: recommend namespace import (non-breaking; the primary fix) + namespace the reserved metadata key `snapshot_module_version` (cross-port contract work); no sweeping renames. | Audit found structural typing already insulates the app from the worst (`Event`/`Command`) collision; the metadata key is the genuine residual. Do the doc guidance + metadata-key rename before the next SDK port. | L-0001 | **Preferred-first** (light; promoted to `TODO.md` #17) |
+| P1 | **SDK type/module namespacing** — ✅ **done (D-0028)**: namespace-import guidance in README + `concepts.md`; reserved key namespaced to `$instructed.snapshot_module_version` across SDK + contract docs + porting checklist; no sweeping renames. | Audit found structural typing already insulates the app from the worst (`Event`/`Command`) collision; the metadata key was the genuine residual. Suites green. | L-0001 | ~~Preferred-first~~ **Done** |
 | P2 | **Non-destructive, idempotent `instructedctl` init** — an "ensure installed; no-op if present; never destructive" mode (today `install` errors if present and `--force` drops all data). | Needed for repeatable CI/deploy provisioning of Neon. Distinct from — and far smaller than — full `schema migrate`. | L-0002 | **Preferred-first** (blocker for the deploy automation lane, task 6) |
 
 > Full forward-only `schema migrate` (L-0002) is the larger
@@ -590,8 +590,8 @@ commit to it (TODO.md is the stably-numbered canonical backlog).
 
 ## 10. Proposed task list (draft — sequence once scope slice is locked)
 
-0. **Prerequisites first (§9b):** P1 SDK namespacing, P2 idempotent
-   `instructedctl` init. Promote each to `TODO.md` as we start it.
+0. **Prerequisites (§9b):** ~~P1 SDK namespacing~~ ✅ done (D-0028);
+   P2 idempotent `instructedctl` init still to do.
 1. Lock domain + model (this doc → "Decisions"). *(domain + MVP
    slice locked, §9.)*
 2. Write the domain core (aggregates, commands, events, PMs,

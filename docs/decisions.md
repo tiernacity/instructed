@@ -688,3 +688,47 @@ re-export grouping stays.
   names `instructed-sdk/core` explicitly as the inventory of
   what a new-language SDK reproduces. Each language SDK chooses
   its own package shape; the TS SDK's choice does not propagate.
+
+---
+
+## D-0028 — Reserved metadata keys are namespaced under `$instructed.`
+
+Library-reserved keys inside the snapshot `metadata` JSONB are
+prefixed `$instructed.`. The first (and, in v1, only) such key is
+`$instructed.snapshot_module_version` (SNAP-002) — previously the
+bare `snapshot_module_version`.
+
+**Why.** The store treats `metadata` as opaque and the SDK owns
+only its own keys, but `SnapshotInput.metadata` is application-
+facing and the key string is part of the cross-port contract
+(SNAP-002 / the porting checklist). A bare key risks a silent
+collision with an application that writes its own
+`snapshot_module_version`, and an SDK port that picked the same
+bare name would have no signal that it was treading on reserved
+ground. Prefixing makes "reserved" lexically obvious and mirrors
+the namespacing already used elsewhere at the contract boundary:
+the `$all` reserved-stream sigil, the `instructed` Postgres
+schema, and the `IS` SQLSTATE class. Application metadata is now
+*any key without the `$instructed.` prefix* — a rule a porter and
+an app developer can both apply without a lookup table.
+
+**Why now.** Pre-release, one SDK. Changing the key is a one-line
+constant edit plus docs; deferring it past a second SDK port or a
+release would turn a free change into a coordinated migration.
+Snapshots are advisory (always rebuildable from the log), so even
+existing snapshots written with the old key simply fall back to
+full replay — no data migration.
+
+**Implications.**
+
+- SDK: `SNAPSHOT_MODULE_VERSION_KEY` value becomes
+  `"$instructed.snapshot_module_version"`. The constant *name* is
+  unchanged; callers that reference the constant (incl. tests) are
+  unaffected.
+- Contract docs updated: SNAP-002 / AGG-003 / PM-002 in
+  `invariants.md`, `sql-contract.md`, `architecture.md`, the
+  `sql/instructed.sql` header comments, and the porting checklist
+  (which now requires the `$instructed.` prefix for *every* future
+  reserved metadata key, not just this one).
+- No schema or stored-procedure change — the store never
+  interpreted the key.

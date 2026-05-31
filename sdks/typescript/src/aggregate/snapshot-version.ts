@@ -3,7 +3,7 @@
  * (SNAP-002).
  *
  * Aggregates and process managers both use this key when stamping
- * a `snapshot_module_version` string into a snapshot's metadata on
+ * a module-version string into a snapshot's metadata on
  * write, and when comparing on read. A mismatch (or "version
  * present on one side and absent on the other") triggers a fall
  * back to full replay: for aggregates, page from version 0; for
@@ -12,12 +12,16 @@
  * The key string is **part of the porting checklist** (see
  * `sdks/porting-checklist.md` §4.2). A port that disagrees on
  * the key string can't read snapshots written by another port;
- * the TypeScript value `"snapshot_module_version"` is the
- * canonical choice and every conformant port reproduces it.
+ * the TypeScript value `"$instructed.snapshot_module_version"` is
+ * the canonical choice and every conformant port reproduces it.
+ *
+ * The `$instructed.` prefix namespaces all library-reserved
+ * metadata keys (mirroring the `$all` reserved-stream sigil), so
+ * application metadata can never collide with an SDK-reserved key.
  *
  * Lives in its own file so both `aggregate.ts` (L2) and
  * `pm-substrate.ts` (L2) import from one place. Re-exported from
  * `instructed-sdk/core` (the porting-checklist surface).
  */
 
-export const SNAPSHOT_MODULE_VERSION_KEY = 'snapshot_module_version'
+export const SNAPSHOT_MODULE_VERSION_KEY = '$instructed.snapshot_module_version'

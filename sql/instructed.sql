@@ -1097,9 +1097,10 @@ $$;
 --                       module name); echoed on read. SNAP-005.
 --   p_source_version  bigint, the version this snapshot represents. SNAP-004.
 --   p_data            jsonb, the serialised state (INV-META-011).
---   p_metadata        jsonb, may be null. The SDK reserves the metadata key
---                       `snapshot_module_version` per SNAP-002, but the
---                       store assigns no meaning.
+--   p_metadata        jsonb, may be null. The SDK reserves metadata keys under
+--                       the `$instructed.` prefix (e.g.
+--                       `$instructed.snapshot_module_version` per SNAP-002),
+--                       but the store assigns no meaning.
 --   p_options         jsonb, default '{}'. Recognised keys: none in v1.
 --
 -- Output: void.
@@ -2243,7 +2244,8 @@ $$;
 --                               higher-layer tests).
 --   p_snapshot_data           jsonb, the staged PM state after apply.
 --   p_snapshot_metadata       jsonb, may be null. The SDK encodes
---                               `snapshot_module_version` here per SNAP-002.
+--                               `$instructed.snapshot_module_version` here
+--                               per SNAP-002.
 --   p_options                 jsonb, default '{}'. Recognised keys: none in v1.
 --   (ML-0013 would add a partition key; v1 has none.)
 --
@@ -2822,8 +2824,9 @@ $$;
 --
 -- Cold-path read for PM state rebuild (PM-C / SUB-A slice 7). When a PM
 -- processing worker claims a work item and the partition's snapshot is
--- missing (IS010) or carries a `snapshot_module_version` (in metadata)
--- that no longer matches the SDK's compiled-in version (SNAP-002), the
+-- missing (IS010) or carries a `$instructed.snapshot_module_version`
+-- (in metadata) that no longer matches the SDK's compiled-in version
+-- (SNAP-002), the
 -- worker rebuilds state by folding every previously-`done` event for
 -- the partition through the PM's `apply` callback. This function
 -- returns those events, ordered by event_number, in the

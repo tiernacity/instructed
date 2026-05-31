@@ -305,7 +305,12 @@ A typical application has:
    and exposes `dispatch` for commands and `startWorker` to run
    the projections and process managers.
 
-The shape, in TypeScript:
+The shape, in TypeScript (named imports shown for brevity; a
+namespace import — `import * as instructed from "instructed-sdk"`
+— is recommended so SDK names like `Event`/`Command` never clash
+with your domain vocabulary. The SDK consumes your events and
+commands structurally, so you define them as plain data and never
+import the SDK's `Event`/`Command` to model your own):
 
 ```ts
 import { Instructed } from "instructed-sdk";

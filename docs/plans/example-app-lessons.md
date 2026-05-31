@@ -79,7 +79,8 @@ both entry points (`index.ts` bare, `core.ts`). Findings, which
   **cross-port contract** (SNAP-002). Namespace-import does *not*
   fix this; it's a data key, not a type name.
 
-**Recommendation (concrete; promoted to `TODO.md` #17).**
+**Resolution (implemented 2026-05-31, see `docs/decisions.md`
+D-0028).** Did 1, 2, and 4 below; 3 was a deliberate no-op.
 1. **Blessed pattern: namespace import.** Document `import * as es
    from "instructed-sdk"` (→ `es.Event`, `es.Client`, …) as the
    recommended shape so *no* SDK name enters the app's flat
@@ -100,10 +101,14 @@ both entry points (`index.ts` bare, `core.ts`). Findings, which
    keep core type names out of the app's flat namespace (namespace
    import) and prefix reserved metadata keys.
 
-**Status.** Audited; concrete proposal promoted to `TODO.md` #17.
-The lighter-than-first-thought outcome is itself a finding — the
-SDK's structural-typing design is doing more namespacing work than
-the raw export list suggests.
+**Status.** **Resolved (D-0028).** Namespace-import guidance landed
+in the SDK README + `concepts.md`; the reserved key is now
+`$instructed.snapshot_module_version` across SDK + invariants +
+sql-contract + architecture + `sql/instructed.sql` + porting
+checklist; SDK + conformance suites green (162 + snapshot). The
+lighter-than-first-thought outcome is itself a finding — the SDK's
+structural-typing design does more namespacing work than the raw
+export list suggests.
 
 ---
 

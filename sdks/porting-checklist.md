@@ -255,8 +255,11 @@ definition is idiomatic.
 **Contract.** Each definition carries an optional version
 string (TS: `def.snapshotModuleVersion`). On snapshot write,
 the SDK stamps the string into the snapshot's metadata under
-the SDK-reserved key `"snapshot_module_version"` (TS:
-`SNAPSHOT_MODULE_VERSION_KEY` in `snapshot-version.ts`). On
+the SDK-reserved key `"$instructed.snapshot_module_version"` (TS:
+`SNAPSHOT_MODULE_VERSION_KEY` in `snapshot-version.ts`). The
+`$instructed.` prefix namespaces every library-reserved metadata
+key (mirroring the `$all` reserved-stream sigil) so application
+metadata can never collide with an SDK-reserved key. On
 snapshot read, the SDK compares the metadata value strictly
 to the definition's value; on mismatch, the snapshot's `data`
 is discarded and the source is rebuilt from origin
@@ -264,10 +267,11 @@ is discarded and the source is rebuilt from origin
 over `listPmRebuildEvents`).
 
 **The key string is part of the porting checklist.** Every
-conformant port MUST use `"snapshot_module_version"` as the
-metadata key. A port that picks a different string can't read
-snapshots written by another port -- breaks the cross-SDK
-story.
+conformant port MUST use `"$instructed.snapshot_module_version"`
+as the metadata key, and MUST namespace any other reserved
+metadata key under the same `$instructed.` prefix. A port that
+picks a different string can't read snapshots written by another
+port -- breaks the cross-SDK story.
 
 **Strict comparison.** "Version on one side, absent on the
 other" counts as mismatch. This prevents accidental adoption:

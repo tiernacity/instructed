@@ -30,8 +30,9 @@
  *   1. Claim a work item via the kind-agnostic processing-worker
  *      loop.
  *   2. Load PM-instance state for the claimed event's partition:
- *      - If a snapshot exists AND its `snapshot_module_version`
- *        (carried in metadata, the SDK-reserved key) matches
+ *      - If a snapshot exists AND its module-version tag
+ *        (carried in metadata under the SDK-reserved key
+ *        `$instructed.snapshot_module_version`) matches
  *        `def.snapshotModuleVersion` (or both are absent), use
  *        the snapshot's `data` as state.
  *      - Otherwise rebuild: fold every previously-`done` event
@@ -113,8 +114,8 @@ export type PmSubstrateHandlerContext = ProcessingHandlerContext
  *   - `snapshotModuleVersion`: optional SDK-managed string used
  *     to detect when application-level state shape has changed
  *     and a rebuild is required (SNAP-002 / PM-C). Stored in the
- *     snapshot's `metadata.snapshot_module_version` key on
- *     write; compared on read.
+ *     snapshot's `metadata."$instructed.snapshot_module_version"`
+ *     key on write; compared on read.
  */
 export interface PmSubstrateDefinition<S, E extends Event = Event, PolicyState = undefined> {
   /** PM type — doubles as the subscription name and the snapshot

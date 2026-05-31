@@ -590,8 +590,8 @@ export class Client {
    * `event_number < exclusiveUpperBound`, in event-number order, in the
    * `read_all`-compatible recorded-event shape. The SDK uses this when
    * a PM partition's snapshot is missing (IS010) or carries a
-   * `snapshot_module_version` (in metadata) that no longer matches the
-   * SDK's compiled-in version, to fold prior events through the PM's
+   * `$instructed.snapshot_module_version` (in metadata) that no longer
+   * matches the SDK's compiled-in version, to fold prior events through the PM's
    * `apply` callback from `initialState()`.
    *
    * Raises `SubscriptionNotFound` (IS020) if the subscription does not

@@ -138,8 +138,8 @@ export interface PmHandlerContext extends ProcessingHandlerContext {
  *   - `snapshotModuleVersion`: optional SDK-managed string used
  *     to detect when application-level state shape has changed
  *     and a rebuild is required (SNAP-002 / PM-C). Stored in the
- *     snapshot's `metadata.snapshot_module_version` key on
- *     write; compared on read.
+ *     snapshot's `metadata."$instructed.snapshot_module_version"`
+ *     key on write; compared on read.
  */
 export interface PmDefinition<S, E extends Event = Event, PolicyState = undefined> {
   /** PM type — doubles as the subscription name and the snapshot
