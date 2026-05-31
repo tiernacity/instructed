@@ -581,7 +581,7 @@ commit to it (TODO.md is the stably-numbered canonical backlog).
 
 | # | Improvement | Why first | Lesson | Priority |
 |---|---|---|---|---|
-| P1 | **SDK type/module namespacing** — keep core type names (`Event`, `Command`, …) out of the app's flat namespace (recommend/enable namespace import) and prefix the reserved metadata key. | The example is the validation vehicle; if we write it with import aliases we bake in the workaround and lose the motivation. Cheap, high-leverage, touches the porting checklist. | L-0001 | **Preferred-first** (soft blocker for domain code) |
+| P1 | **SDK type/module namespacing** — *audited (TODO #17)*: recommend namespace import (non-breaking; the primary fix) + namespace the reserved metadata key `snapshot_module_version` (cross-port contract work); no sweeping renames. | Audit found structural typing already insulates the app from the worst (`Event`/`Command`) collision; the metadata key is the genuine residual. Do the doc guidance + metadata-key rename before the next SDK port. | L-0001 | **Preferred-first** (light; promoted to `TODO.md` #17) |
 | P2 | **Non-destructive, idempotent `instructedctl` init** — an "ensure installed; no-op if present; never destructive" mode (today `install` errors if present and `--force` drops all data). | Needed for repeatable CI/deploy provisioning of Neon. Distinct from — and far smaller than — full `schema migrate`. | L-0002 | **Preferred-first** (blocker for the deploy automation lane, task 6) |
 
 > Full forward-only `schema migrate` (L-0002) is the larger

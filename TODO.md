@@ -5,6 +5,57 @@ pick them up one at a time.
 
 ---
 
+## 17. SDK / contract namespacing of reserved names
+
+**Why this exists.** Surfaced while planning the complex example app
+(see `docs/plans/example-app-lessons.md` **L-0001**). A CQRS/ES
+library's core nouns (event, command, snapshot, client, logger) are
+exactly the nouns a domain modeller wants to use, so the library
+risks constraining the application's vocabulary. The trigger was
+modelling a concert *Event* (renamed `Show` to dodge the clash with
+the SDK's `Event`).
+
+**Audit result (2026-05-31).** The store layer is well namespaced
+(`$all`, `instructed` schema, `IS` SQLSTATE class). The TS SDK is
+*better than feared*: app code defines its own events/commands as
+plain data and the SDK consumes them **structurally** (`E extends
+Event`), so the `bank-account` example never imports bare `Event` /
+`Command`. The names app code does import are well-suffixed
+(`*Definition`, `RoutingFn`, `RecordedEvent`, …). Residual risks:
+value/type exports an app might shadow (`Client`, `Logger`,
+`Snapshot`, `DomainEvent`, `expected`), and — the one genuine
+*data*-level issue — the unprefixed reserved snapshot-metadata key
+`snapshot_module_version` (SNAP-002), which is part of the
+cross-port contract.
+
+**What to do.**
+
+1. **Document namespace import as the blessed pattern** — `import *
+   as es from "instructed-sdk"` → `es.Event`, `es.Client`. Keeps
+   every SDK name out of the application's flat namespace.
+   Non-breaking; the primary fix. (README / `docs/concepts.md`.)
+2. **Namespace the reserved metadata key.** Change
+   `snapshot_module_version` to a reserved-prefixed key (e.g.
+   `$instructed.snapshot_module_version`). This is the substantive
+   piece: it touches the **cross-port contract** — update the
+   SNAP-002 porting-checklist entry, the conformance harness, the
+   SDK constant, and add a `docs/decisions.md` record. Coordinate
+   before a second SDK port hardens the current key string.
+3. **No sweeping type renames.** The audit doesn't justify churning
+   the public type surface. Revisit only if a concrete collision
+   bites (candidates: `Client`, `Logger`).
+4. **Document the namespacing posture for porters:** store layer
+   uses `$` / `instructed` schema / `IS` SQLSTATE; SDKs keep core
+   type names out of the app's flat namespace and prefix reserved
+   metadata keys.
+
+**Output.** A docs change (namespace-import guidance + porter
+posture) plus the coordinated metadata-key rename across SQL spec /
+porting checklist / conformance / SDK / decision record. Tracked as
+prerequisite **P1** for the complex example app.
+
+---
+
 ## 4. OCC enforcement in SQL — review the strength of what we enforce
 
 **Why this exists.** Conversation surfaced the question: optimistic

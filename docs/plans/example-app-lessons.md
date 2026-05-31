@@ -46,39 +46,64 @@ own domain.
   the same name, and it's part of the cross-port contract, so any
   fix must be coordinated across SDKs.
 
-**Recommendation (to decide, not yet committed).**
-- **Audit the public type surface** for names that double as common
-  domain nouns: `Event`, `Command`, `RecordedEvent`, `Aggregate`,
-  `Projection`, `ProcessManager`, `Subscription`, `Snapshot`.
-- **Prefer names the application is unlikely to want.** Options,
-  roughly in increasing intrusiveness:
-  1. Document the alias pattern and leave names as-is (cheapest;
-     doesn't fix the root issue).
-  2. Rename the collision-prone exports to qualified names
-     (`StoredEvent`/`RecordedEvent` already exists; consider making
-     `RecordedEvent` the canonical one and dropping/renaming the
-     bare `Event`; similarly an aggregate-`Command` could be a more
-     specific noun).
-  3. Encourage namespace import in docs (`import * as es from
-     "instructed-sdk"` → `es.Event`), so the bare names never enter
-     the application's flat namespace. This is idiomatic and keeps
-     the SDK names short *and* unambiguous at the use site.
-- **Namespace the reserved metadata key.** Give it a reserved
-  prefix that an application would never choose, e.g.
-  `instructed.snapshot_module_version` or `__instructed_snapshot_
-  module_version`. Coordinate the change across the porting
-  checklist (SNAP-002) since the key string is part of the
-  cross-port contract.
-- **Document the namespacing posture explicitly** for SDK porters:
-  "store-layer reserved names use the `$` sigil / `instructed`
-  schema / `IS` SQLSTATE class; language SDKs should keep core type
-  names out of the application's flat namespace (namespace import)
-  and prefix any reserved metadata keys."
+**Audit of the public type surface (2026-05-31, P1).** Enumerated
+both entry points (`index.ts` bare, `core.ts`). Findings, which
+*narrow* the original worry:
 
-**Status.** Open. Captured here as the first lesson. Decide the
-posture (likely: recommend namespace-import in docs *and* namespace
-the reserved metadata key) before the second SDK port hardens the
-type names. Cross-reference from `TODO.md` if/when promoted.
+- **Structural typing already insulates the app from the worst
+  collision.** Application code defines its own events/commands as
+  plain data (`export const X = 'X'; export type X = { type: typeof
+  X; data: ... }`) and the SDK consumes them *structurally* via
+  generic bounds (`E extends Event`, `RecordedEvent<E>`,
+  `RoutingFn<E>`, `AggregateDefinition<S,C,E>`). The `bank-account`
+  example **never imports bare `Event` or `Command`** — it models
+  freely and the SDK's `Event`/`Command` stay internal constraints.
+  So a domain `Show`/`Event` does *not* require aliasing the SDK
+  type. The headline fear is largely already handled by design.
+- **Names app code *does* import are well-suffixed / low-collision:**
+  `AggregateDefinition`, `ProjectionDefinition`,
+  `ProcessManagerDefinition`, `RoutingFn`, `RecordedEvent`,
+  `DispatchedCommand`, `CommandRouter`, `commandRouter`, `onlyTypes`,
+  `Instructed`. Good naming already.
+- **Residual real risks** (value/type exports an app might import
+  and shadow): `Client` (≈ "customer/client" domain noun), `Logger`
+  (apps often have one), `Snapshot`, `DomainEvent`, the short value
+  `expected`. Plus the bare `Event`/`Command` if someone *does*
+  import them or uses a wildcard import.
+- **The reserved metadata key is a genuine, if latent,
+  *data*-level collision.** `SNAPSHOT_MODULE_VERSION_KEY =
+  'snapshot_module_version'` is unprefixed. The high-level path
+  *constructs* snapshot metadata itself (no merge with app
+  metadata), so it's not an active bug today — but `SnapshotInput.
+  metadata` is app-facing (`unknown`), and the key is part of the
+  **cross-port contract** (SNAP-002). Namespace-import does *not*
+  fix this; it's a data key, not a type name.
+
+**Recommendation (concrete; promoted to `TODO.md` #17).**
+1. **Blessed pattern: namespace import.** Document `import * as es
+   from "instructed-sdk"` (→ `es.Event`, `es.Client`, …) as the
+   recommended shape so *no* SDK name enters the app's flat
+   namespace. Non-breaking, idiomatic, fully resolves "the SDK
+   constrains my vocabulary." Primary fix.
+2. **Namespace the reserved metadata key** (`snapshot_module_version`
+   → a reserved-prefixed key, e.g. `$instructed.snapshot_module_
+   version`). This is the one genuine data-level collision and is
+   *contract* work: SQL/spec note, porting-checklist (SNAP-002),
+   conformance, and a `docs/decisions.md` entry. The substantive
+   piece of P1.
+3. **No sweeping renames** of the type surface — the audit shows app
+   code doesn't import the worst names. Revisit only if a concrete
+   collision bites during the example build (candidates if so:
+   `Client`, `Logger`).
+4. **Document the namespacing posture for porters:** store layer
+   uses `$` / `instructed` schema / `IS` SQLSTATE; language SDKs
+   keep core type names out of the app's flat namespace (namespace
+   import) and prefix reserved metadata keys.
+
+**Status.** Audited; concrete proposal promoted to `TODO.md` #17.
+The lighter-than-first-thought outcome is itself a finding — the
+SDK's structural-typing design is doing more namespacing work than
+the raw export list suggests.
 
 ---
 
