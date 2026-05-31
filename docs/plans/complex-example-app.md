@@ -1,8 +1,87 @@
 # Plan: A more complex example application
 
-> **Status:** living document — requirements gathering / domain exploration.
-> Nothing here is committed. We are deciding (1) the domain, (2) the
-> technology stack, (3) the deployment scenario, then producing a task list.
+> **Status (2026-05-31):** design **locked**, prerequisites **done**,
+> ready to build the domain core. All the open questions in §9 are
+> resolved; the decisions log (§11) is the authoritative summary.
+> Both prerequisite fixes are landed: **P1** SDK/contract namespacing
+> (D-0028) and **P2** idempotent `instructedctl schema ensure`. The
+> next step is §10 task 2 — the domain-core library package. Read §0
+> first.
+
+## 0. Start here (session kickoff)
+
+A fresh session has no conversation history — this section is the
+orientation. Read it, then §5 (model), §5.3 (expiry + seat modes),
+§9 (resolved questions), §11 (decisions).
+
+**What we're building.** A medium-complexity **event-ticketing**
+example for the `instructed` CQRS/ES SDK, centred on a live
+"on-sale" to stress hot-aggregate OCC, with derived/lease hold
+expiry and a checkout saga with compensation. Goal: exercise the
+SDK on a hard domain, find modelling pain-points, then load-test
+and deploy it. Full motivation in §1.
+
+**Where things live (repo-relative):**
+
+- `sdks/typescript/` — the SDK (`instructed-sdk`, bare entry +
+  `/core`). The contract it drives is `sql/instructed.sql`.
+- `examples/typescript/bank-account/` — **the template to mirror**
+  for layout, build (`node --conditions=development scripts/*.ts`),
+  and the aggregate/PM/projection idioms. Copy its shape.
+- `examples/typescript/ticketing/` — **the new app** (to create).
+- `docs/concepts.md` — how to write an `instructed` app (read this).
+- `docker-compose.yaml` (repo root) — `docker compose up -d` starts
+  the dev Postgres on `localhost:5432` (postgres/postgres).
+- `tools/instructedctl/` — Deno admin CLI. Provision a database
+  with `instructedctl schema ensure` (idempotent).
+- `docs/plans/example-app-lessons.md` — **the lessons log. Append
+  to it** every time the SDK/contract fights the domain (format:
+  Observation → Impact → Recommendation → Status). This is a primary
+  deliverable, not a side note.
+
+**Conventions a fresh agent MUST follow:**
+
+- **Aggregates/PMs are pure** — no I/O, no clock reads, no UUID gen
+  in handler bodies; OCC may re-run a handler. Projection/PM
+  handlers must be **idempotent** (at-least-once delivery).
+- **Namespace import** the SDK (`import * as instructed from
+  "instructed-sdk"`); model domain nouns freely (e.g. `Show`).
+  Reserved metadata keys are prefixed `$instructed.` (D-0028) —
+  never write app metadata under that prefix.
+- **Expiry is a derived fact, not an action** (§5.3): stamp
+  `expiresAt` onto the hold event at the edge, carry decision-time
+  `now` on the command, derive "expired" in the pure core. No
+  scheduler, no sweep, no `ReleaseHold`-on-timer.
+- **Seat-mode uniformity** (§5.3): all inventory representations
+  emit the same event family so `Order`/`Availability` don't branch
+  on mode; only the checkout saga branches once.
+- **Do NOT redo P1/P2** — they're done. **Do** keep the decisions
+  log and lessons log current as you build.
+
+**The first slice to build (MVP, §9.8).** Library-only package, no
+UI/deploy yet, runnable against the docker-compose Postgres, proven
+with a scripted on-sale (mirror `bank-account/scripts/`):
+
+1. Scaffold `examples/typescript/ticketing/` like `bank-account`
+   (package.json with `instructed-sdk` as a `file:` dep, tsconfig,
+   scripts dir, a `db` setup script that runs `schema ensure` or
+   loads the schema).
+2. **`Show`** aggregate (announce → on-sale → closed) and a
+   **counted `Section`** aggregate (the hot one: `capacity/held/
+   sold`; `HoldSeats`/`ReleaseHold`/`ConfirmSale` with derived
+   expiry). Build the counted mode first to exercise the hot OCC
+   path; add per-seat mode after.
+3. **`Order`** + simulated **`Payment`** aggregates.
+4. **`CheckoutSaga`** PM (hold → authorize → capture → confirm;
+   release-on-failure compensation).
+5. **`Availability`** projection (per-section, the read-your-writes
+   target) + a minimal order-status read model.
+6. A scripted on-sale that dispatches concurrent holds at one
+   section to demonstrate OCC retry, and a consistency-wait read.
+
+Work in vertical slices; run the SDK's lint/format conventions the
+`bank-account` package uses (`oxlint`/`oxfmt`). Log pain-points as
+you go.
 
 ## 1. Why we're doing this
 
