@@ -13,8 +13,9 @@ executable.
 
 A reusable **core** (`src/core`) and a thin [Cliffy](https://cliffy.io)-based **CLI**
 (`src/cli`). All read/inspect groups are landed — `schema`, `streams`, `all`,
-`subscriptions` (incl. lifecycle), `work-items`, `snapshots`, and `health`. Remaining:
-`schema migrate` and the `work-items skip` escape hatch (see below).
+`subscriptions` (incl. lifecycle), `work-items`, `snapshots`, and `health`. Schema
+lifecycle covers `status`, `version`, `install` (+ `--force`), and the idempotent
+`ensure`. Remaining: `schema migrate` and the `work-items skip` escape hatch (see below).
 
 ## Architecture
 
@@ -60,6 +61,7 @@ instructedctl schema                 # default: status
 instructedctl schema status
 instructedctl schema version
 instructedctl schema install [--force]
+instructedctl schema ensure          # idempotent install (deploy/CI-safe)
 
 instructedctl subscriptions          # default: list   (alias: subs)
 instructedctl subscriptions list     # alias: ls
@@ -131,13 +133,26 @@ export INSTRUCTED_DATABASE_URL="postgresql://user:pass@localhost:5432/mydb"
 instructedctl schema status --json
 ```
 
-## `schema install`
+## `schema install` / `schema ensure`
 
-Applies the embedded `sql/instructed.sql` to the target database (analogous to
+`install` applies the embedded `sql/instructed.sql` to the target database (analogous to
 `absurdctl init`). The schema creates tables with bare `create table`, so it is meant
 for a clean database: if the `instructed` schema already exists, install refuses unless
 `--force` is given. `--force` drops the schema (`CASCADE`) and reinstalls, destroying
-all data.
+all data. The install runs in a single transaction, so a failure rolls back rather than
+leaving a half-installed schema.
+
+`ensure` is the **idempotent, non-destructive** variant — the one you put in a deploy or
+CI script and run on every boot:
+
+- schema **absent** → install it (transactional) → reports `installed`;
+- schema **present at this tool's version** → no-op → reports `already-current`;
+- schema **present at a different version** → refuses (exit 1) with a version-mismatch
+  error. `ensure` never modifies an existing schema, so this is the seam a future
+  `schema migrate` will fill; for now the escape hatch is `install --force` (destructive).
+
+The target version is read from the embedded SQL's `instructed.get_schema_version()`
+body (no second source of truth).
 
 The schema is **embedded into the binary** so install is self-contained. The mechanism:
 `src/core/instructed.sql` is a symlink to the repo-root `sql/instructed.sql` (single
@@ -174,7 +189,7 @@ psql." Now grouped noun-first. ✅ = landed.
 
 | Group           | Verbs                                                                           |
 | --------------- | ------------------------------------------------------------------------------- |
-| `schema`        | `status` ✅, `version` ✅, `install` ✅, `migrate`                              |
+| `schema`        | `status` ✅, `version` ✅, `install` ✅, `ensure` ✅, `migrate`                |
 | `streams`       | `list` ✅, `get <uuid>` ✅, `read <uuid> [--from --count]` ✅                   |
 | `all`           | `read [--from --count]` ✅ (the global `$all` stream)                           |
 | `subscriptions` | `list` ✅, `get <name>` ✅, `release` ✅, `delete` ✅, `claim` ✅, `rebuild` ✅ |

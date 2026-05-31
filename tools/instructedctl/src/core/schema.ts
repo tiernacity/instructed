@@ -1,8 +1,26 @@
 // Core: schema lifecycle and store status. Pure data-in/data-out over a `Db`.
 
 import type { Db } from "./db.ts";
-import type { InstallResult, StoreStatus } from "./types.ts";
+import type { EnsureResult, InstallResult, StoreStatus } from "./types.ts";
 import { SCHEMA_SQL } from "./schema-sql.ts";
+
+// The schema version the *embedded* SQL would install, extracted from the
+// body of `instructed.get_schema_version()` in SCHEMA_SQL. This is the
+// target `ensureSchema` compares a live store against. Parsing (rather than
+// hardcoding) keeps the tool and the SQL spec from drifting: the version
+// lives in exactly one place, the SQL file.
+export function bundledSchemaVersion(): string {
+  const m = SCHEMA_SQL.match(
+    /create\s+or\s+replace\s+function\s+instructed\.get_schema_version[\s\S]*?\bselect\s+'([^']*)'::text/i,
+  );
+  if (!m) {
+    throw new Error(
+      "could not determine the bundled schema version from the embedded SQL " +
+        "(instructed.get_schema_version body did not match the expected shape)",
+    );
+  }
+  return m[1];
+}
 
 // Whether the `instructed` schema exists in the target database.
 export async function schemaPresent(db: Db): Promise<boolean> {
@@ -70,15 +88,61 @@ export async function installSchema(
   if (existed && !options.force) {
     throw new SchemaAlreadyInstalled();
   }
-  if (existed && options.force) {
-    await db.exec("drop schema instructed cascade");
-  }
-
-  await db.exec(SCHEMA_SQL);
+  // Install atomically: drop-then-create (force) or create (fresh) runs in
+  // one transaction, so a failure leaves the database untouched rather than
+  // half-installed. This is what lets `ensureSchema` trust "schema present"
+  // to mean "schema fully installed".
+  await db.transaction(async (tx) => {
+    if (existed && options.force) {
+      await tx.exec("drop schema instructed cascade");
+    }
+    await tx.exec(SCHEMA_SQL);
+  });
 
   return {
     alreadyExisted: existed,
     action: existed ? "reinstalled" : "installed",
     schemaVersion: await getSchemaVersion(db),
   };
+}
+
+// Thrown by ensureSchema when a schema is already installed but at a version
+// other than the one this binary would install. ensureSchema never mutates an
+// existing schema, so this is the boundary where a future `schema migrate`
+// takes over.
+export class SchemaVersionMismatch extends Error {
+  constructor(
+    readonly running: string,
+    readonly bundled: string,
+  ) {
+    super(
+      `the installed instructed schema is version '${running}', but this ` +
+        `tool installs version '${bundled}'. ensureSchema will not modify an ` +
+        `existing schema; migration is not yet supported.`,
+    );
+    this.name = "SchemaVersionMismatch";
+  }
+}
+
+// Idempotent, non-destructive install. Safe to run on every deploy / CI run:
+//
+//   - schema absent           -> install it (transactional)   -> 'installed'
+//   - schema present, same ver -> no-op                        -> 'already-current'
+//   - schema present, diff ver -> throw SchemaVersionMismatch  (needs migrate)
+//
+// Unlike installSchema (which errors if present) and installSchema({ force })
+// (which drops all data), ensureSchema never errors on an up-to-date store and
+// never destroys data.
+export async function ensureSchema(db: Db): Promise<EnsureResult> {
+  if (!(await schemaPresent(db))) {
+    const result = await installSchema(db);
+    return { action: "installed", schemaVersion: result.schemaVersion };
+  }
+
+  const running = await getSchemaVersion(db);
+  const bundled = bundledSchemaVersion();
+  if (running !== bundled) {
+    throw new SchemaVersionMismatch(running, bundled);
+  }
+  return { action: "already-current", schemaVersion: running };
 }

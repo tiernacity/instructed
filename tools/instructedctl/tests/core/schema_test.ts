@@ -4,11 +4,14 @@
 
 import { assertEquals, assertRejects } from "@std/assert";
 import {
+  bundledSchemaVersion,
+  ensureSchema,
   getSchemaVersion,
   getStatus,
   installSchema,
   SchemaAlreadyInstalled,
   schemaPresent,
+  SchemaVersionMismatch,
 } from "../../src/core/index.ts";
 import {
   createEmptyDb,
@@ -108,6 +111,77 @@ Deno.test("installSchema --force: reinstalls and wipes data", async () => {
     const s = await withThrowawayDb(tw, getStatus);
     assertEquals(s.allHead, 0);
     assertEquals(s.events, 0);
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("bundledSchemaVersion: matches the installed version", async () => {
+  const tw = await createThrowawayDb();
+  try {
+    const running = await withThrowawayDb(tw, getSchemaVersion);
+    assertEquals(bundledSchemaVersion(), running);
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("ensureSchema: installs on a fresh database", async () => {
+  const tw = await createEmptyDb();
+  try {
+    assertEquals(await withThrowawayDb(tw, schemaPresent), false);
+    const result = await withThrowawayDb(tw, ensureSchema);
+    assertEquals(result.action, "installed");
+    assertEquals(result.schemaVersion, "main");
+    assertEquals(await withThrowawayDb(tw, schemaPresent), true);
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("ensureSchema: no-op when already present, preserving data", async () => {
+  const tw = await createThrowawayDb();
+  try {
+    await seedEvent(tw, "demo-1");
+    const result = await withThrowawayDb(tw, ensureSchema);
+    assertEquals(result.action, "already-current");
+    assertEquals(result.schemaVersion, "main");
+    // Data untouched.
+    const s = await withThrowawayDb(tw, getStatus);
+    assertEquals(s.events, 1);
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("ensureSchema: idempotent across repeated calls", async () => {
+  const tw = await createEmptyDb();
+  try {
+    const first = await withThrowawayDb(tw, ensureSchema);
+    assertEquals(first.action, "installed");
+    const second = await withThrowawayDb(tw, ensureSchema);
+    assertEquals(second.action, "already-current");
+    const third = await withThrowawayDb(tw, ensureSchema);
+    assertEquals(third.action, "already-current");
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("ensureSchema: refuses on a version mismatch", async () => {
+  const tw = await createThrowawayDb();
+  try {
+    // Simulate a store installed by a different tool version by rewriting the
+    // version function to report something else.
+    await withThrowawayDb(tw, (db) =>
+      db.query(
+        `create or replace function instructed.get_schema_version()
+           returns text language sql as $$ select 'some-other-version'::text $$`,
+      ));
+    await assertRejects(
+      () => withThrowawayDb(tw, ensureSchema),
+      SchemaVersionMismatch,
+    );
   } finally {
     await tw.drop();
   }

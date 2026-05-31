@@ -5,6 +5,7 @@
 export type { Db } from "./db.ts";
 export type {
   ClaimResult,
+  EnsureResult,
   EventRecord,
   FailedWorkItem,
   HealthCheck,
@@ -30,11 +31,14 @@ export { listFailedWorkItems, listWorkItemCounts } from "./work-items.ts";
 export { checkHealth } from "./health.ts";
 
 export {
+  bundledSchemaVersion,
+  ensureSchema,
   getSchemaVersion,
   getStatus,
   installSchema,
   SchemaAlreadyInstalled,
   schemaPresent,
+  SchemaVersionMismatch,
 } from "./schema.ts";
 
 export {

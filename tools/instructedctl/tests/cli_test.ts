@@ -5,7 +5,7 @@
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { buildCli } from "../src/cli/main.ts";
-import { capture, createThrowawayDb, uriFor } from "./support.ts";
+import { capture, createEmptyDb, createThrowawayDb, uriFor } from "./support.ts";
 
 async function runCli(
   uri: string,
@@ -38,6 +38,26 @@ Deno.test("cli: schema (default subcommand) prints status", async () => {
     const { stdout } = await runCli(uriFor(tw), ["schema"]);
     assertStringIncludes(stdout, "schema version");
     assertStringIncludes(stdout, "$all head");
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("cli: schema ensure installs on a fresh database", async () => {
+  const tw = await createEmptyDb();
+  try {
+    const { stdout } = await runCli(uriFor(tw), ["schema", "ensure"]);
+    assertStringIncludes(stdout, "installed successfully");
+  } finally {
+    await tw.drop();
+  }
+});
+
+Deno.test("cli: schema ensure is a no-op when already current", async () => {
+  const tw = await createThrowawayDb();
+  try {
+    const { stdout } = await runCli(uriFor(tw), ["schema", "ensure", "--json"]);
+    assertStringIncludes(stdout, '"already-current"');
   } finally {
     await tw.drop();
   }

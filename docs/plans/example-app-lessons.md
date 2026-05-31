@@ -154,13 +154,14 @@ there is no version-to-version migration mechanism.
   `instructedctl` README) and likely a `docs/decisions.md` entry on
   the migration model.
 
-**Status.** Open / known gap. For the example we provision fresh
-(`schema install`) and accept `--force` for re-provisioning; the
-lesson is the prompt to design real migration. The smaller,
-immediate slice — a **non-destructive idempotent init** ("ensure
-installed; no-op if present") — is a prerequisite for the example's
-CI/deploy lane (plan §9b, P2); full forward-only `migrate` is the
-larger follow-on.
+**Status.** Partially addressed. The **idempotent-init slice (P2)
+is done**: `instructedctl schema ensure` installs if absent,
+no-ops if already current, refuses on a version mismatch, and runs
+the install transactionally — the repeatable CI/deploy provisioning
+the example needs. The mismatch-refusal is deliberately the seam
+where full forward-only **`schema migrate`** will plug in; that
+larger follow-on remains open (still a `TODO`/`maybe-later`
+candidate, not a prerequisite).
 
 ---
 

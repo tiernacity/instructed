@@ -3,10 +3,12 @@
 
 import { Command } from "@cliffy/command";
 import {
+  ensureSchema,
   getSchemaVersion,
   getStatus,
   installSchema,
   SchemaAlreadyInstalled,
+  SchemaVersionMismatch,
 } from "../../core/index.ts";
 import { type GlobalOptions, runWith } from "../options.ts";
 import { printJson, printKeyValue } from "../output.ts";
@@ -76,6 +78,42 @@ export function schemaCommand() {
               console.error(
                 "Error: the 'instructed' schema already exists. " +
                   "Re-run with --force to drop and reinstall (this destroys all data).",
+              );
+              Deno.exit(1);
+            }
+            throw err;
+          }
+        }),
+    )
+    .command(
+      "ensure",
+      new Command()
+        .description(
+          "Idempotently install the schema: install if absent, no-op if " +
+            "already present at this version. Never destroys data. Safe to " +
+            "run on every deploy.",
+        )
+        .action(async (opts) => {
+          const g = opts as unknown as GlobalOptions;
+          try {
+            const result = await runWith(g, ensureSchema);
+            if (g.json) {
+              printJson(result);
+              return;
+            }
+            console.log(
+              result.action === "installed"
+                ? `instructed schema installed successfully ` +
+                  `(version ${result.schemaVersion})`
+                : `instructed schema already current ` +
+                  `(version ${result.schemaVersion}); nothing to do`,
+            );
+          } catch (err) {
+            if (err instanceof SchemaVersionMismatch) {
+              console.error(
+                `Error: ${err.message} ` +
+                  `Use 'schema install --force' to drop and reinstall ` +
+                  `(this destroys all data).`,
               );
               Deno.exit(1);
             }

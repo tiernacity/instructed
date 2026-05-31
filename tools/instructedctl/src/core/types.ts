@@ -18,6 +18,13 @@ export interface InstallResult {
   schemaVersion: string;
 }
 
+export interface EnsureResult {
+  // 'installed' on a fresh database; 'already-current' when the schema was
+  // already present at the version this tool installs (a no-op).
+  action: "installed" | "already-current";
+  schemaVersion: string;
+}
+
 export interface SubscriptionSummary {
   subscriptionName: string;
   streamUuid: string;

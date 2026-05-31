@@ -582,7 +582,7 @@ commit to it (TODO.md is the stably-numbered canonical backlog).
 | # | Improvement | Why first | Lesson | Priority |
 |---|---|---|---|---|
 | P1 | **SDK type/module namespacing** — ✅ **done (D-0028)**: namespace-import guidance in README + `concepts.md`; reserved key namespaced to `$instructed.snapshot_module_version` across SDK + contract docs + porting checklist; no sweeping renames. | Audit found structural typing already insulates the app from the worst (`Event`/`Command`) collision; the metadata key was the genuine residual. Suites green. | L-0001 | ~~Preferred-first~~ **Done** |
-| P2 | **Non-destructive, idempotent `instructedctl` init** — an "ensure installed; no-op if present; never destructive" mode (today `install` errors if present and `--force` drops all data). | Needed for repeatable CI/deploy provisioning of Neon. Distinct from — and far smaller than — full `schema migrate`. | L-0002 | **Preferred-first** (blocker for the deploy automation lane, task 6) |
+| P2 | **Non-destructive, idempotent `instructedctl` init** — ✅ **done**: new `schema ensure` (install if absent / no-op if current / refuse on version mismatch; transactional install). | Repeatable CI/deploy provisioning of Neon. Full `schema migrate` remains the larger L-0002 follow-on (not a prerequisite). | L-0002 | ~~Preferred-first~~ **Done** |
 
 > Full forward-only `schema migrate` (L-0002) is the larger
 > follow-on, **not** a prerequisite — the example provisions fresh.
@@ -591,7 +591,8 @@ commit to it (TODO.md is the stably-numbered canonical backlog).
 ## 10. Proposed task list (draft — sequence once scope slice is locked)
 
 0. **Prerequisites (§9b):** ~~P1 SDK namespacing~~ ✅ done (D-0028);
-   P2 idempotent `instructedctl` init still to do.
+   ~~P2 idempotent `instructedctl` init~~ ✅ done (`schema ensure`).
+   Both prerequisites cleared — ready for the domain-core build.
 1. Lock domain + model (this doc → "Decisions"). *(domain + MVP
    slice locked, §9.)*
 2. Write the domain core (aggregates, commands, events, PMs,
